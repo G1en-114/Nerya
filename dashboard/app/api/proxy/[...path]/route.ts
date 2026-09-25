@@ -335,7 +335,7 @@ async function forward(req: NextRequest, path: string[], method: string) {
     headers.set("Authorization", `Bearer ${SERVER_TOKEN}`);
   }
   const dashboardInternalToken = _dashboardInternalToken();
-  if (joined === "agent/run_turn_internal" && dashboardInternalToken) {
+  if ((joined === "agent/interactions/respond" || joined === "agent/run_turn_internal" || joined === "agent/commands" || joined.startsWith("agent/commands/")) && dashboardInternalToken) {
     headers.set("X-Nerya-Dashboard-Internal", dashboardInternalToken);
   }
   if (method === "GET" && isSSEPath(joined)) {
@@ -409,6 +409,14 @@ async function forward(req: NextRequest, path: string[], method: string) {
         trace: e?.stack || undefined,
       },
       { status: 502 }
+    );
+  }
+  // The browser hostname cannot identify the private desktop socket. Publish
+  // the same locality decision used above instead of letting the UI guess.
+  if (joined === "auth/status" && upstream.status === 200 && method !== "HEAD") {
+    return NextResponse.json(
+      { ...JSON.parse(upstream.body.toString("utf8")), local_access: isLocalRequest(req) },
+      { headers: { "Cache-Control": "no-store" } },
     );
   }
   const respHeaders = new Headers();

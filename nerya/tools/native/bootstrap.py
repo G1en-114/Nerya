@@ -55,6 +55,7 @@ from .agents import (
     subagent_run_handler,
     team_run_handler,
 )
+from .user_interaction import QUESTION_SCHEMA, PLAN_SCHEMA, interaction_handler
 from .agent_collaboration import PEERS_SCHEMA, MESSAGE_SCHEMA, collaboration_handler
 from .connectors import (
     CONNECTOR_LIST_SCHEMA,
@@ -287,6 +288,9 @@ class NativeToolDeps:
     active_strategy_id: Optional[str] = None
     """Strategy scoped to the current Agent turn, if any."""
 
+    active_workflow_id: Optional[str] = None
+    """Trusted workflow namespace inside the active strategy, if any."""
+
     active_session_id: Optional[str] = None
     """Agent session scoped to the current turn, if any."""
 
@@ -320,7 +324,7 @@ _READ_FILE_SCHEMA = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description": "Workspace-relative path."},
-        "offset": {"type": "integer", "minimum": 1, "description": "1-based start line."},
+        "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset; 0 reads from the first line."},
         "limit": {"type": "integer", "minimum": 1, "description": "Max lines to return."},
     },
     "required": ["path"],
@@ -781,6 +785,7 @@ def _wrap_memory_recall(deps: NativeToolDeps):
             actor_id=deps.active_actor_id or "default",
             session_id=deps.active_session_id or "",
             strategy_id=deps.active_strategy_id or "",
+            workflow_id=deps.active_workflow_id or "",
         )
         return memory_recall_handler(call, runtime=runtime)
 
@@ -797,6 +802,7 @@ def _wrap_memory_remember(deps: NativeToolDeps):
             actor_id=deps.active_actor_id or "default",
             session_id=deps.active_session_id or "",
             strategy_id=deps.active_strategy_id or "",
+            workflow_id=deps.active_workflow_id or "",
         )
         return memory_remember_handler(call, runtime=runtime)
 
@@ -805,7 +811,8 @@ def _wrap_memory_remember(deps: NativeToolDeps):
 
 def _wrap_journal_search(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return journal_search_handler(call, paths=deps.paths)
+        return journal_search_handler(call, paths=deps.paths, strategy_id=deps.active_strategy_id,
+                                      session_id=deps.active_session_id if deps.active_workflow_id else None)
 
     return handler
 
@@ -1016,14 +1023,16 @@ def _wrap_workspace_ui_propose(deps: NativeToolDeps):
 
 def _wrap_evolve_reflect(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return evolve_reflect_handler(call, config=deps.config)
+        return evolve_reflect_handler(call, config=deps.config, strategy_id=deps.active_strategy_id,
+                                      workflow_id=deps.active_workflow_id, session_id=deps.active_session_id,
+                                      actor_id=deps.active_actor_id)
 
     return handler
 
 
 def _wrap_evolve_proposals(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return evolve_proposals_handler(call, config=deps.config)
+        return evolve_proposals_handler(call, config=deps.config, strategy_id=deps.active_strategy_id)
 
     return handler
 
@@ -1841,6 +1850,12 @@ def register_native_tools(
             result_kind="shell",
             risk_classifier=classify_shell_risk,
         ),
+        make_native_descriptor(name="request_user_input", description="Ask the user a question and pause durably. Use choices for single or multiple selection, or omit choices for free text. Only the lead conversation can ask.",
+            input_schema=QUESTION_SCHEMA, handler=lambda call: interaction_handler(call,deps=deps,kind="question"),
+            risk=RiskLevel.READ, read_only=True, is_concurrency_safe=False, auto_approve=True),
+        make_native_descriptor(name="propose_plan", description="Save a plan with steps, deliverables and constraints for user acceptance. This pauses; acceptance never grants financial or tool permissions.",
+            input_schema=PLAN_SCHEMA, handler=lambda call: interaction_handler(call,deps=deps,kind="plan"),
+            risk=RiskLevel.READ, read_only=True, is_concurrency_safe=False, auto_approve=True),
         # ----- task tracking -----
         make_native_descriptor(
             name="todo_write",
@@ -1933,12 +1948,10 @@ def register_native_tools(
             name="web_fetch",
             description=(
                 "Fetch one HTTP(S) URL as readable markdown/text. Applies "
-                "Nerya web-safety checks plus a progressive fallback chain: "
+                "Nerya web-safety checks plus a progressive fetch chain: "
                 "direct fetch + local HTML extraction → Jina Reader → "
-                "configured headless browser engine (Lightpanda / "
-                "CloakBrowser / Obscura) → Scrapling stealth fetcher. Each "
-                "tier can be disabled with use_jina_fallback / "
-                "use_browser_fallback / use_scrapling_fallback."
+                "optional bounded extraction fallback. Interactive browsing "
+                "uses the managed Chromium browser Skill only."
             ),
             input_schema=WEB_FETCH_SCHEMA,
             handler=_wrap_web_fetch(deps),
@@ -2229,7 +2242,7 @@ def register_native_tools(
                 name="memory_recall",
                 description=(
                     "Recall query-relevant long-term memory visible to this "
-                    "session and its active strategy. Strategy and session "
+                    "session, workflow and active strategy. Strategy and session "
                     "identifiers are enforced by the runtime."
                 ),
                 input_schema=MEMORY_RECALL_SCHEMA,
@@ -2243,8 +2256,10 @@ def register_native_tools(
             make_native_descriptor(
                 name="memory_remember",
                 description=(
-                    "Append a timestamped note to the agent's long-term memory. "
-                    "Use sparingly — durable lessons only, not turn-by-turn chatter."
+                    "Save or correct a durable fact in the active memory domain. "
+                    "Use auto scope, recall before updating, reuse the fact key and "
+                    "pass expected_memory_id to avoid stale corrections. Strategy "
+                    "and workflow experience cannot be promoted to global memory."
                 ),
                 input_schema=MEMORY_REMEMBER_SCHEMA,
                 handler=_wrap_memory_remember(deps),
@@ -2393,13 +2408,11 @@ def register_native_tools(
             make_native_descriptor(
                 name="evolve_reflect",
                 description=(
-                    "Run a reflection tick over recent journals + risk + "
-                    "subagent telemetry and write a 'learning_update' "
-                    "proposal under evolution/proposals/. Use this for "
-                    "requests to review performance, reflect on failures, "
-                    "apply a lesson/experience, or find problems. Never "
-                    "mutates live config — proposals require operator "
-                    "approval."
+                    "Review evidence within the active strategy and recall its scoped memory. "
+                    "First call without a conclusion to get a frozen evidence packet; then "
+                    "submit a justified conclusion with its evidence_sha256 and stable key. "
+                    "Corrections should pass expected_memory_id. This updates memory only; "
+                    "strategy or policy changes still require a separate approved proposal."
                 ),
                 input_schema=EVOLVE_REFLECT_SCHEMA,
                 handler=_wrap_evolve_reflect(deps),
@@ -2691,8 +2704,8 @@ def register_native_tools(
                 make_native_descriptor(
                     name="role_list",
                     description=(
-                        "List every Agent Team role (workspace + "
-                        "defaults). Workspace roles override defaults "
+                        "List primary Agent Team roles and their optional profiles; "
+                        "include_profiles also lists specialist entries. Workspace roles override defaults "
                         "with the same name. This is a catalog, not a route "
                         "selector; inspect role_get when names overlap or "
                         "scope is unclear. For an explicit Agent Team request, "

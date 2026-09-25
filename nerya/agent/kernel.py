@@ -836,7 +836,8 @@ def _memory_actor_id_for_trigger(trigger: dict[str, Any]) -> str:
         or trigger.get("actor_id")
         or "default"
     )
-    return str(actor_id).strip() or "default"
+    from ..memory.scope import memory_actor
+    return memory_actor(actor_id)
 
 
 def _latest_prior_user_text(messages: list[dict[str, Any]]) -> str | None:
@@ -1690,6 +1691,12 @@ class AgentKernel:
             strategy_id,
             trigger,
         )
+        from ..memory.scope import bind_session_context, workflow_for_trigger
+
+        deps.active_workflow_id = bind_session_context(
+            self.config, session_id=session_id or "", actor_id=_memory_actor_id_for_trigger(trigger),
+            strategy_id=strategy_id or "", workflow_id=workflow_for_trigger(trigger, strategy_id=strategy_id or ""),
+        )
         deps.active_strategy_id = strategy_id
         deps.active_session_id = session_id
         deps.active_conversation_id = session_id or turn_id
@@ -1733,7 +1740,7 @@ class AgentKernel:
 
         from ..tools.capability_policy import normalise_tool_policy, tool_policy_allows
         tool_policy = normalise_tool_policy(self.config.get("agent.native.tool_policy"))
-        permission_context = PermissionContext(mode=self.permission_mode, tool_policy=tool_policy)
+        permission_context = PermissionContext(mode=self.permission_mode, tool_policy=tool_policy, plan_only=bool(self.config.get("agent.native.plan_only", False)))
         if strategy_order_auto_approve:
             permission_context.session_rules.append(
                 PermissionRule(
@@ -1763,22 +1770,7 @@ class AgentKernel:
             permission_context=permission_context,
             approval_resolver=approval_coordinator,
         )
-        # Bridge workspace-plugin waterfall listeners onto this turn's
-        # executor chokepoint. Skipped entirely when no plugin subscribed,
-        # so a plugin-free workspace pays zero overhead. Listener failures
-        # are contained inside the bridges — plugins cannot crash a turn.
-        if self._ext_host is not None:
-            bus = self._ext_host.bus
-            if bus.has_listeners("tools/pre-execute"):
-                executor.add_pre_hook(self._ext_host.tool_pre_hook())
-            if bus.has_listeners("tools/post-execute"):
-                executor.add_post_hook(self._ext_host.tool_post_hook())
-        # Child runtimes spawned by native delegation must share this exact
-        # per-turn executor so schema, permission, approval, risk, and hooks
-        # remain one policy boundary. ``NativeToolDeps`` is mutable because
-        # the executor is intentionally rebuilt for each turn's permission
-        # context.
-        deps.executor = executor
+        self.bind_tool_executor(executor)
         orchestrator = ToolOrchestrator(
             registry=self._registry,
             executor=executor,
@@ -1991,6 +1983,7 @@ class AgentKernel:
                             "detail": {
                                 "text": (str(block.get("text") or ""))[:4096],
                                 "summary": str(block.get("summary") or ""),
+                                **({"retry": block["retry"]} if isinstance(block.get("retry"), dict) else {}),
                             },
                         },
                         **common,
@@ -2676,6 +2669,13 @@ class AgentKernel:
             actions=actions,
             tool_trace=tool_trace,
             budget={
+                "input_tokens_total": outcome.input_tokens_total,
+                "output_tokens_total": outcome.output_tokens_total,
+                "prompt_tokens_last": outcome.prompt_tokens_last,
+                "context_window": outcome.context_window,
+                "compaction_count": outcome.compaction_count,
+                "reported_provider": (outcome.checkpoint.usage if outcome.checkpoint else {}).get("provider"),
+                "reported_model": (outcome.checkpoint.usage if outcome.checkpoint else {}).get("model"),
                 "iterations": outcome.iterations,
                 "tool_calls": outcome.tool_calls,
                 "errors": outcome.error_count,
@@ -3336,6 +3336,11 @@ class AgentKernel:
 
             con = connect(self.config.paths.db)
             repo = AgentSessionRepository(con)
+            from .history_mutations import has_message_history, is_session_deleted
+            if is_session_deleted(con, session_id):
+                con.close()
+                return []
+            canonical_history = has_message_history(con, session_id)
             session_row = repo.get_session(session_id) or {}
             session_meta = _json_obj(session_row.get("meta_json"))
             existing_checkpoint = checkpoint_from_session_meta(session_meta)
@@ -3477,6 +3482,8 @@ class AgentKernel:
                     out.append({"role": role, "content": content[:per_msg_cap]})
             if out:
                 return out[-max_pairs * 2:] if max_pairs > 0 else out
+            if canonical_history:
+                return []
         except Exception:
             _close_db_quietly(locals().get("con"))
             _LOG.debug("db prior chat history load failed", exc_info=True)
@@ -3571,6 +3578,7 @@ class AgentKernel:
                 ),
                 session_id=str(session_id or ""),
                 strategy_id=str(strategy_id or ""),
+                workflow_id=(getattr(self._deps, "active_workflow_id", "") or "") if self._deps else "",
             ).remember(
                 category="session_summary",
                 content=note,
@@ -3654,6 +3662,7 @@ class AgentKernel:
                 ),
                 session_id=str(session_id or ""),
                 strategy_id=str(strategy_id or ""),
+                workflow_id=(getattr(self._deps, "active_workflow_id", "") or "") if self._deps else "",
             ).remember(
                 category="learning",
                 content=nudge.message,
@@ -3703,6 +3712,23 @@ class AgentKernel:
                 )
             except Exception:
                 pass
+
+    def prepare_tools(self) -> tuple[ToolRegistry, NativeToolDeps]:
+        """Prepare the same native, connector and plugin tools for every caller."""
+        deps = self._ensure_registry()
+        return self._registry, deps
+
+    def bind_tool_executor(self, executor: NativeToolExecutor) -> None:
+        """Share plugin hooks and delegation boundaries with MCP / CLI callers."""
+        deps = self._ensure_registry()
+        if self._ext_host is not None:
+            bus = self._ext_host.bus
+            if bus.has_listeners("tools/pre-execute"):
+                executor.add_pre_hook(self._ext_host.tool_pre_hook())
+            if bus.has_listeners("tools/post-execute"):
+                executor.add_post_hook(self._ext_host.tool_post_hook())
+        deps.permission_mode = executor.permission_context.mode.value
+        deps.executor = executor
 
     def _ensure_registry(self) -> NativeToolDeps:
         if self._deps is not None:
@@ -3887,6 +3913,7 @@ class AgentKernel:
             actor_id=deps.active_actor_id or "default",
             session_id=str(session_id or ""),
             strategy_id=str(strategy_id or ""),
+            workflow_id=deps.active_workflow_id or "",
         )
         return runtime.context(
             query,
@@ -3960,9 +3987,11 @@ class AgentKernel:
             try:
                 from .session_profile import render_strategy_context_block
 
+                strategy_session = SessionStore(deps.paths.root).load(session_id) if session_id else None
                 strategy_context_block = render_strategy_context_block(
                     deps.paths,
                     strategy_id,
+                    proposal_id=strategy_session.meta.get("strategy_proposal_id") if strategy_session else None,
                     max_chars=int(
                         self.config.get(
                             "agent.native.strategy_context_chars", 4000

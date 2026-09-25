@@ -40,3 +40,10 @@
   .header[data-has-tabs="true"] .titleGlyph { display: none; }
   .title { font-size: 12px; }
 }
+
+@container task-topbar (max-width: 949px) {
+  .bar { min-height: 62px; height: auto; padding-top: 4px; padding-bottom: 4px; }
+  .identity { flex-wrap: wrap; }
+  .title { flex: 1; }
+  .status { display: inline-flex; flex-basis: 100%; min-width: 0; padding-left: 4px; }
+}

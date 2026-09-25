@@ -1,4 +1,12 @@
 "use client";
+import { Icon as NeryaGlyph } from "../icons";
+import { copy as i18nCopy } from "../../lib/i18n";
+
+import { StrategyWorkflowPanel } from "../workflows/StrategyWorkflowPanel";
+import { BacktestChart } from "../backtest/BacktestChart";
+import { WorkspaceFiles } from "./WorkspaceFiles";
+import { WorkspaceTerminal } from "./WorkspaceTerminal";
+import { useStrategyReports } from "./useStrategyReports";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -13,6 +21,7 @@ import { confirm as confirmDialog } from "../../lib/dialogs";
 import {
   ChatAttachment,
   ChatMessage,
+  UserMessage,
   ChatModelOption,
   ChatRunSettings,
   ChatThread,
@@ -33,7 +42,29 @@ import {
   uuid,
 } from "../../lib/chat";
 import { AssistantBubble, UserBubble } from "./ChatMessage";
+import { ExternalCallMessage } from "./ExternalCallMessage";
+import { ExternalSessionTimeline } from "./ExternalSessionTimeline";
+import { ConversationSourceIcon } from "./ConversationSourceIcon";
+import { isExternalSource, conversationTimestamp } from "../../lib/externalCalls";
+import { projectExternalThread } from "../../lib/externalNative";
 import { ChatInput } from "./ChatInput";
+import { useWorkbench } from "./useWorkbench";
+import { ConversationTimeline,hasReadingAnchor,clearReadingAnchor } from "./ConversationTimeline";
+import { ComposerContextSummary } from "./ComposerContextSummary";
+import { TaskProvenance } from "./TaskProvenance";
+import { CollaborationSummary } from "./CollaborationSummary";
+import { InteractionPanel } from "./InteractionPanel";
+import { RuntimeNotice } from "./RuntimeNotice";
+import { taskStatus } from "../../lib/workbench";
+import { useConversationCommands } from "./useConversationCommands";
+import { ConversationControls } from "./ConversationControls";
+import { ForkMessageDialog } from "./ForkMessageDialog";
+import { submitCommand, projectCommand, CommandClientError, commandErrorCode } from "../../lib/conversationCommands";
+import { commandErrorText } from "../../lib/commandCopy";
+import { useChatDraft } from "./useChatDraft";
+import { useMessageHistory } from "./useMessageHistory";
+import { HistoryDeleteDialog } from "./ChatHistoryActions";
+import { historyPending, historyRevision, HISTORY_CHANGED_EVENT } from "../../lib/historyClient";
 import { AgentStart } from "./AgentStart";
 import { AgentTaskBar, AgentWorkPanel } from "./AgentWorkspace";
 import { ChatTaskHeader } from "./ChatTaskHeader";
@@ -41,7 +72,14 @@ import { collectChatResults, type ChatResult } from "../../lib/chatResults";
 import { childResult } from "../../lib/agentConversation";
 import styles from "./ChatWorkbench.module.css";
 import { useAgentWork } from "./useAgentWork";
-import { WorkspaceCanvas, hasWorkspaceCanvas } from "./WorkspaceCanvas";
+import { collectThreadItems, WorkspaceResource, workspaceFileItem } from "./WorkspaceResourcePreview";
+import { ChatResultsPanel } from "./ChatResultsPanel";
+import { collectResearchVisuals, type ResearchInstrument } from "../../lib/researchVisuals";
+import type { ChartBlockShape } from "../../lib/chartBlock";
+import { ResearchVisualContext, ResearchInstrumentContext } from "./ResearchVisualContext";
+import { ResearchInstrumentPanel, ResearchCharts, ResearchChartTabs } from "./ResearchWorkspace";
+import { collectPortfolioArtifacts } from "../../lib/portfolioArtifacts";
+import { PortfolioSnapshot } from "../finance/PortfolioSnapshot";
 import { TaskDockHeader } from './TaskDockHeader';
 import { useTaskDock, type TaskDockTab } from './useTaskDock';
 import { BrowserWorkspacePanel } from './BrowserWorkspacePanel';
@@ -53,16 +91,12 @@ import { takeComposeDraftPayload } from "../../lib/composeDraft";
 import { FinanceDraftContext, appendReviewDraft } from "../finance/FinanceReview";
 import { toast } from "../../lib/dialogs";
 
-function parseTs(ts: string | undefined | null): number | null {
-  if (!ts) return null;
-  const v = typeof ts === "string" ? Date.parse(ts) : Number(ts);
-  return Number.isFinite(v) && v > 0 ? v : null;
+function parseTs(ts: string | number | undefined | null): number | null {
+  return conversationTimestamp(ts);
 }
 
 const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
 const SESSION_PAGE_SIZE = 20;
-const CANVAS_PANEL_KEY = "nerya.chat.canvasPanel.open.v1";
-const LIVE_EVENT_POLL_MS = 160;
 
 type PendingFirstMessage = {
   threadId: string;
@@ -71,24 +105,6 @@ type PendingFirstMessage = {
 };
 
 const pendingFirstMessages = new Map<string, PendingFirstMessage>();
-
-function loadCanvasPanelOpen(): boolean {
-  if (typeof window === "undefined" || typeof localStorage === "undefined") {
-    return true;
-  }
-  return localStorage.getItem(CANVAS_PANEL_KEY) !== "0";
-}
-
-function saveCanvasPanelOpen(open: boolean): void {
-  if (typeof window === "undefined" || typeof localStorage === "undefined") {
-    return;
-  }
-  try {
-    localStorage.setItem(CANVAS_PANEL_KEY, open ? "1" : "0");
-  } catch {
-    // Non-essential UI preference.
-  }
-}
 
 function loadDeletedSessionIds(): Set<string> {
   if (typeof window === "undefined" || typeof localStorage === "undefined") {
@@ -185,7 +201,9 @@ function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
       title: cached.title || sessionTitle(session, sid),
       created_ts: created || cached.created_ts,
       updated_ts: Math.max(updated, cached.updated_ts),
-      strategy_id: cached.strategy_id ?? session.strategy_id ?? undefined,
+      source: session.source ?? cached.source,
+      strategy_id: session.strategy_id ?? cached.strategy_id ?? undefined,
+      strategy_proposal_id: String(session.meta?.strategy_proposal_id || "") || undefined,
       message_count: Math.max(
         cached.message_count ?? 0,
         Number(session.message_count || 0),
@@ -195,6 +213,7 @@ function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
   }
   return {
     id: sid,
+    source: session.source,
     title: sessionTitle(session, sid),
     created_ts: created,
     updated_ts: updated,
@@ -205,6 +224,7 @@ function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
     transcript_loaded: false,
     backend_updated_ts: updated,
     strategy_id: session.strategy_id ?? undefined,
+    strategy_proposal_id: String(session.meta?.strategy_proposal_id || "") || undefined,
   };
 }
 
@@ -387,11 +407,21 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const router = useRouter();
   const t = useTranslations("chat");
   const tCommon = useTranslations("common");
-  const cancelledReply = t("cancelNotice");
   const [threads, setThreads] = useState<ChatThread[]>([]);
-  const [input, setInput] = useState("");
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const draftScope = sessionId || `new:${typeof window !== "undefined" ? window.location.search : ""}`;
+  const draft = useChatDraft(draftScope);
+  const { text: input, setText: setInput, attachments, setAttachments } = draft;
+  const [historyMore,setHistoryMore]=useState(false);
+  const [historyLimit,setHistoryLimit]=useState(60);
+  const [loadingOlder,setLoadingOlder]=useState(false);
   const [sending, setSending] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
+  const [pendingAutoSend,setPendingAutoSend]=useState<{text:string;attachments:ChatAttachment[]}|null>(null);
+  const [forkTarget, setForkTarget] = useState<{ sessionId:string; message:UserMessage } | null>(null);
+  const [externalSending, setExternalSending] = useState(false);
+  const externalSendBusy = useRef(false);
+  const externalMessageAttempt = useRef<{ sid: string; text: string; key: string } | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [missingSession, setMissingSession] = useState(false);
   // Distinguish "the fetch blew up" from "the session does not exist" so
@@ -401,17 +431,14 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const [settings, setSettings] = useState<ChatRunSettings>(
     DEFAULT_CHAT_RUN_SETTINGS,
   );
+  useEffect(()=>{if(draft.settings)setSettings(draft.settings);},[draft.settings]);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
   const [pendingApprovals, setPendingApprovals] = useState<Map<string, ApprovalCard>>(
     () => new Map(),
   );
   const [resolvingApprovalIds, setResolvingApprovalIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const abortRef = useRef<AbortController | null>(null);
-  const inFlightSessionRef = useRef<string | null>(null);
   const turnInFlightRef = useRef(false);
   const draftConsumedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -420,17 +447,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const lastScrollTop = useRef(0);
   const [readingHistory, setReadingHistory] = useState(false);
   function jumpToLatest() {
+    clearReadingAnchor(active?.id||"");
     followLatest.current = true; setReadingHistory(false);
     if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight });
   }
-  // Live-event poller handle. We track it so ``cancel`` and unmount
-  // can stop the timer; without this guard a fast click-and-cancel
-  // would leak a setInterval and keep hitting ``/agent/stream/events``
-  // forever.
-  const livePollRef = useRef<{
-    timer: ReturnType<typeof setInterval> | null;
-    stop: boolean;
-  }>({ timer: null, stop: false });
   const deletedSessionIdsRef = useRef<Set<string>>(new Set());
   const [sessionHasMore, setSessionHasMore] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -438,20 +458,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const [loadingTranscriptIds, setLoadingTranscriptIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const [canvasPanelOpen, setCanvasPanelOpen] = useState(true);
-
-  useEffect(() => {
-    return () => {
-      // Tear down any live-event poller on unmount so we don't keep
-      // hammering the bus after the user navigates away.
-      const handle = livePollRef.current;
-      handle.stop = true;
-      if (handle.timer) {
-        clearInterval(handle.timer);
-        handle.timer = null;
-      }
-    };
-  }, []);
 
   useEffect(() => {
     const loaded = selectInitialThreads(loadThreads(), {
@@ -461,7 +467,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     const savedSettings = loadRunSettings();
     deletedSessionIdsRef.current = loadDeletedSessionIds();
     setSettings(savedSettings);
-    setCanvasPanelOpen(loadCanvasPanelOpen());
     setThreads(loaded);
     setHydrated(true);
     void hydrateModelOptions();
@@ -500,7 +505,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     draftConsumedRef.current = true;
     setInput(draft.text);
     setAttachments(draft.attachments);
-    if (draft.autoSend) void runAgentTurn(draft.text, { visibleUser: true, attachments: draft.attachments });
+    if (draft.autoSend) setPendingAutoSend({text:draft.text,attachments:draft.attachments});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId]);
 
@@ -509,13 +514,21 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   useEffect(() => {
     if (!hydrated) return;
     return subscribeThreadsChanged(() => {
-      if (!sessionId || !loadDeletedSessionIds().has(sessionId)) return;
-      setThreads((prev) =>
-        prev.some((t) => t.id === sessionId)
-          ? prev.filter((t) => t.id !== sessionId)
-          : prev,
-      );
-      router.replace("/chat");
+      const deleted = loadDeletedSessionIds();
+      deletedSessionIdsRef.current = deleted;
+      const saved = new Map(loadThreads().map(thread => [thread.id, thread]));
+      setThreads(previous => {
+        let changed = false;
+        const next = previous.filter(thread => { if (deleted.has(thread.id)) { changed = true; return false; } return true; }).map(thread => {
+          const cached = saved.get(thread.id);
+          if (cached && cached.title !== thread.title && cached.updated_ts >= thread.updated_ts) {
+            changed = true; return { ...thread, title: cached.title };
+          }
+          return thread;
+        });
+        return changed ? next : previous;
+      });
+      if (sessionId && deleted.has(sessionId)) router.replace("/chat");
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId]);
@@ -686,11 +699,16 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
   async function buildImportedThread(
     sid: string,
-    sessionMeta: { created_at?: string; updated_at?: string; title?: string },
-    opts: { full?: boolean } = {},
+    sessionMeta: { created_at?: string; updated_at?: string; title?: string; source?: string },
+    opts: { full?: boolean; max_pairs?:number;anchor_message_id?:string } = {},
   ): Promise<ChatThread | null> {
-    const t = await clientApi.sessionTranscript(sid, opts);
-    if (!t?.ok || !Array.isArray(t.messages) || t.messages.length === 0) {
+    const external = isExternalSource(sessionMeta.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(sid);
+    const version = historyRevision(sid);
+    const t = await clientApi.sessionTranscript(sid, { ...opts, full: opts.full || external });
+    if(sid === sessionId)setHistoryMore(Boolean(t.has_more));
+    if (historyPending(sid) || version !== historyRevision(sid) || loadDeletedSessionIds().has(sid)) return null;
+    if (!t?.ok || !Array.isArray(t.messages)) {
+      if (t?.error && !/not found|session_deleted/.test(t.error)) throw new Error(t.error);
       return null;
     }
     const created = parseTs(t.created_at) ?? parseTs(sessionMeta.created_at) ?? Date.now();
@@ -703,10 +721,14 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         if (m.meta?.source === "approval_continue") continue;
         if (!firstUser) firstUser = m.content;
         msgs.push({
-          id: uuid(),
+          id: m.message_id || uuid(),
           role: "user",
+          command_id: typeof m.meta?.source_command_id === 'string' ? m.meta.source_command_id : undefined,
           ts,
           text: m.content,
+          edited_at: typeof m.meta?.edited_at === "number" ? m.meta.edited_at : undefined,
+          attachments: Array.isArray(m.meta?.attachments) ? m.meta.attachments as ChatAttachment[] : undefined,
+          external_request: m.meta?.external_request as UserMessage['external_request'],
           backend_message_id: m.message_id,
         });
       } else {
@@ -736,11 +758,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             }
           : { reply_text: m.content, turn_id: m.turn_id };
         msgs.push({
-          id: uuid(),
+          id: m.message_id || uuid(),
           role: "assistant",
+          command_id: typeof turn.command_id === 'string' ? turn.command_id : undefined,
+          command_revision: typeof m.meta?.command_revision === 'number' ? m.meta.command_revision : undefined,
+          execution_status: typeof m.meta?.execution_status === 'string' ? m.meta.execution_status : undefined,
+          error: typeof m.meta?.error === 'string' ? m.meta.error : typeof turn.error === 'string' ? turn.error : undefined,
           ts,
           turn,
-          elapsed_ms: 0,
+          elapsed_ms: turn.execution_elapsed_ms,
           backend_message_id: m.message_id,
         });
       }
@@ -748,6 +774,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     const savedTitle = t.title?.trim() || sessionMeta.title?.trim();
     const thread: ChatThread = {
       id: sid,
+      source: t.source || sessionMeta.source,
       title: savedTitle || deriveTitle(firstUser || `Session ${sid.slice(0, 8)}`),
       created_ts: created,
       updated_ts: updated,
@@ -758,8 +785,21 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       transcript_loaded: true,
       backend_updated_ts: updated,
       strategy_id: t.strategy_id ?? undefined,
+      strategy_proposal_id: t.strategy_proposal_id ?? undefined,
     };
     return cacheThreadTranscript(thread);
+  }
+
+  async function loadOlderHistory(){
+    if(!active||loadingOlder)return;
+    setLoadingOlder(true);
+    const limit=historyLimit+100;
+    const root=scrollRef.current, height=root?.scrollHeight||0,top=root?.scrollTop||0;
+    followLatest.current=false;
+    try {
+      const built=await buildImportedThread(active.id,{title:active.title,source:active.source},{max_pairs:limit});
+      if(built){setThreads(previous=>upsertThread(previous,mergeAuthoritativeThread(previous.find(t=>t.id===active.id),built)));setHistoryLimit(limit);requestAnimationFrame(()=>{if(root)root.scrollTop=top+root.scrollHeight-height;});}
+    } finally{setLoadingOlder(false);}
   }
 
   async function hydrateBackendSessions(
@@ -855,15 +895,111 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     saveRunSettings(settings);
   }, [settings, hydrated]);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    saveCanvasPanelOpen(canvasPanelOpen);
-  }, [canvasPanelOpen, hydrated]);
+
 
   const active = useMemo(
-    () => (sessionId ? threads.find((t) => t.id === sessionId) || null : null),
+    () => projectExternalThread(sessionId ? threads.find((t) => t.id === sessionId) || null : null),
     [threads, sessionId],
   );
+  const externalView = isExternalSource(active?.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(sessionId || '');
+  const workbench = useWorkbench(sessionId);
+  const commandEngine = useConversationCommands(hydrated && !externalView ? sessionId : undefined, (command, events) => {
+    setThreads(previous => {
+      const existing = previous.find(thread => thread.id === command.session_id)
+        || { ...newThread(command.input), id: command.session_id };
+      return upsertThread(previous, projectCommand(existing, command, events));
+    });
+  });
+  useEffect(()=>{
+    if(!pendingAutoSend||workbench.connection!=="online")return;
+    const next=pendingAutoSend;setPendingAutoSend(null);
+    void runAgentTurn(next.text,{visibleUser:true,attachments:next.attachments});
+    // Pending first input waits for runtime capability confirmation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[pendingAutoSend,workbench.connection]);
+
+  const commandRunning = Boolean(commandEngine.active);
+  useEffect(() => { if (!externalView) setSending(commandRunning); }, [externalView, commandRunning]);
+  // Tunnel writes from a separate process, so the in-process event bus is not
+  // authoritative. Poll persisted external threads without replacing live chat.
+  const externalSnapshot = useRef({ threads, sessionId });
+  externalSnapshot.current = { threads, sessionId };
+  useEffect(() => {
+    if (!hydrated) return;
+    let stopped = false;
+    let busy = false;
+    const loaded = new Map<string, { version: number; at: number }>();
+    async function refreshExternal() {
+      if (stopped || busy || document.visibilityState === "hidden") return;
+      busy = true;
+      try {
+        const response = await clientApi.sessionList(undefined, 100);
+        if (stopped) return;
+        const sessions = (response.sessions || []).filter(s => isExternalSource(s.source));
+        const snapshot = externalSnapshot.current;
+        const selected = snapshot.threads.find(t => t.id === snapshot.sessionId);
+        if (snapshot.sessionId && !sessions.some(s => s.session_id === snapshot.sessionId)
+            && (isExternalSource(selected?.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(snapshot.sessionId))) {
+          const row = await clientApi.sessionGet(snapshot.sessionId);
+          if ("session_id" in row && isExternalSource(row.source)) sessions.push(row);
+        }
+        let transcript: ChatThread | null = null;
+        const selectedMeta = sessions.find(s => s.session_id === snapshot.sessionId);
+        if (selectedMeta && !loadDeletedSessionIds().has(selectedMeta.session_id)) {
+          const version = parseTs(selectedMeta.updated_at) || 0;
+          const previous = loaded.get(selectedMeta.session_id);
+          if (!previous || version > previous.version || Date.now() - previous.at > 15_000) {
+            transcript = await buildImportedThread(selectedMeta.session_id, {
+              ...selectedMeta, title: sessionTitle(selectedMeta, selectedMeta.session_id),
+            }, { full: true });
+            if (transcript) loaded.set(transcript.id, { version, at: Date.now() });
+          }
+        }
+        if (stopped) return;
+        const tombstones = loadDeletedSessionIds();
+        setThreads(prev => {
+          const byId = new Map(prev.map(t => [t.id, t]));
+          let changed = false;
+          for (const meta of sessions) {
+            if (tombstones.has(meta.session_id)) continue;
+            const current = byId.get(meta.session_id);
+            if (threadHasUnpersistedMessages(current)) continue;
+            const next = threadFromSessionMetadata(meta);
+            if (!next) continue;
+            if (!current) {
+              byId.set(next.id, next);
+              changed = true;
+            } else if (next.updated_ts > current.updated_ts || current.source !== meta.source || next.title !== current.title) {
+              byId.set(next.id, { ...current, source: meta.source, title: sessionTitle(meta, next.id),
+                updated_ts: Math.max(current.updated_ts, next.updated_ts), message_count: next.message_count });
+              changed = true;
+            }
+          }
+          if (transcript && !tombstones.has(transcript.id)) {
+            const current = byId.get(transcript.id);
+            if (!threadHasUnpersistedMessages(current) && (!current || transcript.updated_ts >= (current.backend_updated_ts || 0))) {
+              byId.set(transcript.id, mergeAuthoritativeThread(current, transcript));
+              changed = true;
+            }
+          }
+          return changed ? sortThreadsByUpdated([...byId.values()]) : prev;
+        });
+      } catch {
+        // Keep the last successful trace on transient network errors. Never retry
+        // a business tool from a history viewer.
+      } finally {
+        busy = false;
+      }
+    }
+    const tick = () => { void refreshExternal(); };
+    const timer = setInterval(tick, 2500);
+    tick();
+    document.addEventListener("visibilitychange", tick);
+    return () => { stopped = true; clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
+    // The snapshot ref supplies the current route and local thread state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated]);
+
   const activeApprovalIds = useMemo(
     () => pendingApprovalIdsForThread(active, pendingApprovals),
     [active, pendingApprovals],
@@ -879,15 +1015,21 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     [active],
   );
   const awaitingApproval = activeApprovalIds.length > 0;
+  const history = useMessageHistory({ thread: active, disabled: sending || awaitingApproval || externalView,
+    onCommit: (sid, mid, patch) => updateThread(sid, thread => {
+      const messages = patch ? thread.messages.map(message => message.id === mid && message.role === "user" ? { ...message, ...patch } : message)
+        : thread.messages.filter(message => message.id !== mid);
+      return { ...thread, messages, message_count: messages.length, transcript_loaded: true };
+    }) });
+  const th = useTranslations("chatHistory");
   const activeTranscriptLoading = Boolean(
     sessionId && loadingTranscriptIds.has(sessionId),
   );
   const agentWork = useAgentWork(active);
   const zh = useLocale().startsWith("zh");
-  const [resultFocus, setResultFocus] = useState({ session: "", id: "", count: 0 });
   const results = useMemo(() => collectChatResults(active), [active]);
   const { layoutRef, width: canvasWidth, compact, changeWidth, separatorProps } = useCanvasLayout(hydrated);
-  const [manualBrowser, setManualBrowser] = useState<Record<string, boolean>>({});
+
   const browserOperations = useMemo(() => {
     const rows = (active?.messages || []).flatMap(message => {
       if (message.role !== 'assistant') return [];
@@ -911,20 +1053,54 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     setInspectedChildResult({ session: active?.id || "", result });
     openResult(result.id);
   }
-  const hasBrowser = browserOperations.length > 0 || !!manualBrowser[active?.id || ''];
-  const canvasResources = useMemo(() => hasWorkspaceCanvas(active), [active]);
-  const hasCanvas = results.length > 0 || agentResults.length > 0 || canvasResources;
-  const dockTabs = [
-    ...(hasBrowser ? [{ id: 'browser' as TaskDockTab, label: zh ? '浏览器' : 'Browser' }] : []),
-    ...(hasCanvas ? [{ id: 'canvas' as TaskDockTab, label: 'Canvas' }] : []),
-    ...(agentWork.rows.length ? [{ id: 'agents' as TaskDockTab, label: zh ? '成员' : 'Agents', compactLabel: zh ? '成员' : 'Agents', meta: <span className="text-[11px] tabular-nums">{agentWork.rows.length}</span> }] : []),
+  const strategyId = active?.strategy_id || (hydrated && !sessionId ? strategyIdFromLocation() : '');
+  const strategyProposal = active?.strategy_proposal_id || (hydrated && !sessionId ? new URLSearchParams(window.location.search).get('proposal') : null);
+  const strategyReports = useStrategyReports(strategyId, (active?.messages.length || 0) + results.length);
+  const [strategyDirty, setStrategyDirty] = useState(false);
+  const hasBrowser = browserOperations.length > 0;
+  const resources = useMemo(() => collectThreadItems(active), [active]);
+  const snapshots = useMemo(() => collectPortfolioArtifacts(active), [active]);
+  const allResults = [...results, ...agentResults];
+  function resultTabId(result: ChatResult): TaskDockTab {
+    const message = active?.messages.find(message => message.id === result.id);
+    return ('result:' + (result.agentId ? result.id : message?.backend_message_id || result.turnId || result.id)) as TaskDockTab;
+  }
+  const research = useMemo(() => collectResearchVisuals(active), [active]);
+  const researchSession = active?.id || sessionId || ('new:' + strategyId);
+  const [researchFocus, setResearchFocus] = useState<{ session: string; chartId: string } | null>(null);
+  const showResearch = researchFocus?.session === researchSession && research.studies.length > 0;
+  const [instrumentFocus, setInstrumentFocus] = useState<{ session: string; instrument: ResearchInstrument; charts: ChartBlockShape[] } | null>(null);
+  const focusedInstrument = instrumentFocus?.session === researchSession ? instrumentFocus : null;
+  const detailInstruments = [...new Map([...research.instruments, ...(focusedInstrument ? [focusedInstrument.instrument] : [])].map(item => [item.id, item])).values()];
+  const instrumentTabs = detailInstruments.map(item => ({ id: ('instrument:' + item.id) as TaskDockTab, label: item.market }));
+  const automaticTabs = [
+    ...(strategyId ? [{ id: 'strategy' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.001") }] : []),
+    ...strategyReports.runs.map(run => ({ id: ('backtest:' + run.ts) as TaskDockTab, label: (i18nCopy(zh, "copy.components_chat_ChatView.002")) + run.ts })),
+    ...(hasBrowser ? [{ id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.003") }] : []),
+    ...allResults.map((result, index) => ({ id: resultTabId(result), label: i18nCopy(zh, "copy.components_chat_ChatView.017", { index: index + 1, title: result.title }) })),
+    ...resources.map(item => ({ id: ('resource:' + item.id) as TaskDockTab, label: item.path?.split('/').pop() || item.title })),
+    ...snapshots.map((item, index) => ({ id: item.id as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.018", { index: index + 1 }) })),
+    ...(agentWork.rows.length ? [{ id: 'agents' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.004") }] : []),
   ];
-  const taskDock = useTaskDock(active?.id || '', dockTabs.map(tab => tab.id));
+  const toolTabs = [{ id: 'files' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.005") }, { id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.006") }, { id: 'terminal' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.007") }];
+  const dockChoices = [...new Map([...toolTabs, ...automaticTabs, ...instrumentTabs].map(tab => [tab.id, tab])).values()];
+  // On compact layouts the workspace replaces, rather than sits beside, chat.
+  // Discovering old results must not navigate away from the conversation.
+  const taskDock = useTaskDock(researchSession, [...automaticTabs, ...instrumentTabs].map(tab => tab.id), automaticTabs.map(tab => tab.id), true);
+  const fileTabKey = JSON.stringify(taskDock.tabs.filter(id => id.startsWith('file:')));
+  const openedFiles = useMemo(() => (JSON.parse(fileTabKey) as string[]).map(id => ({ id, item: workspaceFileItem(id.slice(5)) })), [fileTabKey]);
+  const dockTabs = taskDock.tabs.flatMap(id => { const tab = dockChoices.find(tab => tab.id === id); return tab ? [tab] : id.startsWith('file:') ? [{ id, label: id.slice(5).split('/').pop() || id.slice(5) }] : []; });
+  useEffect(() => {
+    if (!hydrated || new URLSearchParams(window.location.search).get('panel') !== 'browser') return;
+    taskDock.select('browser');
+    const url = new URL(window.location.href); url.searchParams.delete('panel');
+    window.history.replaceState(window.history.state, '', url);
+  }, [hydrated, taskDock]);
   const canvasVisible = taskDock.open;
   const fullCanvas = taskDock.expanded;
   const hideSource = canvasVisible && (compact || fullCanvas);
   const canvasTrigger = useRef<HTMLElement | null>(null);
-  const focusDock = (tab: string) => requestAnimationFrame(() => document.getElementById(`task-dock-tab-${tab}`)?.focus({ preventScroll: true }));
+  const focusDock = (tab: string) => requestAnimationFrame(() => (document.getElementById("task-dock-tab-" + tab) || document.getElementById("task-dock-add"))?.focus({ preventScroll: true }));
   function closeCanvas() {
     taskDock.close();
     requestAnimationFrame(() => {
@@ -934,25 +1110,46 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     });
   }
   function selectWorkspace(tab: string, focus = false) {
-    if (tab === 'conversation') { closeCanvas(); return; }
-    if (!dockTabs.some(item => item.id === tab)) return;
+    if (tab === 'conversation') { setResearchFocus(null); closeCanvas(); return; }
+    if (!dockChoices.some(item => item.id === tab) && !taskDock.tabs.includes(tab as TaskDockTab)) return;
     if (!canvasVisible) canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     taskDock.select(tab as TaskDockTab);
     if (focus) focusDock(tab);
   }
-  function openDock() { selectWorkspace('canvas', true); }
+  function openResearchCharts(chartId = '') {
+    setResearchFocus({ session: researchSession, chartId });
+    if (compact || fullCanvas) closeCanvas();
+  }
+  function openResearchInstrument(instrument: ResearchInstrument, charts: ChartBlockShape[]) {
+    canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setInstrumentFocus({ session: researchSession, instrument, charts });
+    taskDock.select(('instrument:' + instrument.id) as TaskDockTab);
+    focusDock('instrument:' + instrument.id);
+  }
+  function openResearchVisual(block: ChartBlockShape) {
+    const instrument = research.instruments.find(item => item.chartIds.includes(block.chart_id));
+    if (instrument) selectWorkspace('instrument:' + instrument.id, true);
+    else openResearchCharts(block.chart_id);
+  }
+  function openDock() { taskDock.show(); focusDock(taskDock.selected); }
   function openBrowserDock() {
     canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setManualBrowser(old => ({ ...old, [active?.id || '']: true }));
     taskDock.select('browser');
     focusDock('browser');
   }
+  async function removeDockTab(id: string) {
+    if (id === 'strategy' && strategyDirty && !await confirmDialog({ message: i18nCopy(zh, "copy.components_chat_ChatView.008"), tone: 'warning' })) return;
+    taskDock.remove(id as TaskDockTab);
+    if (id === 'strategy') setStrategyDirty(false);
+    requestAnimationFrame(() => (document.querySelector<HTMLElement>('#task-workspace [role="tab"][aria-selected="true"]') || document.getElementById('task-dock-add'))?.focus());
+  }
   function toggleCanvasSize() { taskDock.toggleSize(); }
   function openResult(id: string) {
-    setResultFocus((old) => ({ session: active?.id || "", id, count: old.count + 1 }));
     canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    taskDock.select('canvas');
-    focusDock('canvas');
+    const result = allResults.find(result => result.id === id);
+    const tab = result ? resultTabId(result) : ('result:' + id) as TaskDockTab;
+    taskDock.select(tab);
+    focusDock(tab);
   }
   function revealResult(id: string) {
     const child = agentResults.find((r) => r.id === id);
@@ -964,6 +1161,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     followLatest.current = false; setReadingHistory(true);
     selectWorkspace("conversation");
     requestAnimationFrame(() => {
+      const message=active?.messages.find(m=>m.id===id);
+      const turnId=message?.role==="assistant"?message.turn?.turn_id:undefined;
+      const placeholder=turnId?document.getElementById("turn-"+encodeURIComponent(turnId)):null;
+      placeholder?.scrollIntoView({block:"start"});
       const article = Array.from(scrollRef.current?.querySelectorAll<HTMLElement>("[data-turn-id]") || []).find((el) => el.dataset.turnId === id);
       article?.scrollIntoView({ block: "start" });
       article?.focus({ preventScroll: true });
@@ -998,7 +1199,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       return;
     }
     const minUpdated = active?.backend_updated_ts || active?.updated_ts || 0;
-    if (active?.transcript_loaded && active.messages.length > 0) {
+    if (active?.transcript_loaded) {
       setMissingSession(false);
       return;
     }
@@ -1026,7 +1227,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             updated_at: isoFromMs(active?.updated_ts),
             title: active?.title,
           },
-          { full: true },
+          { max_pairs:historyLimit,anchor_message_id:new URLSearchParams(window.location.search).get("message")||undefined },
         );
         if (cancelled) return;
         if (built) {
@@ -1081,15 +1282,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     }
     if (!pending || pending.threadId !== sessionId) return;
     sessionStorage.removeItem("nerya.chat.pendingFirstMessage");
-    void runAgentTurn(pending.text, {
-      visibleUser: true,
-      attachments: pending.attachments ?? [],
-    });
+    // Legacy pre-command handoffs carry no receipt ID. Restore them as drafts,
+    // never automatically replay an input whose admission cannot be proven.
+    setInput(pending.text);
+    setAttachments(pending.attachments ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId]);
 
   useEffect(() => {
-    followLatest.current = true; lastScrollTop.current = 0; setReadingHistory(false);
+    followLatest.current = !hasReadingAnchor(active?.id||""); lastScrollTop.current = 0; setReadingHistory(!followLatest.current);
   }, [active?.id]);
 
   useEffect(() => {
@@ -1132,7 +1333,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   function createThread(seedText?: string, id?: string): ChatThread {
     const minted = id ? { ...newThread(seedText), id } : newThread(seedText);
     const strategyId = strategyIdFromLocation();
-    const t = strategyId ? { ...minted, strategy_id: strategyId } : minted;
+    const t = strategyId ? { ...minted, strategy_id: strategyId, strategy_proposal_id: new URLSearchParams(window.location.search).get("proposal") } : minted;
     setThreads((prev) => upsertThread(prev, t));
     return t;
   }
@@ -1141,117 +1342,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     setThreads((prev) =>
       prev.map((t) => (t.id === id ? { ...fn(t), updated_ts: Date.now() } : t))
     );
-  }
-
-  function deleteThread(id: string) {
-    deletedSessionIdsRef.current = rememberDeletedSession(id);
-    setThreads((prev) => {
-      const next = prev.filter((t) => t.id !== id);
-      if (sessionId === id) {
-        setEditingMessageId(null);
-        setEditDraft("");
-        const fallback = next[0]?.id;
-        if (fallback) router.replace(`/chat/${fallback}`);
-        else router.replace("/chat");
-      }
-      return next;
-    });
-    void clientApi.sessionDelete(id).catch(() => {
-      // Keep the local tombstone so a transient backend failure does not
-      // immediately re-import the session the operator just deleted.
-    });
-  }
-
-  function messageText(message: ChatMessage): string {
-    return message.role === "user"
-      ? message.text
-      : message.turn?.reply_text || message.turn?.final_text || "";
-  }
-
-  function startEditMessage(messageId: string) {
-    const thread = active;
-    if (!thread) return;
-    const message = thread.messages.find((m) => m.id === messageId);
-    if (!message) return;
-    setEditingMessageId(messageId);
-    setEditDraft(messageText(message));
-  }
-
-  function cancelEditMessage() {
-    setEditingMessageId(null);
-    setEditDraft("");
-  }
-
-  async function saveEditedMessage(messageId: string) {
-    const thread = active;
-    if (!thread) return;
-    const message = thread.messages.find((m) => m.id === messageId);
-    if (!message) return;
-    const clean = editDraft.trim();
-    if (!clean) return;
-
-    updateThread(thread.id, (t) => ({
-      ...t,
-      messages: t.messages.map((m) => {
-        if (m.id !== messageId) return m;
-        if (m.role === "user") return { ...m, text: clean };
-        return {
-          ...m,
-          turn: {
-            ...(m.turn ?? {}),
-            reply_text: clean,
-            final_text: clean,
-          },
-        };
-      }),
-    }));
-    setEditingMessageId(null);
-    setEditDraft("");
-
-    const backendId = message.backend_message_id;
-    if (backendId) {
-      try {
-        await clientApi.sessionMessageEdit({
-          session_id: thread.id,
-          message_id: backendId,
-          content: clean,
-        });
-      } catch {
-        // Keep the local edit; the next backend refresh may reconcile it.
-      }
-    }
-  }
-
-  async function deleteMessage(messageId: string) {
-    const thread = active;
-    if (!thread) return;
-    const message = thread.messages.find((m) => m.id === messageId);
-    if (!message) return;
-    const okDelete = await confirmDialog({
-      title: t("deleteMessage"),
-      message: t("confirmDeleteMessage"),
-      tone: "danger",
-    });
-    if (!okDelete) return;
-    if (editingMessageId === messageId) {
-      setEditingMessageId(null);
-      setEditDraft("");
-    }
-    updateThread(thread.id, (t) => ({
-      ...t,
-      messages: t.messages.filter((m) => m.id !== messageId),
-    }));
-    const backendId = message.backend_message_id;
-    if (backendId) {
-      try {
-        await clientApi.sessionMessageDelete({
-          session_id: thread.id,
-          message_id: backendId,
-        });
-      } catch {
-        // Local delete is still useful for the current dashboard view.
-      }
-    }
   }
 
   async function resolveApproval(callbackData: string) {
@@ -1292,7 +1382,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         });
       }
       await refreshApprovals();
-      if (res?.ok && action === "approve" && state === "approved") {
+      if (res?.ok && action === "approve" && state === "approved" && !isExternalSource(active?.source)) {
         await runAgentTurn(
           resolvedAutoResumedFinancialApproval
             ? `Financial approval ${approvalId} was approved. The frozen financial action is resumed automatically by the approval handler. Do not submit or retry the order, trade intent, or wallet transaction. Query the existing approval, order, or transaction status, report the resulting state, and continue the original task from that result.`
@@ -1320,444 +1410,117 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     }
   }
 
-  async function runAgentTurn(
-    text: string,
-    options: {
-      visibleUser?: boolean;
-      attachments?: ChatAttachment[];
-      source?: string;
-      kind?: string;
-      channel?: string;
-      payloadExtra?: Record<string, unknown>;
-      /** Retry replay: the failed assistant bubble to replace. */
-      replaceFailedId?: string;
-    } = {},
-  ) {
-    const clean = text.trim();
-    const outgoingAttachments = options.attachments ?? [];
-    const requestAttachments = outgoingAttachments.map(attachmentForRequest);
-    if (!clean && !outgoingAttachments.length) return;
-    const approvalContinue =
-      options.source === "approval_continue" ||
-      options.kind === "approval.continue";
+  async function runAgentTurn(text: string, options: {
+    visibleUser?: boolean; attachments?: ChatAttachment[]; source?: string; kind?: string;
+    channel?: string; payloadExtra?: Record<string, unknown>; resumeTurnId?: string;
+    commandKind?: "send" | "resume" | "guide";
+  } = {}) {
+    const clean = text.trim(), outgoing = options.attachments ?? [];
+    if (workbench.connection !== "online") return;
+    if (commandEngine.pending.length) { toast({ tone:'warn',message:commandErrorText('delivery_unconfirmed',zh) }); return; }
+    if ((!clean && !outgoing.length) || turnInFlightRef.current || history.pending || history.edit) return;
+    const approvalContinue = options.source === "approval_continue" || options.kind === "approval.continue";
     if (awaitingApproval && !approvalContinue) return;
-    if (turnInFlightRef.current) return;
-    const visibleUser = options.visibleUser !== false;
-
-    let thread = active;
-    if (!thread) {
-      thread = createThread(
-        clean || outgoingAttachments[0]?.name || "Attached file",
-        sessionId,
-      );
-      setMissingSession(false);
-    }
-    const threadId = thread.id;
-
-    // When we entered at `/chat` with no sessionId, we've just minted a
-    // thread id — move the browser to `/chat/[id]` via the sibling page.
-    // We stash the pending message in sessionStorage so the remounted
-    // ChatView continues the turn, because Next App Router unmounts this
-    // component on route change.
-    if (!sessionId && visibleUser) {
-      pendingFirstMessages.set(threadId, {
-        threadId,
-        text: clean,
-        attachments: outgoingAttachments,
-      });
-      let staged = false;
-      try {
-        sessionStorage.setItem(
-          "nerya.chat.pendingFirstMessage",
-          JSON.stringify({
-            threadId,
-            text: clean,
-            attachments: requestAttachments,
-          }),
-        );
-        staged = true;
-      } catch {
-        // sessionStorage may be disabled; fall back to in-place send.
-      }
-      if (staged) {
-        turnInFlightRef.current = true;
-        setSending(true);
-        // Persist the freshly-created thread now so the next mount sees it.
-        saveThreads(upsertThread(loadThreads(), thread));
-        router.replace(`/chat/${threadId}`);
-        return;
-      }
-    }
-    turnInFlightRef.current = true;
-
-    const userMsgId = uuid();
-    const assistantId = uuid();
-    const startedMs = Date.now();
-    const userMessage = {
-      id: userMsgId,
-      role: "user" as const,
-      ts: Date.now(),
-      text: clean,
-      attachments: outgoingAttachments,
+    if (workbench.view?.pending_interactions.length) return;
+    if (active && historyPending(active.id)) return;
+    const thread = active || createThread(clean || outgoing[0]?.name || "Conversation", sessionId);
+    const sid = thread.id, originRoute = sessionId;
+    const commandKind = options.commandKind || (options.resumeTurnId ? "resume" : "send");
+    const body: Record<string, unknown> = {
+      source: options.source || "user_chat", kind: options.kind || "user.chat", target: "main",
+      payload: { text: clean || "Please review the attached files.", channel: options.channel || "dashboard",
+        attachments: outgoing.map(attachmentForRequest), ...(options.payloadExtra ?? {}) },
+      ...(thread.strategy_id ? { strategy_id: thread.strategy_id, strategy_proposal_id: thread.strategy_proposal_id || undefined } : {}),
+      reasoning_effort: settings.reasoning_effort === "off" ? undefined : settings.reasoning_effort,
+      reasoning_summary: settings.reasoning_effort === "off" ? undefined : "auto",
+      work_mode: settings.work_mode || "execute",
+      permission_mode: settings.permission_mode, model_tier: settings.model_tier || undefined,
+      model_provider: settings.model_provider || undefined, model_id: settings.model_id || undefined,
+      model_context_window: settings.model_context_window, max_iterations: settings.max_iterations,
+      max_total_tool_calls: settings.max_total_tool_calls, max_wall_seconds: settings.max_wall_seconds,
+      evidence_contract: settings.evidence_contract,
+      ...(options.resumeTurnId ? { resume_turn_id: options.resumeTurnId, continuation_feedback: clean } : {}),
     };
-    const assistantMessage = {
-      id: assistantId,
-      role: "assistant" as const,
-      ts: Date.now(),
-      loading: true,
-      started_ms: startedMs,
-    };
-
-    updateThread(threadId, (t) => ({
-      ...t,
-      imported: false,
-      title:
-        t.messages.length === 0 && visibleUser
-          ? deriveTitle(clean || outgoingAttachments[0]?.name || "Attached file")
-          : t.title,
-      messages: visibleUser
-        ? [...t.messages, userMessage, assistantMessage]
-        : [
-            // Retry replay: drop the failed assistant bubble in the same
-            // commit that appends the new loading one. The error card is
-            // replaced (never duplicated) and only after the replay has
-            // been admitted past the in-flight / approval guards above —
-            // if a guard bails, the failed turn stays on screen.
-            ...t.messages.filter((m) => m.id !== options.replaceFailedId),
-            assistantMessage,
-          ],
-    }));
-
-    if (visibleUser) {
-      setInput("");
-      setAttachments([]);
-    }
-    setSending(true);
-
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    inFlightSessionRef.current = threadId;
-
-    // Anchor the live-events cursor *before* the turn fires. We use
-    // the bus's current ``latest_seq`` so we ignore everything that
-    // happened in earlier turns (otherwise the freshest message
-    // would inherit a stale "approval requested" event from
-    // five turns ago and look perpetually pending).
-    let cursor = 0;
+    turnInFlightRef.current = true; setSubmitting(true);
+    let keepRoute = false;
+    // This cache is navigation scaffolding only, never evidence of admission.
+    if (!active) saveThreads(upsertThread(loadThreads(), thread));
     try {
-      const head = await clientApi.streamEvents(undefined, {
-        limit: 1,
-        session_id: threadId,
+      const command = await submitCommand(sid, commandKind, body);
+      keepRoute = true;
+      setThreads(previous => {
+        const current = previous.find(item => item.id === sid) || thread;
+        return upsertThread(previous, projectCommand(current, command));
       });
-      cursor =
-        typeof head?.latest_seq === "number"
-          ? head.latest_seq
-          : typeof head?.cursor === "number"
-          ? head.cursor
-          : 0;
-    } catch {
-      // Ignore — the poller below will simply fetch from the start.
-    }
-
-    // Reset the per-turn poller state so a previous turn's stop flag
-    // doesn't terminate this one immediately.
-    livePollRef.current.stop = false;
-    if (livePollRef.current.timer) {
-      clearInterval(livePollRef.current.timer);
-      livePollRef.current.timer = null;
-    }
-
-    const handle = livePollRef.current;
-
-    let pollInFlight: Promise<void> | null = null;
-
-    async function pollOnce(): Promise<void> {
-      if (handle.stop) return;
-      if (pollInFlight) {
-        await pollInFlight;
-        return;
+      if (externalSnapshot.current.sessionId === originRoute && options.visibleUser !== false) {
+        setInput(value => value.trim() === clean ? "" : value);
+        const ids = new Set(outgoing.map(file => file.id));
+        setAttachments(files => files.filter(file => !ids.has(file.id)));
       }
-      pollInFlight = (async () => {
-        try {
-          const resp = await clientApi.streamEvents(cursor, {
-            limit: 500,
-            session_id: threadId,
-          });
-          const fresh: LiveEvent[] = Array.isArray(resp?.events)
-            ? (resp.events as LiveEvent[])
-            : [];
-          if (fresh.length > 0) {
-            const maxSeq = fresh.reduce(
-              (acc, ev) =>
-                typeof ev.seq === "number" && ev.seq > acc ? ev.seq : acc,
-              cursor,
-            );
-            cursor = maxSeq;
-            updateThread(threadId, (t) => ({
-              ...t,
-              messages: t.messages.map((m) =>
-                m.id === assistantId && m.role === "assistant"
-                  ? {
-                      ...m,
-                      live_events: [...(m.live_events ?? []), ...fresh],
-                      live_cursor: maxSeq,
-                    }
-                  : m,
-              ),
-            }));
-          } else if (typeof resp?.latest_seq === "number") {
-            // Even when no events match the cursor still advances — the
-            // bus may have rolled the ring. Pin to whichever is larger.
-            cursor = Math.max(cursor, resp.latest_seq);
-          }
-        } catch {
-          // Network blips are non-fatal — the next tick will retry. We
-          // intentionally swallow errors so a transient 502 from the
-          // local server doesn't terminate the whole chat thread.
-        }
-      })();
-      try {
-        await pollInFlight;
-      } finally {
-        pollInFlight = null;
-      }
-    }
-
-    handle.timer = setInterval(() => {
-      pollOnce();
-    }, LIVE_EVENT_POLL_MS);
-    // Fire one poll immediately so the UI doesn't sit blank while the
-    // agent is already churning.
-    pollOnce();
-
-    function stopPoller(): void {
-      handle.stop = true;
-      if (handle.timer) {
-        clearInterval(handle.timer);
-        handle.timer = null;
-      }
-    }
-
-    try {
-      // Dashboard is a trusted server-side lane. Public AgentOn traffic must
-      // use /agent/run_turn so the public research-only intent gate remains
-      // enforced; dashboard chat uses the separately authenticated internal
-      // route and still gets Nerya's own prompt/risk/approval safeguards.
-      const res = await callApi<TurnPayload>("/agent/run_turn_internal", {
-        method: "POST",
-        signal: ctrl.signal,
-        body: {
-          source: options.source || "user_chat",
-          kind: options.kind || "user.chat",
-          target: "main",
-          payload: {
-            text: clean || "Please review the attached file(s).",
-            channel: options.channel || "dashboard",
-            attachments: requestAttachments,
-            ...(options.payloadExtra ?? {}),
-          },
-          // Reuse the thread id as the session id so every turn in
-          // this chat lands in the same on-disk SessionState. This is
-          // what lets the kernel reload prior chat history (context
-          // persistence) and what lets curl / gateway turns show up
-          // here (any caller that supplies the same session id is
-          // grouped under the same thread).
-          session_id: threadId,
-          // Strategy sub-sessions forward their binding so the backend
-          // session locks to the strategy and the kernel injects the
-          // full strategy file context into the system prompt.
-          ...(thread.strategy_id
-            ? { strategy_id: thread.strategy_id }
-            : {}),
-          reasoning_effort:
-            settings.reasoning_effort === "off"
-              ? undefined
-              : settings.reasoning_effort,
-          reasoning_summary:
-            settings.reasoning_effort === "off" ? undefined : "auto",
-          permission_mode: settings.permission_mode,
-          model_tier: settings.model_tier || undefined,
-          model_provider: settings.model_provider || undefined,
-          model_id: settings.model_id || undefined,
-          model_context_window: settings.model_context_window,
-          max_iterations: settings.max_iterations,
-          max_total_tool_calls: settings.max_total_tool_calls,
-          max_wall_seconds: settings.max_wall_seconds,
-          evidence_contract: settings.evidence_contract,
-        },
-      });
-      // One last poll to drain the tail of events that fired
-      // between the last interval tick and the run_turn response.
-      await pollOnce();
-      stopPoller();
-      const turnId = typeof res.turn_id === "string" ? res.turn_id : "";
-      let backendTitle = "";
-      try {
-        const session = await clientApi.sessionGet(threadId);
-        if (!("error" in session) && typeof session.meta?.title === "string") {
-          backendTitle = session.meta.title;
-        }
-      } catch {
-        backendTitle = "";
-      }
-      updateThread(threadId, (t) => ({
-        ...t,
-        imported: false,
-        title: backendTitle || t.title,
-        messages: t.messages.map((m) =>
-          visibleUser && m.id === userMsgId && m.role === "user" && turnId
-            ? { ...m, backend_message_id: `${turnId}:user` }
-            : m.id === assistantId && m.role === "assistant"
-            ? {
-                ...m,
-                loading: false,
-                turn: res,
-                elapsed_ms: Date.now() - startedMs,
-                backend_message_id: turnId ? `${turnId}:assistant` : undefined,
-              }
-            : m
-        ),
-      }));
-      try {
-        const fullThread = await buildImportedThread(
-          threadId,
-          { title: backendTitle },
-          { full: true },
-        );
-        if (fullThread) {
-          setThreads((prev) =>
-            upsertThread(
-              prev,
-              mergeAuthoritativeThread(
-                prev.find((t) => t.id === threadId),
-                fullThread,
-              ),
-            ),
-          );
-        }
-      } catch {
-        // The live turn is already visible; a later route refresh will
-        // retry the authoritative transcript hydrate.
-      }
-    } catch (e) {
-      // Drain whatever the bus already produced so the failure card
-      // shows the events that *did* fire before the crash.
-      try {
-        await pollOnce();
-      } catch {
-        // ignore
-      }
-      stopPoller();
-      updateThread(threadId, (t) => ({
-        ...t,
-        imported: false,
-        messages: t.messages.map((m) =>
-          m.id === assistantId && m.role === "assistant"
-            ? ctrl.signal.aborted
-              ? {
-                  ...m,
-                  loading: false,
-                  error: undefined,
-                  turn: {
-                    ...(m.turn ?? {}),
-                    reply_text: cancelledReply,
-                    final_text: cancelledReply,
-                    stopped_reason: "cancelled",
-                    transition_reason: "operator_cancel",
-                  },
-                  elapsed_ms: Date.now() - startedMs,
-                }
-              : {
-                  ...m,
-                  loading: false,
-                  error: e instanceof Error ? e.message : String(e),
-                  elapsed_ms: Date.now() - startedMs,
-                }
-            : m
-        ),
-      }));
+      commandEngine.refresh();
+    } catch (error) {
+      keepRoute = error instanceof CommandClientError && error.uncertain;
+      toast({ tone: "warn", message: commandErrorText(commandErrorCode(error), zh) });
     } finally {
-      stopPoller();
-      setSending(false);
-      turnInFlightRef.current = false;
-      abortRef.current = null;
-      inFlightSessionRef.current = null;
+      turnInFlightRef.current = false; setSubmitting(false);
+      // The backend continues independently of this route's lifetime. A late
+      // ACK must not navigate the user away from another conversation.
+      if (!originRoute && keepRoute && externalSnapshot.current.sessionId === originRoute) router.replace(`/chat/${sid}`);
     }
   }
 
-  // Review-B P1: a failed turn used to be a dead end. The user message the
-  // turn answered is still in the thread, so rebuild the original request
-  // from it and re-run the turn with ``visibleUser: false`` — no duplicate
-  // user bubble is appended and the failed assistant bubble is replaced.
-  // Invisible turns (approval_continue) never stored their synthetic
-  // prompt, so their error cards don't offer Retry (ChatView only wires
-  // ``onRetry`` when the previous message is a user message).
   async function retryFailedTurn(assistantMsgId: string) {
-    const thread = active;
-    if (!thread) return;
-    const idx = thread.messages.findIndex((m) => m.id === assistantMsgId);
-    if (idx < 0) return;
-    const failed = thread.messages[idx];
-    if (failed.role !== "assistant" || failed.loading || !failed.error) return;
-    const prev = thread.messages[idx - 1];
-    if (!prev || prev.role !== "user") return;
-    const text = prev.text.trim();
-    const attachments = prev.attachments ?? [];
-    if (!text && !attachments.length) return;
-    await runAgentTurn(text, {
-      visibleUser: false,
-      attachments,
-      replaceFailedId: assistantMsgId,
+    if (!active || submitting || sending) return;
+    const index = active.messages.findIndex(message => message.id === assistantMsgId);
+    const failed = active.messages[index], previous = active.messages[index-1];
+    if (failed?.role !== "assistant" || failed.execution_status === "unconfirmed" || previous?.role !== "user") return;
+    const accepted = await confirmDialog({
+      title: zh ? "重新运行任务" : "Run the task again",
+      message: zh ? "这会新建一轮，可能重新获取数据或执行动作。原失败记录和已完成操作会保留；有可用断点时优先使用“从断点继续”。" : "This starts a new turn and may fetch data or execute actions again. The previous record and completed actions remain. Prefer a checkpoint when available.",
+      okLabel: zh ? "新建一轮运行" : "Start a new turn", cancelLabel: zh ? "取消" : "Cancel",
     });
+    if (accepted) await runAgentTurn(previous.text, { attachments: previous.attachments ?? [] });
   }
 
   async function send(text: string) {
+    if (externalView) {
+      if (!active) return;
+      const sid = active.id, clean = text.trim();
+      if (!clean || externalSendBusy.current) return;
+      if (clean.length > 8000) { toast({ tone: 'warn', message: zh ? '消息最多 8000 字符。' : 'Messages are limited to 8000 characters.' }); return; }
+      externalSendBusy.current = true;
+      setExternalSending(true);
+      const previous = externalMessageAttempt.current;
+      const attempt = previous?.sid === sid && previous.text === clean ? previous : { sid, text: clean, key: uuid() };
+      externalMessageAttempt.current = attempt;
+      try {
+        const response = await callApi<{ ok: boolean; error?: string; message: UserMessage }>(
+          '/agent/session/message/append', { method: 'POST', body: { session_id: sid, text: clean, client_request_id: attempt.key } });
+        if (!response.ok || !response.message?.id) throw new Error(response.error || 'Message was not saved');
+        const saved = { ...response.message, ts: conversationTimestamp(response.message.ts) ?? Date.now(), backend_message_id: response.message.id };
+        updateThread(sid, thread => ({ ...thread, messages: thread.messages.some(message => message.backend_message_id === saved.id || message.id === saved.id)
+          ? thread.messages : [...thread.messages, saved] }));
+        if (externalSnapshot.current.sessionId === sid) setInput(value => value.trim() === clean ? '' : value);
+        externalMessageAttempt.current = null;
+      } catch {
+        toast({ tone: 'warn', message: zh ? '消息未确认保存，草稿已保留。再次发送将核对同一个请求。' : 'Message not confirmed saved. The draft and original request ID are retained.' });
+      } finally { externalSendBusy.current = false; setExternalSending(false); }
+      return;
+    }
     await runAgentTurn(text, { visibleUser: true, attachments });
   }
 
-  function cancel() {
-    const activeSessionId = inFlightSessionRef.current || sessionId || "";
-    if (activeSessionId) {
-      void callApi("/agent/interrupt", {
-        method: "POST",
-        body: { session_id: activeSessionId, reason: "operator_cancel" },
-      }).catch(() => undefined);
-      updateThread(activeSessionId, (t) => {
-        const messages = [...t.messages];
-        const idx = messages.findLastIndex((m) => m.role === "assistant" && m.loading);
-        if (idx >= 0) {
-          const m = messages[idx] as Extract<ChatMessage, { role: "assistant" }>;
-          messages[idx] = {
-            ...m,
-            loading: false,
-            error: undefined,
-            turn: {
-              ...(m.turn ?? {}),
-              reply_text: cancelledReply,
-              final_text: cancelledReply,
-              stopped_reason: "cancelled",
-              transition_reason: "operator_cancel",
-            },
-            elapsed_ms:
-              typeof m.started_ms === "number" ? Date.now() - m.started_ms : undefined,
-          };
-        }
-        return { ...t, imported: false, messages };
-      });
-    }
-    if (abortRef.current) abortRef.current.abort();
-    // Also stop the live-event poller so we don't keep hitting the
-    // bus after the user explicitly aborted.
-    const handle = livePollRef.current;
-    handle.stop = true;
-    if (handle.timer) {
-      clearInterval(handle.timer);
-      handle.timer = null;
-    }
-    setSending(false);
-    turnInFlightRef.current = false;
-    abortRef.current = null;
-    inFlightSessionRef.current = null;
+  async function cancel() {
+    if (!commandEngine.active || stopPending) return;
+    setStopPending(true);
+    try { await commandEngine.control("stop", commandEngine.active); }
+    catch (error) { toast({ tone: "warn", message: commandErrorText(commandErrorCode(error), zh) }); }
+    finally { setStopPending(false); }
+  }
+
+  function continueCheckpoint(turnId: string) {
+    void runAgentTurn(zh ? "从已保存的断点继续，保留已完成步骤，不要重新执行已经完成的外部操作。" : "Continue from the saved checkpoint. Preserve completed work and do not repeat completed external actions.",
+      { visibleUser: false, resumeTurnId: turnId, attachments: [] });
   }
 
   if (!hydrated) {
@@ -1771,9 +1534,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }
 
   const conversationEmpty = !active || active.messages.length === 0;
-  const showMissing = Boolean(sessionId && missingSession && conversationEmpty);
+  const hasCommandState = Boolean(commandEngine.data?.commands.length || commandEngine.pending.length);
+  const showMissing = Boolean(sessionId && missingSession && conversationEmpty && !hasCommandState);
   const showLoadFailure = Boolean(
-    sessionId && transcriptLoadFailed && conversationEmpty,
+    sessionId && transcriptLoadFailed && conversationEmpty && !hasCommandState,
   );
   // A URL that addresses a session is still being resolved until we either
   // load its transcript or confirm it's missing. Treat that window as
@@ -1783,10 +1547,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   // brand-new local chat the composer is about to populate.
   const resolvingAddressedSession =
     Boolean(sessionId) &&
-    conversationEmpty &&
+    conversationEmpty && !active?.transcript_loaded &&
     !showMissing &&
     !showLoadFailure &&
-    pendingFirstMessageThreadId() !== sessionId;
+    pendingFirstMessageThreadId() !== sessionId && !hasCommandState;
   const showLoading =
     conversationEmpty &&
     !showMissing &&
@@ -1797,21 +1561,27 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   // home route (no sessionId) or a fresh pending-first-message thread
   // reaches it now.
   const showHero =
-    conversationEmpty && !showMissing && !showLoadFailure && !showLoading;
+    conversationEmpty && !externalView && !showMissing && !showLoadFailure && !showLoading && !workbench.view?.pending_interactions.length && !draft.recovery.length && !draft.storageError;
 
   const composerProps = {
+    sessionId: active?.id,
     value: input,
     onChange: setInput,
     onSend: () => { followLatest.current = true; setReadingHistory(false); send(input); },
-    onCancel: cancel,
-    sending,
-    locked: awaitingApproval,
-    lockMessage: t("approvalPaused"),
+    onCancel: externalView ? undefined : () => { void cancel(); },
+    onGuide: !externalView && commandEngine.active?.state === "running" ? () => { void runAgentTurn(input, { commandKind: "guide", attachments: [] }); } : undefined,
+    submitting: externalView ? externalSending : submitting,
+    stopping: stopPending || commandEngine.active?.state === "stopping",
+    sending: externalView ? externalSending : sending,
+    locked: externalView ? !active : workbench.connection !== "online" || Boolean(workbench.view?.pending_interactions.length) || awaitingApproval || history.pending || Boolean(history.edit),
+    external: externalView,
+    placeholder: externalView ? (zh ? '向此会话追加消息…' : 'Add a message to this session…') : sending ? (zh ? '补充任务，发送后排队；也可指导本轮…' : 'Queue a follow-up, or guide this turn…') : undefined,
+    lockMessage: awaitingApproval ? t("approvalPaused") : th("editLabel"),
     settings,
-    onSettingsChange: setSettings,
+    onSettingsChange: (next:ChatRunSettings)=>{setSettings(next);draft.setSettings(next);},
     modelOptions,
-    attachments,
-    onAttachmentsChange: setAttachments,
+    attachments: externalView ? [] : attachments,
+    onAttachmentsChange: externalView ? undefined : setAttachments,
   };
 
   return (
@@ -1819,27 +1589,51 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       setInput((previous) => appendReviewDraft(previous, text));
       selectWorkspace("conversation");
       requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('#chat-workspace-panel-conversation [data-chat-composer] textarea')?.focus());
-      toast({ tone: "ok", message: zh ? "已填入当前对话草稿，确认后再发送。" : "Added to this conversation’s draft. Review before sending." });
+      toast({ tone: "ok", message: i18nCopy(zh, "copy.components_chat_ChatView.009") });
     } }}>
+    {forkTarget?.sessionId === active?.id && forkTarget && <ForkMessageDialog key={forkTarget.sessionId+forkTarget.message.id} sessionId={forkTarget.sessionId} message={forkTarget.message}
+      onClose={() => setForkTarget(null)} onCreated={id => { setForkTarget(null); router.push(`/chat/${id}`); }} />}
+    <ResearchVisualContext.Provider value={openResearchVisual}>
+    <ResearchInstrumentContext.Provider value={openResearchInstrument}>
     <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench">
-      <ChatTaskHeader thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
-        approvalCount={activeApprovalIds.length} loading={showLoading} showTabs={!showHero} tab={taskDock.selected || ''}
-        workspaceAvailable={dockTabs.length > 0} canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
+      <RuntimeNotice workbench={workbench} />
+      <ChatTaskHeader workStatus={taskStatus(active,commandEngine.commands,workbench.view)} connection={workbench.connection} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
+        approvalCount={activeApprovalIds.length} loading={showLoading} showTabs tab={taskDock.selected || ''}
+        workspaceAvailable canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
         onToggleBrowser={openBrowserDock}
         onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else { taskDock.show(); focusDock(taskDock.selected || ''); } }} onOpenResult={openResult} />
+      <TaskProvenance thread={active}/>
+      {commandEngine.data?.branch_of && <div className="shrink-0 border-b border-[color:var(--line)] px-5 py-2 text-xs text-[color:var(--text-muted)]" data-testid="branch-origin">
+        {zh ? '此分支保留了原会话上下文，不包含原操作的可执行副本。' : 'This branch retains conversation context, not executable copies of prior actions.'}
+        <a className="ml-2 underline" href={`/chat/${encodeURIComponent(commandEngine.data.branch_of.session_id)}`}>{zh ? '查看原会话' : 'View original conversation'}</a>
+      </div>}
       {!showHero && awaitingApproval && hideSource ? <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-warn/25 bg-warn/10 px-4 py-2 text-xs text-warn">
         <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
-        <button type="button" onClick={() => selectWorkspace("conversation", true)} className="min-h-8 rounded px-2 underline">{zh ? "查看待审批操作" : "Review pending approvals"}</button>
+        <button type="button" onClick={() => selectWorkspace("conversation", true)} className="min-h-8 rounded px-2 underline">{i18nCopy(zh, "copy.components_chat_ChatView.010")}</button>
       </div> : null}
+      {externalView && hideSource && <div className="flex shrink-0 items-center border-b border-[color:var(--line)] px-4 py-2">
+        <button type="button" data-testid="return-to-external-conversation" className="inline-flex min-h-9 items-center gap-2 rounded-lg px-3 text-sm hover:bg-[color:var(--panel-bg)]" onClick={() => selectWorkspace('conversation')}>
+          <ConversationSourceIcon source={active?.source} size={16} />{zh ? '返回对话与工具记录' : 'Back to conversation and tools'}
+        </button>
+      </div>}
       <div ref={layoutRef} className="flex min-h-0 min-w-0 flex-1" data-testid="workspace-split" data-compact={compact ? "true" : "false"}>
-      <div hidden={!showHero && hideSource} className={showHero || !hideSource ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"} data-testid="workspace-source">
-      <section id="chat-workspace-panel-conversation" aria-label={zh ? '对话' : 'Conversation'} className="flex min-h-0 flex-1 flex-col min-w-0">
+      <div hidden={hideSource} className={!hideSource ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"} data-testid="workspace-source">
+      <section id="chat-workspace-panel-conversation" aria-label={i18nCopy(zh, "copy.components_chat_ChatView.011")} className="flex min-h-0 flex-1 flex-col min-w-0">
         {showHero ? (
+          <div className="min-h-0 flex-1 overflow-y-auto">
           <AgentStart value={input} onChange={setInput} disabled={sending || awaitingApproval}
-            composer={<ChatInput {...composerProps} variant="hero" />} />
+            composer={<><ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+'\n'+text : text)} /><ChatInput {...composerProps} variant="hero" /></>} />
+          </div>
         ) : (
           <>
-            <div className={styles.transcriptViewport}>
+            {active && isExternalSource(active.source) && <div data-testid="external-session" className="flex flex-wrap items-center gap-2 border-b border-[color:var(--line)] px-5 py-3 text-xs text-[color:var(--text-muted)]">
+              <ConversationSourceIcon source={active.source} size={18} />
+              <span className="font-medium text-[color:var(--text-base)]">{active.source === "tunnel" ? "Tunnel" : "MCP"} · {zh ? "外部工作会话" : "External work session"}</span>
+              <details><summary>{zh ? "会话详情" : "Session details"}</summary><code className="break-all select-all">{active.id}</code></details>
+            </div>}
+            {research.studies.length > 0 && <ResearchChartTabs open={showResearch} count={research.studies.length} onConversation={() => setResearchFocus(null)} onCharts={() => openResearchCharts()} />}
+            {showResearch && <ResearchCharts charts={research.studies} selected={researchFocus?.chartId || ''} onSelect={openResearchCharts} />}
+            <div hidden={showResearch} className={styles.transcriptViewport}>
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto" data-testid="transcript-scroll"
               onWheel={(e) => { if (e.deltaY < 0) followLatest.current = false; }}
               onPointerDownCapture={(e) => { if (e.target instanceof Element && e.target.closest("summary")) followLatest.current = false; }}
@@ -1902,19 +1696,26 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                 </div>
               ) : (
                 <div ref={transcriptRef} className={styles.conversation} data-testid="conversation-content">
-                  {active!.messages.map((m, mi) =>
+                  {isExternalSource(active?.source) ? <ExternalSessionTimeline traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
                     m.role === "user" ? (
                       <UserBubble
                         key={m.id}
                         msg={m}
-                        onEdit={() => startEditMessage(m.id)}
-                        onDelete={() => deleteMessage(m.id)}
-                        editing={editingMessageId === m.id}
-                        editValue={editingMessageId === m.id ? editDraft : ""}
-                        onEditChange={setEditDraft}
-                        onSaveEdit={() => saveEditedMessage(m.id)}
-                        onCancelEdit={cancelEditMessage}
+                        onFork={() => setForkTarget({ sessionId:active!.id,message:m })}
+                        onEdit={() => { void history.start(m.id); }}
+                        onDelete={() => { void history.requestDelete(m.id); }}
+                        editing={history.edit?.message.id === m.id}
+                        editValue={history.edit?.message.id === m.id ? history.edit.draft : ""}
+                        editOriginal={history.edit?.original}
+                        onEditChange={history.change}
+                        onSaveEdit={() => { void history.save(); }}
+                        onCancelEdit={() => { void history.cancel(); }}
+                        saving={history.pending}
+                        editError={history.editError}
+                        actionsDisabled={sending || awaitingApproval || history.pending || externalView}
                       />
+                    ) : m.turn?.external_call ? (
+                      <ExternalCallMessage key={m.id} trace={m.turn.external_call} />
                     ) : (
                       <AssistantBubble
                         key={m.id}
@@ -1926,24 +1727,17 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                         onApprovalAction={resolveApproval}
                         resolvingApprovalIds={resolvingApprovalIds}
                         onRetry={
-                          m.error && !m.loading && active!.messages[mi - 1]?.role === "user"
+                          m.error && !m.loading && m.execution_status !== "unconfirmed" && active!.messages[mi - 1]?.role === "user"
                             ? () => void retryFailedTurn(m.id)
                             : undefined
                         }
-                        onEdit={() => startEditMessage(m.id)}
-                        onDelete={() => deleteMessage(m.id)}
-                        editing={editingMessageId === m.id}
-                        editValue={editingMessageId === m.id ? editDraft : ""}
-                        onEditChange={setEditDraft}
-                        onSaveEdit={() => saveEditedMessage(m.id)}
-                        onCancelEdit={cancelEditMessage}
                       />
                     )
-                  )}
+                  }/>}
                 </div>
               )}
             </div>
-            {readingHistory ? <button type="button" className={styles.jump} data-testid="jump-to-latest" onClick={jumpToLatest}>{zh ? "回到最新消息" : "Jump to latest"}<span aria-hidden>↓</span></button> : null}
+            {readingHistory ? <button type="button" className={styles.jump} data-testid="jump-to-latest" onClick={jumpToLatest}>{i18nCopy(zh, "copy.components_chat_ChatView.012")}<span aria-hidden>↓</span></button> : null}
             </div>
             {awaitingApproval ? (
               <div
@@ -1958,20 +1752,26 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                 </div>
               </div>
             ) : null}
-            <ChatInput {...composerProps} variant="docked" taskHeader={agentWork.rows.length ? (
+            {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[800px] flex-wrap items-center gap-2 px-4 text-xs" role="status"><span>{zh?"找到其他窗口保存的草稿":"Saved drafts from other windows"}</span>{draft.recovery.slice(0,3).map(row=><button type="button" key={row.key} className="min-h-11 underline" onClick={()=>draft.restore(row)}>{zh?"恢复：":"Restore: "}{row.draft.text.slice(0,40)||row.draft.attachments[0]?.name}</button>)}<button type="button" className="min-h-11" onClick={draft.dismissRecovery}>{zh?"忽略":"Dismiss"}</button></div>}
+            {draft.storageError&&<p role="status" className="mx-auto max-w-[800px] px-4 text-xs text-warn">{zh?"持久化草稿暂不可用，当前输入仍保留在此窗口。":"Persistent draft storage is unavailable. Current input remains in this window."}</p>}
+            <CollaborationSummary agents={agentWork.rows} onOpen={()=>selectWorkspace("agents",true)}/>
+            {!externalView&&<ComposerContextSummary thread={active} settings={settings}/>}
+            {workbench.view?.pending_interactions.length ? <InteractionPanel items={workbench.view.pending_interactions} onResolved={()=>{workbench.refresh();commandEngine.refresh();}} /> : null}
+            {!externalView && <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+"\n"+text : text)} />}
+            {!externalView && <ChatInput {...composerProps} variant="docked" taskHeader={agentWork.rows.length ? (
               <AgentTaskBar source={agentWork} open={canvasVisible && taskDock.selected === 'agents'} onOpen={() => selectWorkspace("agents", true)} />
-            ) : undefined} />
+            ) : undefined} />}
           </>
         )}
       </section>
       </div>
-      {!showHero && canvasVisible && !compact && !fullCanvas ? <div role="separator" tabIndex={0} aria-label={zh ? "调整工作区宽度" : "Resize workspace"} aria-orientation="vertical"
+      {canvasVisible && !compact && !fullCanvas ? <div role="separator" tabIndex={0} aria-label={i18nCopy(zh, "copy.components_chat_ChatView.013")} aria-orientation="vertical"
         aria-valuemin={38} aria-valuemax={62} aria-valuenow={Math.round(canvasWidth)} aria-controls="task-workspace"
         {...separatorProps} onDoubleClick={() => changeWidth(48)} onKeyDown={(event) => {
           if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
           event.preventDefault(); changeWidth(event.key === "Home" ? 38 : event.key === "End" ? 62 : canvasWidth + (event.key === "ArrowLeft" ? 2 : -2));
         }} className="w-1 shrink-0 touch-none cursor-col-resize bg-[color:var(--line)] hover:bg-brand-400/50 focus-visible:bg-brand-400 focus-visible:outline-none" /> : null}
-      {!showHero && dockTabs.length > 0 ? <section id="task-workspace" role="complementary" aria-label={zh ? '任务工作区' : 'Task workspace'}
+      {<section id="task-workspace" role="complementary" aria-label={i18nCopy(zh, "copy.components_chat_ChatView.014")}
         hidden={!canvasVisible} className={canvasVisible ? "flex min-h-0 min-w-0 flex-col bg-[color:var(--card)]" : "hidden"}
         style={canvasVisible ? { width: fullCanvas || compact ? "100%" : `${canvasWidth}%`, flexShrink: 0 } : undefined}
         onKeyDown={(event) => {
@@ -1979,21 +1779,52 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             event.preventDefault(); closeCanvas();
           }
         }}>
-        <TaskDockHeader tabs={dockTabs} selected={taskDock.selected || ''} onSelect={tab => selectWorkspace(tab, true)} expanded={fullCanvas} onToggleSize={toggleCanvasSize} onClose={closeCanvas}/>
-        {hasBrowser && <section id="task-dock-panel-browser" role="tabpanel" aria-labelledby="task-dock-tab-browser" hidden={taskDock.selected !== 'browser'} className={taskDock.selected === 'browser' ? 'min-h-0 flex-1' : 'hidden'}>
+        <TaskDockHeader tabs={dockTabs} choices={dockChoices} onRemove={id => void removeDockTab(id)} selected={taskDock.selected || ''} onSelect={tab => selectWorkspace(tab, true)} expanded={fullCanvas} onToggleSize={toggleCanvasSize} onClose={closeCanvas}/>
+        {!dockTabs.length && <div className="flex min-h-0 flex-1 items-center justify-center px-6" data-testid="workspace-launcher"><div className="w-full max-w-md space-y-1">
+          {toolTabs.map(tab => <button type="button" key={tab.id} onClick={() => selectWorkspace(tab.id, true)} className="flex min-h-11 w-full items-center gap-3 rounded-lg bg-[color:var(--panel-bg)] px-4 text-left text-sm hover:bg-[color:var(--line)] focus-visible:ring-2"><NeryaGlyph name={tab.id === 'files' ? 'folder' : tab.id === 'browser' ? 'globe' : 'terminal'} size={18} className="text-[color:var(--text-muted)]" />{tab.label}</button>)}
+        </div></div>}
+        {taskDock.tabs.includes('strategy') && strategyId && <section id="task-dock-panel-strategy" role="tabpanel" aria-labelledby="task-dock-tab-strategy" hidden={taskDock.selected !== 'strategy'} className={taskDock.selected === 'strategy' ? 'min-h-0 flex-1 overflow-auto' : 'hidden'}>
+          {strategyReports.error && <div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-warn"><span>{i18nCopy(zh, "copy.components_chat_ChatView.015")}</span><button type="button" onClick={strategyReports.retry} className="underline">{i18nCopy(zh, "copy.components_chat_ChatView.016")}</button></div>}
+          <StrategyWorkflowPanel key={strategyId} embedded strategyId={strategyId} proposalId={strategyProposal} onDirtyChange={setStrategyDirty} onSaved={(view) => {
+            if (active) updateThread(active.id, thread => ({ ...thread, strategy_proposal_id: view.source.proposal_id }));
+            else { const url = new URL(window.location.href); if (view.source.proposal_id) url.searchParams.set('proposal', view.source.proposal_id); window.history.replaceState(window.history.state, '', url); }
+            strategyReports.retry();
+          }} />
+        </section>}
+        {strategyReports.runs.filter(run => taskDock.tabs.includes(('backtest:' + run.ts) as TaskDockTab)).map(run => <section key={run.ts} id={'task-dock-panel-backtest:' + run.ts} role="tabpanel" aria-labelledby={'task-dock-tab-backtest:' + run.ts} hidden={taskDock.selected !== 'backtest:' + run.ts} className={taskDock.selected === 'backtest:' + run.ts ? 'min-h-0 flex-1 overflow-auto p-4' : 'hidden'}>
+          {taskDock.selected === 'backtest:' + run.ts && <BacktestChart strategyId={strategyId} ts={run.ts} />}
+        </section>)}
+        {taskDock.tabs.includes('files') && <section id="task-dock-panel-files" role="tabpanel" aria-labelledby="task-dock-tab-files" hidden={taskDock.selected !== 'files'} className={taskDock.selected === 'files' ? 'min-h-0 flex-1' : 'hidden'}><WorkspaceFiles key={active?.id || 'new'} onOpenFile={path => { taskDock.select(('file:' + path) as TaskDockTab); focusDock('file:' + path); }} /></section>}
+        {taskDock.tabs.includes('terminal') && <section id="task-dock-panel-terminal" role="tabpanel" aria-labelledby="task-dock-tab-terminal" hidden={taskDock.selected !== 'terminal'} className={taskDock.selected === 'terminal' ? 'min-h-0 flex-1' : 'hidden'}><WorkspaceTerminal thread={active} /></section>}
+        {taskDock.tabs.includes("browser") && <section id="task-dock-panel-browser" role="tabpanel" aria-labelledby="task-dock-tab-browser" hidden={taskDock.selected !== 'browser'} className={taskDock.selected === 'browser' ? 'min-h-0 flex-1' : 'hidden'}>
           <BrowserWorkspacePanel key={active?.id} conversationId={active?.id || ''} calls={browserOperations} active={canvasVisible && taskDock.selected === 'browser'} />
         </section>}
-        {hasCanvas && <section id="task-dock-panel-canvas" role="tabpanel" aria-labelledby="task-dock-tab-canvas" hidden={taskDock.selected !== 'canvas'} className={taskDock.selected === 'canvas' ? 'min-h-0 flex-1' : 'hidden'}>
-          <WorkspaceCanvas key={active?.id} thread={active} embedded open={canvasVisible && taskDock.selected === 'canvas'} onToggle={closeCanvas} agentWork={agentWork} agentResults={agentResults}
-            resultFocusRequest={resultFocus.session === active?.id ? resultFocus : undefined} onRevealAgent={revealAgent} onRevealResult={revealResult} />
-        </section>}
-        {agentWork.rows.length > 0 && <section id="task-dock-panel-agents" role="tabpanel" aria-labelledby="task-dock-tab-agents" hidden={taskDock.selected !== 'agents'} className={taskDock.selected === 'agents' ? 'min-h-0 flex-1' : 'hidden'}>
+        {allResults.filter(result => taskDock.tabs.includes(resultTabId(result))).map(result => <section key={result.id} id={'task-dock-panel-' + resultTabId(result)} role="tabpanel" aria-labelledby={'task-dock-tab-' + resultTabId(result)} hidden={taskDock.selected !== resultTabId(result)} className={taskDock.selected === resultTabId(result) ? 'min-h-0 flex-1' : 'hidden'}>
+          {canvasVisible && taskDock.selected === resultTabId(result) && <ChatResultsPanel results={[result]} selectedId={result.id} hidePicker onReveal={revealResult} onOpenFile={path=>{taskDock.select(("file:"+path) as TaskDockTab);focusDock("file:"+path);}} />}
+        </section>)}
+        {resources.filter(item => taskDock.tabs.includes(('resource:' + item.id) as TaskDockTab)).map(item => <section key={item.id} id={'task-dock-panel-resource:' + item.id} role="tabpanel" aria-labelledby={'task-dock-tab-resource:' + item.id} hidden={taskDock.selected !== 'resource:' + item.id} className={taskDock.selected === 'resource:' + item.id ? 'min-h-0 flex-1' : 'hidden'}>
+          {taskDock.selected === 'resource:' + item.id && <WorkspaceResource item={item} />}
+        </section>)}
+        {openedFiles.map(({ id, item }) => <section key={id} id={'task-dock-panel-' + id} role="tabpanel" aria-labelledby={'task-dock-tab-' + id} hidden={taskDock.selected !== id} className={taskDock.selected === id ? 'min-h-0 flex-1' : 'hidden'}><WorkspaceResource item={item} /></section>)}
+        {snapshots.filter(item => taskDock.tabs.includes(item.id as TaskDockTab)).map(item => <section key={item.id} id={'task-dock-panel-' + item.id} role="tabpanel" aria-labelledby={'task-dock-tab-' + item.id} hidden={taskDock.selected !== item.id} className={taskDock.selected === item.id ? 'min-h-0 flex-1 overflow-auto p-4' : 'hidden'}><PortfolioSnapshot accounts={item.accounts} /></section>)}
+        {detailInstruments.filter(item => taskDock.tabs.includes(('instrument:' + item.id) as TaskDockTab)).map(item => <section key={item.id} id={'task-dock-panel-instrument:' + item.id} role="tabpanel" aria-labelledby={'task-dock-tab-instrument:' + item.id} hidden={taskDock.selected !== 'instrument:' + item.id} className={taskDock.selected === 'instrument:' + item.id ? 'min-h-0 flex-1 overflow-auto' : 'hidden'}>
+          {canvasVisible && taskDock.selected === 'instrument:' + item.id && <ResearchInstrumentPanel key={researchSession + item.id + item.seenAt} instrument={item} charts={focusedInstrument?.instrument.id === item.id ? focusedInstrument.charts : research.charts} />}
+        </section>)}
+        {taskDock.tabs.includes("agents") && <section id="task-dock-panel-agents" role="tabpanel" aria-labelledby="task-dock-tab-agents" hidden={taskDock.selected !== 'agents'} className={taskDock.selected === 'agents' ? 'min-h-0 flex-1' : 'hidden'}>
           <AgentWorkPanel key={active?.id} source={agentWork} active={canvasVisible && taskDock.selected === 'agents'} onOpenResult={openChildResult}
             focusRequest={agentFocus.session === active?.id ? agentFocus : undefined}/>
         </section>}
-      </section> : null}
+      </section>}
       </div>
+      {externalView && <ChatInput {...composerProps} variant="docked" taskHeader={<p className="px-1 pb-2 text-xs text-[color:var(--text-muted)]" data-testid="external-composer-hint">
+        {zh ? '消息随工具结果交给外部 Agent，不会启动本地模型。' : 'Delivered with tool results; no local model is started.'}
+      </p>} />}
     </div>
+    </ResearchInstrumentContext.Provider>
+    </ResearchVisualContext.Provider>
+      <HistoryDeleteDialog open={Boolean(history.deleteTarget)} title={th("deleteMessage")} description={th("deleteMessageHelp")}
+        preview={history.deleteTarget?.original || history.deleteTarget?.message.attachments?.map(file => file.name).join(", ") || ""}
+        busy={history.pending} error={history.deleteError} onConfirm={() => { void history.confirmDelete(); }} onCancel={history.cancelDelete} />
     </FinanceDraftContext.Provider>
   );
 }

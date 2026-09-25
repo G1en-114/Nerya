@@ -2,13 +2,17 @@
 
 import type { ReactNode } from "react";
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useId, useRef, useState, type Ref } from "react";
 import type { ChatAttachment, ChatModelOption, ChatRunSettings } from "../../lib/chat";
 import { callApi } from "../../lib/clientApi";
 import { uuid } from "../../lib/chat";
-import { FileIcon, FilePlusIcon, SendIcon, StopIcon, XIcon } from "../icons";
+import { FileIcon, SendIcon, StopIcon, XIcon } from "../icons";
+import type { ComposerOption } from "../../lib/composerInput";
+import { ComposerResourceError, prepareComposerReference } from "../../lib/composerResources";
+import { ComposerAddMenu, ComposerSourceIcon, ComposerSuggestions, useComposerSuggestions } from "./ComposerSuggestions";
 import { ComposerModelMenu, ComposerPermissionMenu } from "./ComposerRunControls";
+import { ReferenceSnapshot } from "./ReferenceSnapshot";
 
 // Match the upload/turn limits in nerya/agent/attachments.py. Validate before
 // FileReader allocates base64 copies; the server remains authoritative.
@@ -44,6 +48,9 @@ export interface ChatInputProps {
   onChange: (value: string) => void;
   onSend: () => void;
   onCancel?: () => void;
+  onGuide?: () => void;
+  submitting?: boolean;
+  stopping?: boolean;
   sending: boolean;
   locked?: boolean;
   lockMessage?: string;
@@ -56,76 +63,122 @@ export interface ChatInputProps {
   variant?: "docked" | "hero";
   inputRef?: Ref<HTMLTextAreaElement>;
   taskHeader?: ReactNode;
+  external?: boolean;
+  sessionId?: string;
 }
 
 /** One composer for home, empty chat and active chat. Only its frame changes. */
-export function ChatInput({ value, onChange, onSend, onCancel, sending, locked = false,
+export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending, submitting = sending, stopping = false, locked = false,
   lockMessage, placeholder, settings, onSettingsChange, modelOptions = [], attachments = [],
-  onAttachmentsChange, variant = "docked", inputRef, taskHeader }: ChatInputProps) {
+  onAttachmentsChange, variant = "docked", inputRef, taskHeader, external = false, sessionId }: ChatInputProps) {
   const t = useTranslations("chat");
   const tUi = useTranslations("ui");
+  const tc = useTranslations("composer");
+  const zh = useLocale().startsWith("zh");
+  const busy = submitting || (external && sending);
+  const sendLabel = sending && !external ? (zh ? "排队发送" : "Queue message") : t("send");
   const fieldId = useId();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pickerRef = useRef<HTMLInputElement>(null);
   const uploadRef = useRef<AbortController | null>(null);
-  const latest = useRef({ attachments, onAttachmentsChange, sending, locked });
-  latest.current = { attachments, onAttachmentsChange, sending, locked };
+  const latest = useRef({ attachments, onAttachmentsChange, sending: busy, locked, external, sessionId });
+  latest.current = { attachments, onAttachmentsChange, sending: busy, locked, external, sessionId };
+  const retryRef = useRef<(() => void) | null>(null);
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
+  const [referenceName, setReferenceName] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [fileStates,setFileStates]=useState<Record<string,{name:string;state:string}>>({});
+  const failedFiles=useRef(new Map<string,ChatAttachment>());
   const hero = variant === "hero";
-  const canSend = !sending && !locked && !uploading && !uploadError && Boolean(value.trim() || attachments.length);
+  const basePlaceholder = placeholder ?? t("inputPlaceholder");
+  const composerPlaceholder = basePlaceholder;
+  const canSend = !busy && !locked && (external || (!uploading && !uploadError)) && Boolean(value.trim() || (!external && attachments.length)) && !attachments.some(file=>file.reason==="reselect_required");
 
   useEffect(() => {
     if (!textareaRef.current) return;
     textareaRef.current.style.height = "auto";
     textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, hero ? 192 : 240)}px`;
   }, [value, hero]);
-  useEffect(() => () => { uploadRef.current?.abort(); }, []);
+  useEffect(() => {
+    setUploading(false); setUploadError(""); setReferenceName(""); setDragging(false);setFileStates({});failedFiles.current.clear();
+    retryRef.current = null; dragDepth.current = 0;
+    return () => { uploadRef.current?.abort(); uploadRef.current = null; };
+  }, [sessionId, external]);
+  const suggestions = useComposerSuggestions({ value, onChange, inputRef: textareaRef,
+    disabled: external || busy || locked || uploading || !onAttachmentsChange, onReference: addReference, sessionId });
 
   function submit() {
     if (canSend && !uploadRef.current) onSend();
   }
-  async function pickFiles(files: readonly File[]) {
-    if (!files.length || uploadRef.current || latest.current.sending || latest.current.locked) return;
-    if (!latest.current.onAttachmentsChange) { setUploadError(t("attachmentNotReady")); return; }
+  function withinLimits(files: readonly { size: number }[]): boolean {
     const existing = latest.current.attachments;
-    if (existing.length + files.length > MAX_FILES || files.some((file) => file.size > MAX_FILE_BYTES)
-      || [...existing, ...files].reduce((total, file) => total + file.size, 0) > MAX_TOTAL_BYTES) {
-      setUploadError(tUi("attachmentLimits"));
-      return;
-    }
+    return existing.length + files.length <= MAX_FILES && files.every(file => file.size <= MAX_FILE_BYTES)
+      && [...existing, ...files].reduce((total, file) => total + file.size, 0) <= MAX_TOTAL_BYTES;
+  }
+  function pickFiles(files: readonly File[]) {
+    if (!files.length || uploadRef.current || latest.current.sending || latest.current.locked || external) return;
+    if (!withinLimits(files)) { retryRef.current = null; setUploadError(tUi("attachmentLimits")); return; }
+    void uploadPrepared(() => Promise.all(files.map(fileToAttachment)));
+  }
+  function addReference(item: ComposerOption): boolean {
+    if (uploadRef.current || latest.current.sending || latest.current.locked || latest.current.external) return false;
+    if (latest.current.attachments.some(file => file.reference?.kind === item.kind && file.reference.id === item.id)) return true;
+    if (!withinLimits([{ size: 0 }])) { retryRef.current = null; setUploadError(tUi("attachmentLimits")); return false; }
+    void uploadPrepared(async signal => [await prepareComposerReference(item, signal)], item.label);
+    return true;
+  }
+  async function uploadPrepared(prepare: (signal: AbortSignal) => Promise<ChatAttachment[]>, label = "") {
+    if (uploadRef.current || latest.current.sending || latest.current.locked || latest.current.external) return;
+    if (!latest.current.onAttachmentsChange) { setUploadError(t("attachmentNotReady")); return; }
+    const scope = latest.current.sessionId;
     const controller = new AbortController();
     uploadRef.current = controller;
     setUploading(true);
+    setReferenceName(label);
     setUploadError("");
+    retryRef.current = () => { void uploadPrepared(prepare, label); };
     try {
-      const picked = await Promise.all(files.map(fileToAttachment));
-      if (controller.signal.aborted) return;
-      const response = await callApi<UploadEnvelope>("/agent/attachments/upload", {
-        method: "POST", signal: controller.signal,
-        body: { upload_id: uuid(), attachments: picked },
-      });
-      if (controller.signal.aborted) return;
-      const uploaded = response.attachments;
-      // HTTP 200 is not sufficient: the server can reject individual files.
-      if (response.ok === false || !Array.isArray(uploaded) || uploaded.length !== picked.length
-        || uploaded.some((file) => file.uploaded === false || !file.artifact_uri)) {
-        throw new Error("attachment upload rejected");
+      const picked = await prepare(controller.signal);
+      if (controller.signal.aborted || latest.current.sessionId !== scope) return;
+      if (!withinLimits(picked)) throw new Error("attachment_limits");
+      for (const file of picked) {
+        if(controller.signal.aborted)break;
+        setFileStates(old=>({...old,[file.id]:{name:file.name,state:"uploading"}}));
+        try {
+          const response=await callApi<UploadEnvelope>("/agent/attachments/upload",{method:"POST",signal:controller.signal,body:{upload_id:"upload_"+file.id,attachments:[file]}});
+          if(controller.signal.aborted||latest.current.sessionId!==scope)return;
+          const uploaded=response.attachments?.[0];
+          if(response.ok===false||!uploaded?.artifact_uri||uploaded.uploaded===false)throw new Error("upload_rejected");
+          const merged={...file,...uploaded,data_url:file.kind==="image"?file.data_url:undefined,text:undefined,reference:file.reference};
+          const next=[...latest.current.attachments.filter(item=>item.id!==file.id),merged];
+          latest.current.attachments=next;latest.current.onAttachmentsChange?.(next);
+          failedFiles.current.delete(file.id);setFileStates(old=>({...old,[file.id]:{name:file.name,state:"ready"}}));
+        } catch(error) {
+          if(controller.signal.aborted)throw error;
+          failedFiles.current.set(file.id,file);setFileStates(old=>({...old,[file.id]:{name:file.name,state:"failed"}}));
+        }
       }
-      const merged = picked.map((file, index) => ({
-        ...file, ...(uploaded.find((item) => item.id === file.id) ?? uploaded[index]),
-        data_url: file.kind === "image" ? file.data_url : undefined,
-      }));
-      // Use the current list, not the list captured when upload started.
-      const next = [...latest.current.attachments, ...merged];
-      latest.current.attachments = next;
-      latest.current.onAttachmentsChange?.(next);
-    } catch {
-      if (!controller.signal.aborted) setUploadError(t("uploadFailed"));
+      if(failedFiles.current.size){setUploadError(t("uploadFailed"));retryRef.current=()=>{void uploadPrepared(async()=>[...failedFiles.current.values()]);};}
+      else retryRef.current=null;
+    } catch (error) {
+      if (!controller.signal.aborted) setUploadError(error instanceof ComposerResourceError && error.code === "binary"
+        ? tc("binary") : error instanceof Error && error.message === "attachment_limits"
+        ? tUi("attachmentLimits") : label ? tc("referenceFailed") : t("uploadFailed"));
     } finally {
       if (uploadRef.current === controller) uploadRef.current = null;
       if (!controller.signal.aborted) setUploading(false);
     }
+  }
+  function cancelUpload() {
+    uploadRef.current?.abort(); uploadRef.current = null;
+    setUploading(false); setUploadError(""); setReferenceName(""); retryRef.current = null;failedFiles.current.clear();setFileStates({});
+  }
+  function openPicker(imagesOnly: boolean) {
+    if (!pickerRef.current) return;
+    pickerRef.current.accept = imagesOnly ? "image/*" : "image/*,.pdf,.txt,.md,.csv,.json,.html,.xml,.py,.ts,.tsx,.js,.yaml,.yml,.log";
+    pickerRef.current.click();
   }
   function removeAttachment(id: string) {
     const next = latest.current.attachments.filter((file) => file.id !== id);
@@ -134,19 +187,29 @@ export function ChatInput({ value, onChange, onSend, onCancel, sending, locked =
   }
 
   const composer = (
-    <div data-chat-composer={variant} className={`min-w-0 ${taskHeader ? "rounded-b-2xl" : "rounded-2xl"} border border-[color:var(--line-hi)] bg-[color:var(--card-hi)] p-3 transition-colors focus-within:border-brand-500/60 sm:p-4`}>
-      {attachments.length ? (
+    <div data-chat-composer={variant} data-composer-mode={external ? 'external' : 'agent'}
+      onDragEnter={event => { if (!external && event.dataTransfer.types.includes("Files")) { event.preventDefault(); dragDepth.current += 1; if (!busy && !locked && !uploading) setDragging(true); } }}
+      onDragOver={event => { if (!external && event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = busy || locked || uploading ? "none" : "copy"; } }}
+      onDragLeave={event => { if (!external && event.dataTransfer.types.includes("Files")) { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); } }}
+      onDrop={event => { if (!external && event.dataTransfer.types.includes("Files")) { event.preventDefault(); dragDepth.current = 0; setDragging(false); suggestions.dismiss(); pickFiles(Array.from(event.dataTransfer.files)); } }}
+      className={`relative min-w-0 ${taskHeader ? "rounded-b-2xl" : "rounded-2xl"} border border-[color:var(--line-hi)] bg-[color:var(--card-hi)] p-3 transition-colors focus-within:border-brand-500/60 sm:p-4`}>
+      {dragging ? <div role="status" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-brand-500 bg-[color:var(--card-hi)] text-sm">{tc("drop")}</div> : null}
+      {!external&&Object.entries(fileStates).filter(([,f])=>f.state!=="ready").map(([id,file])=><div key={id} className="mb-2 flex items-center gap-2 text-xs" role="status" data-testid="attachment-progress"><span className="min-w-0 flex-1 truncate">{file.name}</span><span>{file.state==="failed"?(zh?"上传失败":"Upload failed"):(zh?"准备发送…":"Preparing…")}</span>{file.state==="failed"&&<button type="button" className="min-h-11 underline" disabled={uploading} onClick={()=>{const value=failedFiles.current.get(id);if(value)void uploadPrepared(async()=>[value]);}}>{zh?"重试此文件":"Retry this file"}</button>}</div>)}
+      {!external && attachments.length ? (
         <div className="mb-3 flex max-h-28 flex-wrap gap-2 overflow-y-auto">
           {attachments.map((file) => (
-            <div key={file.id} className="flex max-w-full items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] py-1 pl-2 pr-1 text-xs">
-              {file.data_url?.startsWith("data:image/") ? (
+            <div key={file.id} data-context-id={file.reference?.id} data-context-kind={file.reference?.kind}
+              title={file.reference ? `${tc("snapshot")} · ${file.reference.id}${file.reference.truncated ? ` · ${tc("excerpt")}` : ""}` : file.name}
+              className="flex max-w-full items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] py-1 pl-2 pr-1 text-xs">
+              {file.reference ? <ComposerSourceIcon kind={file.reference.kind} /> : file.data_url?.startsWith("data:image/") ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={file.data_url} alt="" className="h-6 w-6 rounded object-cover" />
               ) : <FileIcon size={15} />}
-              <span className="min-w-0 max-w-[180px] truncate" title={file.name}>{file.name}</span>
-              <span className="shrink-0 text-[color:var(--text-muted)]">{formatBytes(file.size)}</span>
-              <button type="button" onClick={() => removeAttachment(file.id)} disabled={sending || locked}
-                className="ui-icon-button shrink-0 disabled:opacity-40" aria-label={`${t("removeAttachment")}: ${file.name}`}>
+              {file.reference ? <ReferenceSnapshot attachment={file} className="min-w-0 max-w-[180px] truncate text-left hover:underline">{file.reference.label}</ReferenceSnapshot> : <span className="min-w-0 max-w-[180px] truncate">{file.name}</span>}
+              {file.reason==="reselect_required"&&<span className="text-warn">{zh?"请重新选择文件":"Select this file again"}</span>}
+              <span className="shrink-0 text-[color:var(--text-muted)]">{file.reference ? (file.reference.truncated ? "…" : "@") : formatBytes(file.size)}</span>
+              <button type="button" onClick={() => removeAttachment(file.id)} disabled={busy || locked}
+                className="ui-icon-button shrink-0 disabled:opacity-40" aria-label={file.reference ? tc("remove", { name: file.reference.label }) : `${t("removeAttachment")}: ${file.name}`}>
                 <XIcon size={14} />
               </button>
             </div>
@@ -155,45 +218,60 @@ export function ChatInput({ value, onChange, onSend, onCancel, sending, locked =
       ) : null}
       <textarea
         ref={(node) => { textareaRef.current = node; if (typeof inputRef === "function") inputRef(node); else if (inputRef) (inputRef as { current: HTMLTextAreaElement | null }).current = node; }}
-        value={value} onChange={(event) => onChange(event.target.value)}
+        value={value} {...suggestions.inputProps}
+        role={external ? "textbox" : "combobox"} aria-haspopup={external ? undefined : "listbox"}
         onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.nativeEvent.isComposing || event.keyCode === 229 || suggestions.onKeyDown(event)) return;
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); }
         }}
+        maxLength={external ? 8000 : undefined}
         onPaste={(event) => {
+          if (external) return;
           const files = Array.from(event.clipboardData.files);
           if (files.length) { event.preventDefault(); void pickFiles(files); }
         }}
         disabled={locked} rows={hero ? 2 : 1}
-        aria-label={placeholder ?? t("inputPlaceholder")}
+        aria-label={basePlaceholder}
         aria-describedby={uploading || uploadError ? `${fieldId}-status` : undefined}
-        placeholder={locked ? lockMessage : placeholder ?? t("inputPlaceholder")}
+        placeholder={locked ? lockMessage : composerPlaceholder}
         className={`block ${hero ? "min-h-[88px]" : "min-h-8"} w-full resize-none overflow-y-auto bg-transparent text-base leading-6 text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-70 sm:text-[15px]`}
       />
-      <div data-composer-toolbar className="mt-2 flex flex-wrap items-center gap-1.5">
+      {external ? <div className="mt-2 flex justify-end" data-testid="external-send-toolbar">
+        <button type="button" onClick={submit} disabled={!canSend} aria-label={t('send')} aria-busy={sending}
+          data-testid="external-send" className="inline-flex min-h-9 items-center gap-2 rounded-lg bg-brand-500 px-4 text-sm text-white hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40">
+          <SendIcon size={16} /><span>{t('send')}</span>
+        </button>
+      </div> : <div data-composer-toolbar className="mt-2 flex flex-wrap items-center gap-1.5">
         <input ref={pickerRef} id={fieldId} type="file" multiple className="hidden" tabIndex={-1}
-          aria-label={t("addAttachment")} disabled={sending || locked || uploading || !onAttachmentsChange}
+          aria-label={t("addAttachment")} disabled={busy || locked || uploading || !onAttachmentsChange}
           accept="image/*,.pdf,.txt,.md,.csv,.json,.html,.xml"
           onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void pickFiles(files); }} />
-        <button type="button" onClick={() => pickerRef.current?.click()} aria-label={t("addAttachment")}
-          disabled={sending || locked || uploading || !onAttachmentsChange} className="ui-icon-button disabled:cursor-not-allowed disabled:opacity-40"><FilePlusIcon size={18} /></button>
-        <ComposerPermissionMenu settings={settings} onSettingsChange={onSettingsChange} disabled={sending || locked} size={variant} />
-        <div data-composer-models className="ml-auto flex min-w-0 items-center gap-1.5 max-[520px]:ml-0 max-[520px]:w-full max-[520px]:justify-end">
-          <ComposerModelMenu settings={settings} onSettingsChange={onSettingsChange} modelOptions={modelOptions} disabled={sending || locked} size={variant} />
-          {sending && onCancel ? <button type="button" onClick={onCancel} className="ui-icon-button border border-[color:var(--line-hi)]" aria-label={t("cancelTurn")}><StopIcon size={17} /></button> : null}
-          {!sending ? <button type="button" onClick={submit} disabled={!canSend} aria-label={t("send")} title={locked ? lockMessage : t("send")}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-500 text-white transition-colors hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40"><SendIcon size={17} /></button> : null}
+        <ComposerAddMenu disabled={busy || locked || uploading || !onAttachmentsChange} uploadDisabled={!onAttachmentsChange}
+          onFiles={openPicker} onTrigger={suggestions.openTrigger} onOpen={suggestions.dismiss} inputRef={textareaRef} />
+        {!external && <label className="flex min-h-11 items-center gap-1 text-xs"><span className="sr-only">{zh?"工作方式":"Work mode"}</span><select data-testid="work-mode" aria-label={zh?"工作方式":"Work mode"} className="min-h-11 rounded-lg bg-transparent px-2" value={settings.work_mode||"execute"} disabled={busy||locked} onChange={e=>onSettingsChange({...settings,work_mode:e.target.value as "execute"|"plan"})}><option value="execute">{zh?"执行任务":"Execute task"}</option><option value="plan">{zh?"先制定计划":"Plan first"}</option></select></label>}
+        {!external && <ComposerPermissionMenu settings={settings} onSettingsChange={onSettingsChange} disabled={busy || locked} size={variant} />}
+        <div data-composer-models title={sending ? (zh ? "模型与权限更改只用于下一条消息，不改变正在执行的任务。" : "Model and permission changes apply to the next message, not the running task.") : undefined} className="ml-auto flex min-w-0 items-center gap-1.5 max-[520px]:ml-0 max-[520px]:w-full max-[520px]:justify-end">
+          {!external && <ComposerModelMenu settings={settings} onSettingsChange={onSettingsChange} modelOptions={modelOptions} disabled={busy || locked} size={variant} />}
+          {sending && onGuide ? <button type="button" onClick={onGuide} data-testid="guide-current-turn" disabled={!canSend || attachments.length > 0 || value.length > 4000}
+            title={zh ? "将文字补充到当前轮次的下一次模型调用；附件请排队发送。" : "Add text to this turn's next model call. Queue attachments separately."}
+            className="min-h-9 shrink-0 rounded-lg px-2 text-xs hover:bg-brand-500/10 disabled:opacity-40">{zh ? "指导本轮" : "Guide this turn"}</button> : null}
+          {sending && onCancel ? <button type="button" onClick={onCancel} disabled={stopping} aria-busy={stopping} data-testid="stop-current-command"
+            className="ui-icon-button border border-[color:var(--line-hi)] disabled:opacity-40" title={zh?"请求停止当前轮次；已完成的外部操作不会撤销。":"Request this turn to stop. Completed external actions remain."} aria-label={stopping ? (zh ? "正在停止" : "Stopping") : t("cancelTurn")}><StopIcon size={17} /></button> : null}
+          <button type="button" onClick={submit} disabled={!canSend} aria-label={sendLabel} title={locked ? lockMessage : sendLabel} aria-busy={busy}
+            data-testid="native-command-send" className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full bg-brand-500 text-white transition-colors hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40 ${sending ? "px-3" : "w-9"}`}><SendIcon size={17} />{sending ? <span className="text-xs">{sendLabel}</span> : null}</button>
         </div>
-      </div>
-      {uploading || uploadError ? <div id={`${fieldId}-status`} role={uploadError ? "alert" : "status"} className="mt-3 flex items-center justify-between gap-2 text-xs leading-relaxed text-[color:var(--text-muted)]">
-        <span>{uploadError || t("uploadingAttachment")}</span>
-        {uploadError ? <button type="button" className="ui-icon-button shrink-0" aria-label={tUi("close")} onClick={() => setUploadError("")}><XIcon size={14} /></button> : <button type="button" className="btn btn-ghost shrink-0" onClick={() => { uploadRef.current?.abort(); uploadRef.current = null; setUploading(false); }}>{tUi("cancel")}</button>}
+      </div>}
+      {!external && (uploading || uploadError) ? <div id={`${fieldId}-status`} role={uploadError ? "alert" : "status"} className="mt-3 flex items-center justify-between gap-2 text-xs leading-relaxed text-[color:var(--text-muted)]">
+        <span className="min-w-0 flex-1">{uploadError || (referenceName ? tc("adding", { name: referenceName }) : t("uploadingAttachment"))}</span>
+        {uploadError && retryRef.current ? <button type="button" className="btn btn-ghost shrink-0" onClick={() => retryRef.current?.()}>{tc("retry")}</button> : null}
+        {uploadError ? <button type="button" className="ui-icon-button shrink-0" aria-label={tUi("close")} onClick={cancelUpload}><XIcon size={14} /></button> : <button type="button" className="btn btn-ghost shrink-0" onClick={cancelUpload}>{tUi("cancel")}</button>}
       </div> : null}
     </div>
   );
-  return hero ? composer : (
+  const editor = external ? composer : <ComposerSuggestions controller={suggestions}>{composer}</ComposerSuggestions>;
+  return hero ? editor : (
     <div className="shrink-0 bg-[color:var(--bg)]" data-testid="composer-dock">
-      <div className="mx-auto max-w-[800px] px-4 pb-3 pt-1 sm:px-6">{taskHeader}{composer}</div>
+      <div className="mx-auto max-w-[800px] px-4 pb-3 pt-1 sm:px-6">{taskHeader}{editor}</div>
     </div>
   );
 }

@@ -47,6 +47,7 @@ from ..llm.attempt_budget import (
 )
 from ..llm.gateway import LLMGateway
 from ..llm.messages import MessagesResponse
+from ..llm.retry import retry_delay
 from ..llm import tool_compaction as _tool_compaction
 from ..tools.approval_contracts import (
     APPROVAL_PENDING_REASON,
@@ -92,6 +93,7 @@ from .tool_projection import project_tool_results
 from .provider_errors import (
     is_context_overflow_error as _is_context_overflow_llm_error,
     is_safety_rejection as _is_llm_safety_rejection,
+    is_rate_limit_error as _is_rate_limit_error,
     is_transient_error as _is_transient_llm_error,
     transcript_char_size as _transcript_char_size,
 )
@@ -1801,6 +1803,9 @@ class WorkspaceNativeAgentLoop:
                                 text=f"[steer] {steer_text}",
                             ).as_dict(),
                         )
+                        confirm_delivery = getattr(steer_text, "confirm", None)
+                        if callable(confirm_delivery):
+                            confirm_delivery()
                     recent_text_lengths.clear()
                     transition_reason = "operator_steer"
                     _LOG.info(
@@ -2000,15 +2005,12 @@ class WorkspaceNativeAgentLoop:
                 messages_for_iteration = transcript
                 transition_reason = "next_required_action_retry"
 
-            # Iteration-level retry loop. The provider adapter
-            # already retries 5 times per HTTP call, so we only land
-            # here after a *sustained* upstream failure (10s+ outage,
-            # repeated 502 burst, etc.). Without this fence the whole
-            # multi-minute turn — and all the tool history already on
-            # disk — gets thrown away because of one bad iteration.
+            # Own retries here, where cancellation, events and the turn budget
+            # are available. Bound adapters make exactly one wire attempt.
             response: Optional[MessagesResponse] = None
             safety_retry_messages: Optional[list[dict[str, Any]]] = None
             llm_attempt = 0
+            retry_state: dict[str, Any] | None = None
             reactive_compact_attempts = 0
             last_transient_error: BaseException | None = None
             llm_max = max(1, int(self.config.llm_retry_attempts))
@@ -2027,6 +2029,9 @@ class WorkspaceNativeAgentLoop:
                         _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS
                     )
                     if remaining <= min_final_provider_window:
+                        if last_transient_error is not None and _is_rate_limit_error(last_transient_error):
+                            setattr(last_transient_error, "retry_exhausted", "deadline")
+                            raise last_transient_error
                         tool_names_for_timeout = {
                             name
                             for name in (
@@ -2074,6 +2079,11 @@ class WorkspaceNativeAgentLoop:
                         transition_reason = "wall_time_final_synthesis"
                         break
                 llm_attempt += 1
+                if retry_state is not None:
+                    emit("assistant", {
+                        **ThinkingBlock(text="").as_dict(),
+                        "retry": {**retry_state, "state": "requesting"},
+                    })
                 try:
                     request_deadline = deadline
                     if (
@@ -2156,6 +2166,11 @@ class WorkspaceNativeAgentLoop:
                             ),
                         },
                     )
+                    if retry_state is not None:
+                        emit("assistant", {
+                            **ThinkingBlock(text="").as_dict(),
+                            "retry": {**retry_state, "state": "recovered"},
+                        })
                     break
                 except Exception as exc:  # noqa: BLE001 — bounded by guard below
                     if stop_for_cancel():
@@ -2229,6 +2244,7 @@ class WorkspaceNativeAgentLoop:
                         and bool(tools_for_iteration)
                         and bool(transcript)
                         and _is_transient_llm_error(exc)
+                        and not _is_rate_limit_error(exc)
                         and not _is_llm_safety_rejection(exc)
                         and transient_required_tool_retry_key
                         not in transient_required_tool_retry_keys
@@ -2467,6 +2483,9 @@ class WorkspaceNativeAgentLoop:
                             else _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS
                         )
                         if remaining <= late_transient_threshold:
+                            if _is_rate_limit_error(exc):
+                                setattr(exc, "retry_exhausted", "deadline")
+                                raise
                             if not timeout_gap_tool_names:
                                 timeout_gap_tool_names = ("provider_response",)
                             if (
@@ -2498,6 +2517,9 @@ class WorkspaceNativeAgentLoop:
                             transition_reason = "wall_time_final_synthesis"
                             break
                     if deadline is not None and time.time() >= deadline:
+                        if _is_rate_limit_error(exc):
+                            setattr(exc, "retry_exhausted", "deadline")
+                            raise
                         can_return_tool_evidence_after_timeout = (
                             not pending_required_for_iteration
                             and total_tool_calls > 0
@@ -2529,7 +2551,8 @@ class WorkspaceNativeAgentLoop:
                         transition_reason = "timeout_during_llm_call"
                         break
                     can_retry_transient_from_tool_evidence = (
-                        not transient_final_synthesis_retry_used
+                        not _is_rate_limit_error(exc)
+                        and not transient_final_synthesis_retry_used
                         and not pending_required_for_iteration
                         and not any(
                             name
@@ -2584,6 +2607,9 @@ class WorkspaceNativeAgentLoop:
                         and attempt_budget.claim("transient_retry")
                     )
                     if not retry_budget_available:
+                        if _is_rate_limit_error(exc):
+                            setattr(exc, "retry_exhausted", "attempt_budget")
+                            raise
                         can_return_required_action_provider_gap = (
                             bool(pending_required_for_iteration)
                             and bool(pending_required_action_tools)
@@ -2630,27 +2656,16 @@ class WorkspaceNativeAgentLoop:
                             ).as_dict(),
                         )
                         raise
-                    raw_delay = min(
-                        llm_cap,
-                        llm_base * (2 ** (llm_attempt - 1)),
+                    delay = retry_delay(
+                        llm_attempt, base_delay=llm_base, max_delay=llm_cap,
+                        headers=getattr(exc, "response_headers", None),
+                        jitter=bool(self.config.llm_retry_full_jitter),
                     )
-                    if bool(self.config.llm_retry_full_jitter):
-                        # Full jitter = uniform(0, raw_delay). This avoids
-                        # synchronised retries across concurrent agents
-                        # sharing a provider account.
-                        import random as _rnd
-                        delay = _rnd.uniform(0.0, raw_delay)
-                    else:
-                        delay = raw_delay
-                    if deadline is not None:
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            # Wall-clock budget already exhausted —
-                            # the outer loop will trip the timeout
-                            # guard on the next iteration. Re-raise
-                            # so the kernel can log a clean failure.
-                            raise
-                        delay = min(delay, max(0.0, remaining - 0.1))
+                    if deadline is not None and delay >= deadline - time.time():
+                        # Never shorten a cooldown to fit the turn or lose 429
+                        # behind a timeout raised by the next provider call.
+                        setattr(exc, "retry_exhausted", "deadline")
+                        raise
                     # Instrument retries so operators can distinguish
                     # provider-side gateway failures from oversized request
                     # payloads. Message count plus rough payload size makes
@@ -2681,16 +2696,8 @@ class WorkspaceNativeAgentLoop:
                         _msg_count, _payload_chars,
                         _request_id or "-", exc,
                     )
-                    # Surface the retry to the dashboard via a
-                    # ``thinking`` block — the frontend's
-                    # ``liveEventsToBlocks`` already renders thinking
-                    # cards in the timeline. Marking it with a clear
-                    # ``[loop.retry]`` prefix lets the operator see
-                    # exactly which iteration tripped the upstream
-                    # error and what backoff window we're sitting
-                    # through. Without this, the only place the retry
-                    # is visible is the backend stdout, which the
-                    # operator usually can't tail.
+                    # Keep diagnostic text for existing traces; the dashboard
+                    # projects only the explicit retry metadata as live status.
                     _diag_lines = [
                         f"[loop.retry] transient LLM error on "
                         f"attempt {llm_attempt}/{llm_max}, "
@@ -2709,10 +2716,22 @@ class WorkspaceNativeAgentLoop:
                             f"~{_payload_chars} chars (helps diagnose "
                             f"context-overflow vs upstream flap)"
                         )
-                    emit(
-                        "assistant",
-                        ThinkingBlock(text="\n".join(_diag_lines)).as_dict(),
-                    )
+                    retry_state = {
+                        "state": "waiting",
+                        "status_code": int(_status_code or (429 if _is_rate_limit_error(exc) else 0)),
+                        "attempt": llm_attempt + 1,
+                        "max_attempts": min(llm_max, llm_attempt + 1 + attempt_budget.remaining),
+                        "delay_s": delay,
+                        "retry_at": time.time() + delay,
+                        "request_id": _request_id,
+                    }
+                    emit("assistant", {
+                        **ThinkingBlock(text=(
+                            f"HTTP 429 · rate limited; retrying in {delay:.1f}s."
+                            if _is_rate_limit_error(exc) else "\n".join(_diag_lines)
+                        )).as_dict(),
+                        "retry": retry_state,
+                    })
                     if delay > 0:
                         if cancel_token is not None:
                             cancel_token.wait(delay)
@@ -3486,6 +3505,9 @@ class WorkspaceNativeAgentLoop:
             })
             if stop_for_cancel():
                 break
+            if any(result.result_protocol == "user_interaction_pending" and not result.is_error for result in batch.results):
+                stop_reason = transition_reason = "user_input_pending"
+                break
             # Persist every result before pausing; no finalizer may hide approval.
             if first_approval_pause(batch.results) is not None:
                 stop_reason = APPROVAL_PENDING_REASON
@@ -3572,7 +3594,7 @@ class WorkspaceNativeAgentLoop:
         # don't count as aborts.
         last_msg = transcript[-1] if transcript else {}
         ended_after_tool_result = _message_has_tool_result(last_msg)
-        waiting_for_approval = stop_reason == APPROVAL_PENDING_REASON
+        waiting_for_approval = stop_reason in (APPROVAL_PENDING_REASON, "user_input_pending")
         was_aborted = bool(aborted_reason) or (
             not waiting_for_approval
             and iterations >= self.config.max_iterations

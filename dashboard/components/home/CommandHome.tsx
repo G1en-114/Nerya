@@ -11,12 +11,16 @@ import {
 import { setComposeDraftPayload, takeComposeDraftPayload } from "../../lib/composeDraft";
 import { AgentStart } from "../chat/AgentStart";
 import { ChatInput } from "../chat/ChatInput";
+import { useWorkbench } from "../chat/useWorkbench";
+import { RuntimeNotice } from "../chat/RuntimeNotice";
+import { useChatDraft } from "../chat/useChatDraft";
 
 export function CommandHome() {
   const router = useRouter();
   const t = useTranslations("commandHome");
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const draft=useChatDraft("home");
+  const { text, setText, attachments, setAttachments } = draft;
+  const workbench=useWorkbench();
   const [settings, setSettings] = useState<ChatRunSettings>(DEFAULT_CHAT_RUN_SETTINGS);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
   const [navigating, setNavigating] = useState(false);
@@ -43,20 +47,24 @@ export function CommandHome() {
     return () => { cancelled = true; window.clearTimeout(focus); };
   }, []);
 
+  useEffect(()=>{if(draft.settings)setSettings(draft.settings);},[draft.settings]);
   function submit() {
-    if (submitted.current || (!text.trim() && !attachments.length)) return;
+    if (workbench.connection!=="online" || submitted.current || (!text.trim() && !attachments.length)) return;
     submitted.current = true;
     setNavigating(true);
     saveRunSettings(settings);
     setComposeDraftPayload({ text: text.trim(), attachments, autoSend: true });
+    setText(""); setAttachments([]);
     router.push("/chat");
   }
 
   return <div className="command-home-root flex min-h-0 flex-1 flex-col">
+    <RuntimeNotice workbench={workbench}/>
+    {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[860px] flex-wrap gap-2 px-4 py-2 text-xs">{draft.recovery.slice(0,3).map(row=><button type="button" className="min-h-11 underline" key={row.key} onClick={()=>draft.restore(row)}>{row.draft.text.slice(0,60)||row.draft.attachments[0]?.name} ↩</button>)}<button type="button" className="min-h-11" aria-label="Dismiss recovered drafts" onClick={draft.dismissRecovery}>×</button></div>}
     <AgentStart value={text} onChange={setText} disabled={navigating} composer={
       <ChatInput variant="hero" inputRef={inputRef} value={text} onChange={setText} onSend={submit}
-        sending={navigating} locked={navigating} placeholder={t("placeholder")}
-        settings={settings} onSettingsChange={setSettings} modelOptions={modelOptions}
+        sending={navigating} locked={navigating||workbench.connection!=="online"} placeholder={t("placeholder")}
+        settings={settings} onSettingsChange={next=>{setSettings(next);draft.setSettings(next);}} modelOptions={modelOptions}
         attachments={attachments} onAttachmentsChange={setAttachments} />
     } />
   </div>;

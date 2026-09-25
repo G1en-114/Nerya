@@ -1,12 +1,14 @@
+import type { ArtifactIndex, VerifierOutcome, ExecutionState } from "./workbench";
 import { topLevelDecisionText, type AssistantMessage, type ChatThread, type NativeBlock, type NativeBlockEnvelope, type TurnPayload } from "./chat";
 
-export type ChatResult = { id: string; title: string; text: string; ts: number; turnId?: string; agentId?: string; attempt?: number };
+export type ChatResult = { id: string; title: string; text: string; ts: number; turnId?: string; agentId?: string; attempt?: number; evidence?: { artifacts?: ArtifactIndex; verifier?: VerifierOutcome; execution?: ExecutionState } };
 const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
 const normalized = (value: unknown): string => text(value).replace(/\s+/g, " ");
 
 /** Final fields win over legacy reasoning; never publish an in-flight draft. */
 export function finalReplyText(message: AssistantMessage): string {
-  if (message.loading || message.error || !message.turn) return "";
+  // External call/progress rows belong to the conversation, never the final-answer canvas.
+  if (message.loading || message.error || !message.turn || message.turn.external_call) return "";
   const turn = message.turn;
   return text(turn.reply_text) || text(turn.final_text) || text(turn.decision?.text)
     || topLevelDecisionText(turn);
@@ -21,7 +23,7 @@ export function collectChatResults(thread: ChatThread | null): ChatResult[] {
     if (message.role === "user") { request = message.text || request; continue; }
     const body = finalReplyText(message);
     if (body) results.push({ id: message.id, title: request.split("\n")[0].slice(0, 120),
-      text: body, ts: message.ts, turnId: message.turn?.turn_id });
+      text: body, ts: message.ts, turnId: message.turn?.turn_id, evidence: { artifacts:message.turn?.artifact_index,verifier:message.turn?.verifier_outcome,execution:message.turn?.execution_state } });
   }
   return results;
 }

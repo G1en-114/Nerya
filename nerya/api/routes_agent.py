@@ -9,6 +9,17 @@ from contextlib import contextmanager
 from typing import Any
 
 from ..agent.attachments import upload_chat_attachments
+from ..agent.history_mutations import deleted_session_ids, has_message_history, is_session_deleted
+
+
+def _history_session_deleted(paths, sid) -> bool:
+    from ..db.sqlite import connect
+    con = connect(paths.db)
+    try:
+        return is_session_deleted(con, str(sid))
+    finally:
+        con.close()
+
 from ..agent.kernel import AgentKernel, AgentTurnResult
 from ..agent.loop_state import (
     TurnCheckpointResumeError,
@@ -101,7 +112,8 @@ def _payload_context_window(payload: dict[str, Any]) -> int | None:
         1000000: 1048576,
         1048576: 1048576,
     }
-    return aliases.get(value)
+    value = aliases.get(value, value)
+    return max(4_096, min(16_777_216, value))
 
 
 def _with_turn_limit_overrides(config, payload: dict[str, Any]):
@@ -601,11 +613,44 @@ def routes():
         model_provider = _normalise_model_provider(payload.get("model_provider"))
         model_id = _normalise_model_id(payload.get("model_id") or payload.get("model"))
         run_config = _with_turn_limit_overrides(client.config, payload)
+        from copy import deepcopy
+        from ..core.config import Config
+        run_config = Config(paths=run_config.paths,data=deepcopy(run_config.data))
+        mode = payload.get("work_mode", "execute")
+        if payload.get("resume_turn_id") and payload.get("session_id"):
+            from ..db.sqlite import connect as _plan_connect
+            con=_plan_connect(client.config.paths.db)
+            try:
+                original=con.execute("SELECT request_json FROM agent_commands WHERE session_id=? AND turn_id=? ORDER BY created_at LIMIT 1",(payload["session_id"],payload["resume_turn_id"])).fetchone()
+                if original:
+                    import json as _plan_json
+                    mode=_plan_json.loads(original[0]).get("work_mode","execute")
+            finally:
+                con.close()
+        if mode not in ("execute", "plan"):
+            return {"ok":False,"_status":400,"error":"invalid_work_mode"}
+        run_config.data.setdefault("agent",{}).setdefault("native",{})["plan_only"] = mode == "plan"
+        if mode == "plan" and not payload.get("resume_turn_id"):
+            payload = deepcopy(payload)
+            user_payload = payload.setdefault("payload",{})
+            user_payload["text"] = str(user_payload.get("text") or "") + "\nWork mode: plan. Investigate with read-only tools, then use propose_plan. Do not modify external state or execute the plan."
+
         trigger = _inject_trusted_actor(
             normalise_trigger_payload(payload),
             payload,
         )
         requested_session_id = payload.get("session_id")
+        if requested_session_id:
+            from ..db.sqlite import connect as _wb_connect
+            con=_wb_connect(client.config.paths.db)
+            try:
+                pending=con.execute("SELECT interaction_id,state,actor_id FROM agent_interactions WHERE session_id=? AND state IN ('pending','deferred','answered')",(requested_session_id,)).fetchall()
+                if pending and (len(pending)!=1 or pending[0]["state"]!="answered" or pending[0]["interaction_id"]!=payload.get("interaction_id") or pending[0]["actor_id"]!=str(payload.get("_auth_actor_id") or "local")):
+                    return {"ok":False,"_status":409,"error":"interaction_response_required"}
+            finally:
+                con.close()
+        if requested_session_id and _history_session_deleted(client.config.paths, requested_session_id):
+            return {"ok": False, "status": "error", "error": "session_deleted", "reason": "session_deleted"}
         trigger_payload = (
             trigger.get("payload")
             if isinstance(trigger.get("payload"), dict)
@@ -703,6 +748,24 @@ def routes():
                         "Wait for it to finish or interrupt it before sending a new turn."
                     ),
                 }
+            # Persist the candidate reference server-side, after validating its
+            # strategy ownership. Future turns cannot silently lose the reference.
+            proposal_id = payload.get("strategy_proposal_id")
+            if proposal_id:
+                if not requested_session_id:
+                    return {"ok": False, "error": "session_id required for a candidate reference", "_status": 400}
+                from ..strategies.workflow_service import source_files
+                from ..strategies.workflow_graph import WorkflowError
+                try:
+                    store = SessionStore(client.config.paths.root)
+                    state = store.load(requested_session_id)
+                    bound_strategy = (state.strategy_id if state else None) or payload.get("strategy_id")
+                    if state and state.strategy_id and payload.get("strategy_id") not in (None, state.strategy_id):
+                        raise ValueError("Strategy binding cannot change")
+                    source_files(client.config.paths, str(bound_strategy or ""), str(proposal_id))
+                    store.update_meta(requested_session_id, {"strategy_proposal_id": str(proposal_id)}, strategy_id=bound_strategy)
+                except (ValueError, OSError, WorkflowError) as exc:
+                    return {"ok": False, "error": str(exc), "_status": 400}
             kernel = AgentKernel(
                 config=run_config,
                 skills=client.skills,
@@ -745,6 +808,33 @@ def routes():
                 })
                 raise
         response = result.asdict(events=turn_events(result))
+        # Continue editing the latest candidate produced in this bound chat.
+        if requested_session_id and payload.get("strategy_id"):
+            from ..strategies.workflow_service import source_files
+            from ..strategies.workflow_graph import WorkflowError
+            def candidate_refs(value, depth=0):
+                if depth > 8:
+                    return
+                if isinstance(value, dict):
+                    if value.get("proposal_id") and value.get("strategy_id") == payload["strategy_id"] and value.get("ok") is not False:
+                        yield str(value["proposal_id"])
+                    for key in ("result", "data", "output", "block", "blocks", "tool_trace", "actions", "content", "text"):
+                        yield from candidate_refs(value.get(key), depth + 1)
+                elif isinstance(value, list):
+                    for item in value:
+                        yield from candidate_refs(item, depth + 1)
+                elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+                    try:
+                        yield from candidate_refs(json.loads(value), depth + 1)
+                    except (ValueError, TypeError):
+                        pass
+            for candidate in dict.fromkeys(candidate_refs(response)):
+                try:
+                    _, candidate_source = source_files(client.config.paths, payload["strategy_id"], candidate)
+                    if candidate_source["state"] in {"draft", "pending_review", "proposed", "approved"}:
+                        SessionStore(client.config.paths.root).update_meta(requested_session_id, {"strategy_proposal_id": candidate}, strategy_id=payload["strategy_id"])
+                except (WorkflowError, OSError, ValueError):
+                    continue
         # Surface the prompt-guard verdict on review (block already short-
         # circuited above). Operators see this in the dashboard turn detail.
         if _pg and _pg.get("verdict") in ("review", "block"):
@@ -755,7 +845,7 @@ def routes():
         # Operator profile self-learning capture — propose facts after
         # stable patterns are observed. Never blocks the turn; failures
         # are swallowed.
-        if not resume_turn_id:
+        if not resume_turn_id and not (response.get("strategy_id") or payload.get("strategy_id")):
             try:
                 from ..agent.profile_capture import observe_turn as _observe_turn
                 _channel_for_capture = (
@@ -883,6 +973,8 @@ def routes():
         "agent.user_message",
         "manual.chat",
         "manual",
+        "mcp",
+        "tunnel",
         "approval_continue",
     })
 
@@ -963,6 +1055,9 @@ def routes():
             rows = AgentSessionRepository(con).list_sessions(
                 limit=fetch_limit,
             )
+            deleted = deleted_session_ids(con)
+            by_id = {sid: row for sid, row in by_id.items() if sid not in deleted}
+            rows = [row for row in rows if row.get("session_id") not in deleted]
             con.close()
             rows = hydrate_db_session_counts(client.config.paths, rows)
             for row in rows:
@@ -984,6 +1079,9 @@ def routes():
             key=session_updated_ts,
             reverse=True,
         )
+        if q.get("view") == "workbench" or q.get("q") or q.get("state"):
+            from ..agent.workbench import filter_sessions
+            sessions = filter_sessions(client.config, sessions, q)
         page = sessions[offset:offset + limit]
         return {
             "sessions": page,
@@ -998,6 +1096,8 @@ def routes():
         sid = q.get("session_id") or q.get("id")
         if not sid:
             return {"error": "session_id required"}
+        if _history_session_deleted(client.config.paths, sid):
+            return {"error": "session not found", "code": "session_deleted", "session_id": sid}
         store = SessionStore(client.config.paths.root)
         state = store.load(sid)
         try:
@@ -1018,105 +1118,21 @@ def routes():
         return merge_session_dict(state, db_row)
 
     def session_delete(client, payload):
-        sid = (payload or {}).get("session_id")
-        if not sid:
-            return {"ok": False, "error": "session_id required"}
-        store = SessionStore(client.config.paths.root)
-        ok = store.delete(sid)
-        db_deleted = False
-        try:
-            from ..db.sqlite import connect
-
-            con = connect(client.config.paths.db)
-            cur = con.execute("DELETE FROM agent_sessions WHERE session_id=?", (sid,))
-            db_deleted = db_deleted or bool(cur.rowcount or 0)
-            cur = con.execute("DELETE FROM agent_messages WHERE session_id=?", (sid,))
-            db_deleted = db_deleted or bool(cur.rowcount or 0)
-            cur = con.execute("DELETE FROM agent_tool_events WHERE session_id=?", (sid,))
-            db_deleted = db_deleted or bool(cur.rowcount or 0)
-            con.close()
-        except Exception:
-            pass
-        return {"ok": bool(ok or db_deleted)}
+        from ..agent.history_mutations import delete_session, history_response
+        return history_response(delete_session, client.config.paths, payload)
 
     def session_rename(client, payload):
-        p = payload or {}
-        sid = str(p.get("session_id") or "").strip()
-        title = str(p.get("title") or "").strip()
-        if not sid or not title:
-            return {"ok": False, "error": "session_id + title required"}
-        title = " ".join(title.split())[:80]
-        store = SessionStore(client.config.paths.root)
-        state = store.update_meta(
-            sid,
-            {
-                "title": title,
-                "title_source": "operator",
-            },
-        )
-        try:
-            from ..db.repositories import AgentSessionRepository
-            from ..db.sqlite import connect
-
-            con = connect(client.config.paths.db)
-            AgentSessionRepository(con).upsert_session(
-                session_id=sid,
-                strategy_id=state.strategy_id,
-                title=title,
-                meta=state.meta,
-            )
-            con.close()
-        except Exception:
-            pass
-        return {"ok": True, "session": state.asdict()}
+        from ..agent.history_mutations import rename_session, history_response
+        return history_response(rename_session, client.config.paths, payload)
 
     def session_message_edit(client, payload):
-        p = payload or {}
-        sid = str(p.get("session_id") or "").strip()
-        message_id = str(p.get("message_id") or "").strip()
-        content = str(p.get("content") or "")
-        if not sid or not message_id:
-            return {"ok": False, "error": "session_id + message_id required"}
-        if not content.strip():
-            return {"ok": False, "error": "content required"}
-        try:
-            from ..db.repositories import AgentSessionRepository
-            from ..db.sqlite import connect
-
-            con = connect(client.config.paths.db)
-            ok = AgentSessionRepository(con).update_message_content(
-                session_id=sid,
-                message_id=message_id,
-                content=content[:16_000],
-            )
-            con.close()
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if not ok:
-            return {"ok": False, "error": "message not found"}
-        return {"ok": True, "session_id": sid, "message_id": message_id}
+        from ..agent.history_mutations import mutate_message, history_response
+        return history_response(mutate_message, client.config.paths, payload)
 
     def session_message_delete(client, payload):
-        p = payload or {}
-        sid = str(p.get("session_id") or "").strip()
-        message_id = str(p.get("message_id") or "").strip()
-        if not sid or not message_id:
-            return {"ok": False, "error": "session_id + message_id required"}
-        try:
-            from ..db.repositories import AgentSessionRepository
-            from ..db.sqlite import connect
-
-            con = connect(client.config.paths.db)
-            ok = AgentSessionRepository(con).delete_session_message(
-                session_id=sid,
-                message_id=message_id,
-            )
-            con.close()
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if not ok:
-            return {"ok": False, "error": "message not found"}
-        return {"ok": True, "session_id": sid, "message_id": message_id}
+        from functools import partial
+        from ..agent.history_mutations import mutate_message, history_response
+        return history_response(partial(mutate_message, delete=True), client.config.paths, payload)
 
     def session_record_skill_state(client, payload):
         p = payload or {}
@@ -1174,7 +1190,11 @@ def routes():
         sid = q.get("session_id") or q.get("id")
         if not sid:
             return {"ok": False, "error": "session_id required"}
+        if _history_session_deleted(client.config.paths, sid):
+            return {"ok": False, "error": "session_deleted", "code": "session_deleted", "session_id": str(sid)}
         messages: list[dict] = []
+        canonical_history = False
+        has_more = False
         full = _truthy_query(q.get("full")) or _truthy_query(q.get("all"))
         try:
             max_pairs = int(q.get("max_pairs") or 200)
@@ -1192,10 +1212,17 @@ def routes():
 
             con = connect(client.config.paths.db)
             repo = AgentSessionRepository(con)
-            rows = repo.transcript(
-                str(sid),
-                limit=0 if full else max_pairs * 2,
-            )
+            canonical_history = has_message_history(con, str(sid))
+            anchor=q.get("anchor_message_id")
+            if anchor and not full:
+                found=con.execute("SELECT ts FROM agent_messages WHERE session_id=? AND message_id=? AND deleted=0",(sid,anchor)).fetchone()
+                if found:
+                    count=con.execute("SELECT count(*) FROM agent_messages WHERE session_id=? AND deleted=0 AND ts>=?",(sid,found["ts"])).fetchone()[0]
+                    max_pairs=max(max_pairs,min(1000,(count+1)//2+2))
+            rows = repo.transcript(str(sid), limit=0 if full else max_pairs * 2 + 1)
+            if not full and len(rows)>max_pairs*2:
+                has_more=True
+                rows=rows[-max_pairs*2:]
             turn_ids = {
                 str(r.get("turn_id") or "")
                 for r in rows
@@ -1228,7 +1255,7 @@ def routes():
                 if r.get("role") == "assistant":
                     turn_candidate = meta.pop("turn", None)
                     if isinstance(turn_candidate, dict):
-                        turn_payload = _rehydrate_turn_tool_events(
+                        turn_payload = turn_candidate if turn_candidate.get("harness") == "external" else _rehydrate_turn_tool_events(
                             turn_candidate,
                             tool_events_by_turn.get(str(r.get("turn_id") or ""), []),
                         )
@@ -1248,8 +1275,10 @@ def routes():
                     }
                 )
         except Exception:
-            messages = []
-        if not messages:
+            if "con" in locals():
+                con.close()
+            return {"ok": False, "error": "history_read_failed", "code": "history_read_failed"}
+        if not messages and not canonical_history:
             try:
                 messages = _txn(
                     client.config.paths,
@@ -1272,18 +1301,23 @@ def routes():
             db_row = None
         db_state = db_session_asdict(db_row) if db_row else {}
         db_meta = db_state.get("meta") if isinstance(db_state.get("meta"), dict) else {}
-        state_meta = state.meta if state else {}
+        merged_state = merge_session_dict(state, db_row) if state else db_state
+        state_meta = merged_state.get("meta") or {}
+        external = db_state.get("source") in {"mcp", "tunnel"}
         return {
             "ok": True,
             "session_id": str(sid),
+            "source": db_state.get("source", ""),
             "strategy_id": (
                 state.strategy_id if state else db_state.get("strategy_id")
             ),
             "title": (state_meta.get("title") or db_meta.get("title") or ""),
+            "strategy_proposal_id": state_meta.get("strategy_proposal_id") or db_meta.get("strategy_proposal_id"),
             "created_at": (state.created_at if state else db_state.get("created_at", "")),
-            "updated_at": (state.updated_at if state else db_state.get("updated_at", "")),
+            "updated_at": merged_state.get("updated_at", ""),
             "messages": messages,
             "count": len(messages),
+            "has_more": has_more,
         }
 
     def stream_events(client, query):
@@ -1328,23 +1362,12 @@ def routes():
             after_seq = int(after_seq_raw) if after_seq_raw not in (None, "") else None
         except (TypeError, ValueError):
             after_seq = None
-        events = bus.recent(after_seq=after_seq)
-        sid = q.get("session_id")
-        if sid:
-            events = [e for e in events if e.get("session_id") == sid]
         try:
-            raw_limit = q.get("limit")
-            limit = int(raw_limit) if raw_limit not in (None, "") else len(events)
+            limit = int(q.get("limit") or 500)
         except (TypeError, ValueError):
-            limit = len(events)
-        if limit > 0 and len(events) > limit:
-            events = events[-limit:]
-        return {
-            "events": events,
-            "count": len(events),
-            "cursor": bus.cursor_after(events),
-            "latest_seq": bus.latest_seq(),
-        }
+            limit = 500
+        return bus.page(after_seq=after_seq, epoch=q.get("epoch"),
+                        session_id=q.get("session_id"), limit=limit)
 
     def interrupt(client, payload):
         """POST /agent/interrupt — stop control.
@@ -1387,6 +1410,13 @@ def routes():
         steered = signal_steer(str(sid), message)
         return {"ok": True, "steered": steered, "session_id": str(sid)}
 
+    def session_message_append(client, payload):
+        from ..mcp.operator_messages import append_message
+        try:
+            return append_message(client.config, payload)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
     def tool_registry(client, _payload):
         return client.agent.list_tools()
 
@@ -1401,6 +1431,7 @@ def routes():
         """
         return run_turn(client, payload, enforce_public_gate=False)
 
+    from .routes_conversation_commands import command_routes
     return [
         ("POST", "/agent/run_turn", run_turn),
         ("POST", "/agent/run_turn_internal", run_turn_internal),
@@ -1413,6 +1444,7 @@ def routes():
         ("GET",  "/agent/session", session_get),
         ("POST", "/agent/session/delete", session_delete),
         ("POST", "/agent/session/rename", session_rename),
+        ("POST", "/agent/session/message/append", session_message_append),
         ("POST", "/agent/session/message/edit", session_message_edit),
         ("POST", "/agent/session/message/delete", session_message_delete),
         ("POST", "/agent/session/skill_state", session_record_skill_state),
@@ -1423,4 +1455,4 @@ def routes():
         ("POST", "/agent/interrupt", interrupt),
         ("POST", "/agent/steer", steer),
         ("GET",  "/agent/tools", tool_registry),
-    ]
+    ] + command_routes(run_turn)

@@ -1,8 +1,11 @@
+import type { ArtifactIndex, VerifierOutcome, ExecutionState } from "./workbench";
 // Chat thread model + localStorage persistence.
 //
 // Threads are stored entirely client-side — the backend `/agent/run_turn`
 // endpoint is stateless (every call builds its own context from the workspace
 // journals), so we just keep the rendered transcript locally for now.
+
+import type { ExternalCallTrace } from "./externalCalls";
 
 export type Role = "user" | "assistant";
 
@@ -89,6 +92,8 @@ export type ChatAttachment = {
   url?: string;
   text?: string;
   artifact_uri?: string;
+  /** Explicitly selected composer context; snapshot bytes live in the artifact. */
+  reference?: { kind: "file" | "skill" | "agent" | "strategy" | "session"; id: string; label: string; truncated?: boolean; captured_at?: string; content_sha256?: string };
   model_sent?: boolean;
   reason?: string;
 };
@@ -105,6 +110,12 @@ export type NativeBlockEnvelope = {
 };
 
 export type TurnPayload = {
+  error?: string;
+  execution_status?: string;
+  command_id?: string;
+  context_snapshot?: Record<string, unknown>;
+  execution_elapsed_ms?: number;
+  external_call?: ExternalCallTrace;
   trigger_event_id?: string | null;
   plan?: { kind?: string; tier?: string };
   decision?: Record<string, unknown> & {
@@ -130,14 +141,24 @@ export type TurnPayload = {
    * when this array is non-empty. */
   blocks?: NativeBlockEnvelope[];
   attachments?: ChatAttachment[];
-  artifact_index?: Record<string, unknown>;
+  artifact_index?: ArtifactIndex;
+  verifier_outcome?: VerifierOutcome;
+  execution_state?: ExecutionState;
   final_report?: Record<string, unknown>;
   /** Identifies which agent harness produced this turn. Useful for
    * debug overlays (legacy vs native). */
   harness?: "legacy" | "native" | string;
 };
 
+export type ExternalUserRequest = { id: string; sequence: number; after_call_id?: string;
+  state: 'queued' | 'delivered' | 'acknowledged'; delivered_at?: number; acknowledged_at?: number };
+
 export type UserMessage = {
+  command_id?: string;
+  command_revision?: number;
+  delivery_state?: string;
+  external_request?: ExternalUserRequest;
+  edited_at?: number;
   id: string;
   role: "user";
   ts: number;
@@ -188,6 +209,10 @@ export type LiveEvent = {
 };
 
 export type AssistantMessage = {
+  command_created_at?: number;
+  command_id?: string;
+  command_revision?: number;
+  execution_status?: string;
   id: string;
   role: "assistant";
   ts: number;
@@ -221,7 +246,7 @@ export type ReasoningEffort =
   | "xhigh";
 
 export type PermissionMode = "default" | "auto" | "yolo";
-export type ModelContextWindow = 131072 | 262144 | 1048576;
+export type ModelContextWindow = number;
 
 export type ChatModelOverride = {
   reasoning_effort?: ReasoningEffort;
@@ -229,6 +254,7 @@ export type ChatModelOverride = {
 };
 
 export type ChatRunSettings = {
+  work_mode?: "execute" | "plan";
   reasoning_effort: ReasoningEffort;
   permission_mode: PermissionMode;
   model_context_window: ModelContextWindow;
@@ -250,12 +276,14 @@ export type ChatModelOption = {
   model: string;
   source: "tier" | "catalog";
   reasoning_effort?: ReasoningEffort;
+  model_context_window?: ModelContextWindow;
 };
 
 type LlmRouteLike = {
   provider?: string | null;
   model?: string | string[] | null;
   models?: string[] | null;
+  context_window?: number | null;
 };
 
 type LlmTierLike = LlmRouteLike & {
@@ -323,6 +351,7 @@ export function buildChatModelOptions({
     providerRaw: unknown,
     modelRaw: unknown,
     reasoningRaw?: unknown,
+    contextWindowRaw?: unknown,
   ) {
     const tier = String(tierRaw || "").trim();
     const provider = String(providerRaw || "").trim().toLowerCase();
@@ -341,6 +370,7 @@ export function buildChatModelOptions({
         model,
         source: "tier",
         reasoning_effort: reasoning,
+        model_context_window: saneContextWindow(contextWindowRaw),
       });
     }
   }
@@ -351,6 +381,7 @@ export function buildChatModelOptions({
       row.provider,
       row.models?.length ? row.models : row.model,
       row.reasoning_effort,
+      row.context_window,
     );
   }
 
@@ -362,6 +393,7 @@ export function buildChatModelOptions({
         route.provider,
         route.models?.length ? route.models : route.model,
         row.reasoning_effort,
+        route.context_window ?? row.context_window,
       );
     }
   }
@@ -381,6 +413,7 @@ export function buildChatModelOptions({
         provider,
         model,
         source: "catalog",
+        model_context_window: saneContextWindow(row.context_window),
       });
     }
   }
@@ -390,6 +423,7 @@ export function buildChatModelOptions({
 
 export type ChatThread = {
   id: string;
+  source?: string;
   title: string;
   created_ts: number;
   updated_ts: number;
@@ -408,6 +442,7 @@ export type ChatThread = {
    * passes the id along so the backend session binds the strategy and
    * the kernel injects the strategy file context. */
   strategy_id?: string | null;
+  strategy_proposal_id?: string | null;
   /** Last time we re-pulled this thread's transcript from the backend.
    * Used to decide whether a refresh on focus is worth doing. */
   imported_at?: number;
@@ -429,7 +464,7 @@ const DEFAULT_PERMISSION_MODE: PermissionMode =
 export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
   reasoning_effort: "off",
   permission_mode: DEFAULT_PERMISSION_MODE,
-  model_context_window: 262144,
+  model_context_window: 1048576,
   model_tier: "",
   model_provider: "",
   model_id: "",
@@ -535,9 +570,17 @@ function pruneTranscriptCache(keepId?: string) {
   saveTranscriptCacheIndex(keep);
 }
 
+export function invalidateThreadTranscript(id: string): void {
+  if (!isBrowser()) return;
+  try { localStorage.removeItem(transcriptCacheKey(id)); } catch { /* cache only */ }
+  saveTranscriptCacheIndex(loadTranscriptCacheIndex().filter(row => row.id !== id));
+}
+
 export function cacheThreadTranscript(thread: ChatThread): ChatThread {
+  if (isBrowser() && loadDeletedSessionIds().has(thread.id)) return thread;
   if (!isBrowser() || thread.messages.length === 0) {
-    return { ...thread, transcript_loaded: thread.messages.length > 0 };
+    if (isBrowser()) invalidateThreadTranscript(thread.id);
+    return { ...thread, transcript_loaded: true };
   }
   const cachedAt = Date.now();
   const next: ChatThread = {
@@ -593,7 +636,7 @@ export function loadCachedThreadTranscript(
   id: string,
   minUpdatedTs = 0,
 ): ChatThread | null {
-  if (!isBrowser() || !id) return null;
+  if (!isBrowser() || !id || loadDeletedSessionIds().has(id)) return null;
   try {
     const raw = localStorage.getItem(transcriptCacheKey(id));
     if (!raw) return null;
@@ -638,7 +681,8 @@ export function loadThreads(): ChatThread[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed as ChatThread[];
+    const deleted = loadDeletedSessionIds();
+    return (parsed as ChatThread[]).filter(thread => !deleted.has(thread.id));
   } catch {
     return [];
   }
@@ -649,7 +693,7 @@ export function saveThreads(threads: ChatThread[]) {
   try {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify(threads.map(compactThreadForHistory)),
+      JSON.stringify(threads.filter(thread => !loadDeletedSessionIds().has(thread.id)).map(compactThreadForHistory)),
     );
   } catch {
     // ignore quota errors — the UI will keep working with in-memory state.
@@ -735,6 +779,7 @@ export function rememberDeletedSession(id: string): Set<string> {
  */
 export function deleteThreadLocally(id: string): ChatThread[] {
   rememberDeletedSession(id);
+  invalidateThreadTranscript(id);
   const next = loadThreads().filter((t) => t.id !== id);
   saveThreads(next);
   return next;
@@ -774,10 +819,11 @@ function saneContextWindow(value: unknown): ModelContextWindow {
       : typeof value === "string"
         ? Number(value.replace(/_/g, ""))
         : NaN;
-  if (raw === 131072 || raw === 128000) return 131072;
-  if (raw === 262144 || raw === 256000) return 262144;
-  if (raw === 1048576 || raw === 1000000) return 1048576;
-  return DEFAULT_CHAT_RUN_SETTINGS.model_context_window;
+  if (!Number.isFinite(raw)) return DEFAULT_CHAT_RUN_SETTINGS.model_context_window;
+  if (raw === 128000) return 131072;
+  if (raw === 256000) return 262144;
+  if (raw === 1000000) return 1048576;
+  return Math.max(4096, Math.min(16777216, Math.round(raw)));
 }
 
 function saneModelOverrides(value: unknown): Record<string, ChatModelOverride> | undefined {
@@ -817,6 +863,7 @@ export function loadRunSettings(): ChatRunSettings {
         effort && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
           ? effort
           : DEFAULT_CHAT_RUN_SETTINGS.reasoning_effort,
+      work_mode: parsed.work_mode === "plan" ? "plan" : "execute",
       permission_mode: mode === "yolo" || mode === "auto" || mode === "default" ? mode : DEFAULT_PERMISSION_MODE,
       model_context_window: saneContextWindow(parsed.model_context_window),
       model_tier:
@@ -1375,7 +1422,9 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           (detail && typeof detail.reasoning === "string" && detail.reasoning) ||
           "";
         out.push({
-          block: { kind: "thinking", text: String(text), index: out.length },
+          block: { kind: "thinking", text: String(text), index: out.length,
+            ...(detail?.retry && typeof detail.retry === "object" ? { retry: detail.retry } : {}),
+          },
           kind: "thinking",
         });
       }

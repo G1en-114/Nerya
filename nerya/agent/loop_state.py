@@ -688,6 +688,9 @@ class LoopRunState:
         if explicit_id and cp.turn_id and explicit_id != cp.turn_id:
             raise ValueError(f"turn checkpoint mismatch: requested={explicit_id!r} checkpoint={cp.turn_id!r}")
         state = cls.from_checkpoint(cp)
+        waiting_since=cp.control.get("user_wait_started_at")
+        if cp.terminal.get("stop_reason")=="user_input_pending" and isinstance(waiting_since,(int,float)) and state.deadline_epoch is not None:
+            state.deadline_epoch += max(0,now-float(waiting_since))
         state.turn_id = state.turn_id or explicit_id or uuid.uuid4().hex[:12]
         state.message_id = state.message_id or uuid.uuid4().hex[:12]
         if deadline is not None:
@@ -720,6 +723,8 @@ class LoopRunState:
             blocked = self.aborted_reason or self.stop_reason or "aborted"
         elif self.stop_reason == APPROVAL_PENDING_REASON:
             blocked = APPROVAL_PENDING_REASON
+        elif self.stop_reason == "user_input_pending":
+            blocked = ""
         elif self.iterations >= config.max_iterations:
             blocked = "max_iterations"
         elif self.deadline_epoch is not None and now >= self.deadline_epoch:
@@ -966,6 +971,7 @@ class LoopRunState:
             "original_user_text": self.original_user_text,
             "recent_text_lengths": list(self.recent_text_lengths),
             "diminishing_returns_triggered": self.diminishing_returns_triggered,
+            "user_wait_started_at": __import__("time").time() if self.stop_reason == "user_input_pending" else None,
             "attempt_budget": self.attempt_budget.asdict(),
             "steer_message_count": self.steer_message_count,
         }

@@ -1018,6 +1018,121 @@ def _v10_agent_turn_checkpoints(con: sqlite3.Connection) -> None:
     )
 
 
+def _v11_memory_namespaces(con: sqlite3.Connection) -> None:
+    """Add workflow ownership and composite session namespaces without data loss.
+
+    SQLite CHECK constraints require a table rebuild. Import references and
+    self-referencing lineage are restored within this migration transaction.
+    """
+    schema = _V7_CANONICAL_MEMORY[0].replace(
+        "memory_records (", "memory_records_v11 (", 1
+    ).replace(
+        "('global', 'strategy', 'session')",
+        "('global', 'strategy', 'workflow', 'session')",
+    ).replace(
+        "session_id         TEXT NOT NULL DEFAULT '',",
+        "session_id         TEXT NOT NULL DEFAULT '',\n"
+        "        workflow_id        TEXT NOT NULL DEFAULT '',",
+    ).replace(
+        "(scope = 'global' AND scope_id = '')",
+        "(scope = 'global' AND scope_id = '' AND strategy_id = '' AND workflow_id = '')",
+    ).replace(
+        "strategy_id = scope_id)", "strategy_id = scope_id AND workflow_id = '')",
+    ).replace(
+        "(scope = 'session' AND scope_id <> '' AND session_id = scope_id)",
+        "(scope = 'workflow' AND workflow_id <> '' AND "
+        "scope_id = json_array(strategy_id, workflow_id)) OR\n"
+        "          (scope = 'session' AND session_id <> '' AND "
+        "scope_id = json_array(strategy_id, workflow_id, session_id))",
+    ).replace(
+        "REFERENCES memory_records(memory_id)",
+        "REFERENCES memory_records_v11(memory_id)",
+    )
+    con.execute(schema)
+    columns = [str(row[1]) for row in con.execute("PRAGMA table_info(memory_records)")]
+    names = ", ".join(columns)
+    values = ", ".join(
+        "CASE WHEN scope = 'session' THEN json_array(strategy_id, '', session_id) ELSE scope_id END"
+        if name == "scope_id" else name for name in columns
+    )
+    con.execute(f"INSERT INTO memory_records_v11 ({names}) SELECT {values} FROM memory_records")
+    con.execute("CREATE TEMP TABLE memory_import_backup AS SELECT * FROM memory_import_sources")
+    con.execute("DROP TABLE memory_import_sources")
+    # Remove old self references before dropping the old table. The copy keeps them.
+    con.execute("UPDATE memory_records SET superseded_by = NULL")
+    con.execute("DROP TABLE memory_records")
+    con.execute("ALTER TABLE memory_records_v11 RENAME TO memory_records")
+    for stmt in _V7_CANONICAL_MEMORY[1:]:
+        con.execute(stmt)
+    con.execute("INSERT INTO memory_import_sources SELECT * FROM memory_import_backup")
+    con.execute("DROP TABLE memory_import_backup")
+    con.execute("""
+        CREATE TABLE memory_session_context (
+            session_id TEXT PRIMARY KEY,
+            actor_id TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL
+        )
+    """)
+
+
+def _v12_chat_history_tombstones(con: sqlite3.Connection) -> None:
+    """Prevent deleted conversations from being recreated by delayed writers."""
+    con.execute("CREATE TABLE agent_deleted_sessions (session_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL)")
+    for table in ("agent_sessions", "agent_messages", "agent_turn_checkpoints"):
+        for event in ("INSERT", "UPDATE"):
+            con.execute(f"""
+                CREATE TRIGGER history_deleted_{table}_{event.lower()}
+                BEFORE {event} ON {table}
+                WHEN EXISTS (SELECT 1 FROM agent_deleted_sessions WHERE session_id=NEW.session_id)
+                BEGIN SELECT RAISE(ABORT, 'session_deleted'); END
+            """)
+
+
+def _v13_conversation_commands(con: sqlite3.Connection) -> None:
+    """Durable ingress and queue state, independent of tool side effects."""
+    con.execute("""CREATE TABLE IF NOT EXISTS agent_command_queues (
+        session_id TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
+        pause_reason TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
+        runtime_epoch TEXT NOT NULL, worker_owner TEXT NOT NULL DEFAULT '',
+        lease_until REAL NOT NULL DEFAULT 0, updated_at REAL NOT NULL
+    )""")
+    con.execute("""CREATE TABLE IF NOT EXISTS agent_commands (
+        command_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL, kind TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, request_json TEXT NOT NULL,
+        context_json TEXT NOT NULL, state TEXT NOT NULL,
+        turn_id TEXT NOT NULL, position INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+        updated_at REAL NOT NULL, result_json TEXT, error_json TEXT
+    )""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_command_session ON agent_commands(session_id, position)")
+    con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_command_active
+        ON agent_commands(session_id) WHERE kind != 'guide' AND state IN ('running','stopping')""")
+    con.execute("""CREATE TABLE IF NOT EXISTS agent_command_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_id TEXT NOT NULL REFERENCES agent_commands(command_id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+        UNIQUE(command_id, event_id)
+    )""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_command_events ON agent_command_events(command_id,id)")
+    con.execute("""CREATE TABLE IF NOT EXISTS agent_message_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL, content TEXT NOT NULL, captured_at REAL NOT NULL,
+        operation TEXT NOT NULL
+    )""")
+
+
+def _v14_user_interactions(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS agent_interactions (
+        interaction_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+        kind TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+        payload_json TEXT NOT NULL, response_id TEXT, response_json TEXT, actor_id TEXT,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_interactions_session ON agent_interactions(session_id,state)")
+
+
 # Append new migrations to the end of this list. Never renumber; new
 # work always becomes a *new* version. The registry validator above
 # enforces a contiguous 1..N sequence at startup.
@@ -1044,6 +1159,10 @@ MIGRATIONS: list[Migration] = [
         name="agent_turn_checkpoints",
         up=_v10_agent_turn_checkpoints,
     ),
+    Migration(version=11, name="memory_namespaces", up=_v11_memory_namespaces),
+    Migration(version=12, name="chat_history_tombstones", up=_v12_chat_history_tombstones),
+    Migration(version=13, name="conversation_commands", up=_v13_conversation_commands),
+    Migration(version=14, name="user_interactions", up=_v14_user_interactions),
 ]
 
 

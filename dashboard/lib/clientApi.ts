@@ -136,6 +136,8 @@ const READONLY_POST_PATHS = new Set([
 
 function canUseReadCache(method: "GET" | "POST", path: string): boolean {
   if (typeof window === "undefined") return false;
+  if (path.startsWith("/runtime/info")) return false;
+  if (/^\/agent\/(sessions(?:\/|\?|$)|commands(?:\/|\?|$)|stream\/events|session\/events)/.test(path)) return false;
   if (method === "GET") return true;
   return READONLY_POST_PATHS.has(path);
 }
@@ -197,7 +199,7 @@ async function post<T>(path: string, body: unknown = {}): Promise<T> {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      handleAuthFailure(res.status);
+      handleAuthFailure(res.status, text);
       throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
     }
     if (!READONLY_POST_PATHS.has(path)) invalidateReadCache();
@@ -213,7 +215,7 @@ async function get<T>(path: string): Promise<T> {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      handleAuthFailure(res.status);
+      handleAuthFailure(res.status, text);
       throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
     }
     return (await res.json()) as T;
@@ -226,6 +228,12 @@ async function get<T>(path: string): Promise<T> {
  *  Superseded all historical imports from ``lib/client.ts`` — keep the
  *  signature stable so existing call sites keep compiling.
  */
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number, public readonly payload: unknown) {
+    super(message); this.name = "ApiError";
+  }
+}
+
 export async function callApi<T = unknown>(
   path: string,
   init?: { method?: string; body?: unknown; signal?: AbortSignal }
@@ -244,7 +252,7 @@ export async function callApi<T = unknown>(
     let body: unknown = null;
     try { body = text ? JSON.parse(text) : null; } catch { body = text; }
     if (!res.ok) {
-      handleAuthFailure(res.status);
+      handleAuthFailure(res.status, text);
       // Surface as much upstream context as the proxy / backend gave us so
       // the chat error card can show real failure causes (e.g. "ECONNREFUSED
       // 127.0.0.1:18317") instead of opaque labels like ``upstream_unreachable``.
@@ -266,7 +274,7 @@ export async function callApi<T = unknown>(
       } else if (typeof body === "string" && body.trim()) {
         parts.push(body.trim());
       }
-      throw new Error(parts.join(" | "));
+      throw new ApiError(parts.join(" | "), res.status, body);
     }
     if (method !== "GET" && method !== "HEAD" && !(method === "POST" && READONLY_POST_PATHS.has(normalizedPath))) {
       invalidateReadCache();
@@ -1397,6 +1405,8 @@ export type LlmRouteConfig = {
   provider: string;
   model: string;
   models?: string[];
+  reasoning_effort?: string;
+  context_window?: number;
   base_url?: string;
   provider_key_ref?: string;
   provider_key_refs?: string[];
@@ -1412,6 +1422,7 @@ export type LlmTierConfig = {
   provider: string;
   model: string;
   models?: string[];
+  context_window?: number;
   base_url?: string;
   provider_key_ref?: string;
   provider_key?: string;
@@ -1563,79 +1574,6 @@ export type SearchSearxngDeployResponse = SearchSearxngStatus & {
   settings_yml?: string;
 };
 
-export type BrowserKind = "binary" | "python_pkg" | "node_service";
-
-export type BrowserSpec = {
-  name: string;
-  title: string;
-  kind: BrowserKind;
-  recommended_rank?: number;
-  summary: string;
-  homepage: string;
-  license: string;
-  supported_platforms?: string[] | null;
-  pip_package?: string | null;
-  repo_url?: string | null;
-  service_url?: string | null;
-  notes?: string;
-};
-
-export type BrowserStatusRow = {
-  name: string;
-  title: string;
-  kind: BrowserKind;
-  recommended_rank?: number;
-  summary: string;
-  homepage: string;
-  installed: boolean;
-  ready?: boolean;
-  managed: boolean;
-  enabled: boolean;
-  binary_path?: string;
-  checkout_path?: string;
-  module?: string;
-  version?: string;
-  platform: string;
-  platform_supported: boolean;
-  asset?: string;
-  pip_package?: string | null;
-  repo_url?: string | null;
-  service_url?: string | null;
-  service_ready?: boolean;
-  service_error?: string;
-  notes?: string;
-};
-
-export type BrowsersStatus = {
-  ok: boolean;
-  engines: BrowserStatusRow[];
-  selected: string | null;
-  platform: string;
-  state_file: string;
-  binaries_dir: string;
-};
-
-export type BrowsersConfigureRequest = {
-  selected?: string;
-  enabled?: Record<string, boolean>;
-};
-
-export type BrowserActionResponse = {
-  ok: boolean;
-  name?: string;
-  error?: string;
-  detail?: string;
-  binary?: string;
-  version?: string;
-  asset?: string;
-  platform?: string;
-  package?: string;
-  elapsed_ms?: number;
-  status?: BrowsersStatus;
-  stderr_tail?: string;
-  stdout_tail?: string;
-};
-
 export type FinancialDatasetsStatus = {
   ok: boolean;
   name: string;
@@ -1655,203 +1593,9 @@ export type FinancialDatasetsKeysRequest = {
   store?: "vault" | "workspace";
 };
 
-export type BrowserProbeResponse = {
-  ok: boolean;
-  name?: string;
-  error?: string;
-  detail?: string;
-  url?: string;
-  fetch_method?: string;
-  elapsed_ms?: number;
-  bytes?: number;
-  markdown?: string;
-  text?: string;
-  html?: string;
-  markdown_preview?: string;
-  text_preview?: string;
-  html_preview?: string;
-  returncode?: number;
-  stderr_tail?: string;
-};
-
-// ---- Live browser sessions ------------------------------------------
-
-export type BrowserSessionFetchResult = {
-  ok?: boolean;
-  name?: string;
-  error?: string;
-  detail?: string;
-  url?: string;
-  fetch_method?: string;
-  elapsed_ms?: number;
-  bytes?: number;
-  markdown?: string;
-  text?: string;
-  html?: string;
-  returncode?: number;
-  stderr_tail?: string;
-};
-
-export type BrowserSessionHistoryEntry = {
-  ts: string;
-  url: string;
-  ok: boolean;
-  fetch_method?: string;
-  bytes?: number;
-  elapsed_ms?: number;
-};
-
-export type BrowserSessionSummary = {
-  session_id: string;
-  engine?: string;
-  current_url?: string;
-  created_at?: string;
-  updated_at?: string;
-  history_count?: number;
-  last_ok?: boolean;
-  last_fetch_method?: string;
-  last_bytes?: number;
-  last_elapsed_ms?: number;
-  cdp?: boolean;
-};
-
-export type BrowserSessionEnvelope = BrowserSessionSummary & {
-  ok: boolean;
-  error?: string;
-  engine?: string;
-  result?: BrowserSessionFetchResult;
-};
-
-export type BrowserSessionScreenshot = {
-  ts: string;
-  url: string;
-  ok: boolean;
-  path?: string;
-  bytes?: number;
-  elapsed_ms?: number;
-  fetch_method?: string;
-  error?: string;
-  stderr_tail?: string;
-  data_uri?: string;
-};
-
-export type BrowserSessionRecord = BrowserSessionSummary & {
-  ok: boolean;
-  history: BrowserSessionHistoryEntry[];
-  last?: BrowserSessionFetchResult;
-  screenshots?: BrowserSessionScreenshot[];
-  last_screenshot?: BrowserSessionScreenshot;
-};
-
-export type BrowserSessionScreenshotResponse = {
-  ok: boolean;
-  session_id?: string;
-  engine?: string;
-  url?: string;
-  path?: string;
-  bytes?: number;
-  elapsed_ms?: number;
-  fetch_method?: string;
-  data_uri?: string;
-  error?: string;
-  detail?: string;
-  stderr_tail?: string;
-  data_uri_error?: string;
-};
-
-export type BrowserSessionListResponse = {
-  ok: boolean;
-  count: number;
-  sessions: BrowserSessionSummary[];
-};
-
-export type BrowserSessionStartRequest = {
-  url: string;
-  engine?: string;
-  session_id?: string;
-  timeout_s?: number;
-};
-
-export type BrowserSessionNavigateRequest = {
-  session_id: string;
-  url: string;
-  timeout_s?: number;
-};
-
-export type BrowserCdpAction =
-  | "click_xy"
-  | "click_selector"
-  | "type"
-  | "press"
-  | "scroll"
-  | "scroll_to"
-  | "goto"
-  | "go_back"
-  | "go_forward"
-  | "reload"
-  | "eval"
-  | "title"
-  | "get_console"
-  | "get_network"
-  | "get_api_requests"
-  | "clear_events";
-
-export type BrowserCdpActionRequest = {
-  session_id: string;
-  action: BrowserCdpAction;
-  payload?: Record<string, unknown>;
-};
-
-export type BrowserConsoleEvent = {
-  ts?: string;
-  kind?: string;
-  level?: string;
-  text?: string;
-  url?: string;
-  line?: number;
-  column?: number;
-  source?: string;
-};
-
-export type BrowserNetworkEvent = {
-  ts?: string;
-  kind?: string;
-  method?: string;
-  url?: string;
-  status?: number | string;
-  status_text?: string;
-  resource_type?: string;
-  request_id?: string;
-  elapsed_ms?: number;
-  api?: boolean;
-  ok?: boolean;
-  failure?: string;
-};
-
-export type BrowserCdpActionResponse = {
-  ok: boolean;
-  action?: string;
-  current_url?: string;
-  elapsed_ms?: number;
-  error?: string;
-  detail?: string;
-  hint?: string;
-  click?: { x: number; y: number };
-  selector?: string;
-  url?: string;
-  typed?: number;
-  key?: string;
-  delta?: { dx: number; dy: number };
-  value?: string;
-  title?: string;
-  console?: BrowserConsoleEvent[];
-  events?: BrowserNetworkEvent[];
-  count?: number;
-  total?: number;
-  cleared?: { console?: number; network?: number };
-};
-
 export type AuthStatus = {
+  /** Server-verified socket locality; localhost in the address bar is not proof. */
+  local_access?: boolean;
   ok: boolean;
   mode: string;
   password_configured: boolean;
@@ -3698,7 +3442,7 @@ export const clientApi = {
     post<SearchSearxngDeployResponse>("/search/engines/searxng/teardown", body),
 
   // ---------------------------------------------------------------
-  // Headless browser engines (camofox / cloakbrowser / lightpanda / obscura)
+  // Managed Chromium work browser
   // ---------------------------------------------------------------
   browserSurface: async (body: Record<string, unknown>, signal?: AbortSignal): Promise<DesktopBrowserResponse> => {
     const response = await fetch(`${BASE}/browsers/desktop`, { method: 'POST',
@@ -3716,62 +3460,6 @@ export const clientApi = {
     get<DesktopBrowserResponse>(`/browsers/desktop?profile_id=${encodeURIComponent(profile_id)}`),
   browserDesktop: (body: Record<string, unknown>) =>
     post<DesktopBrowserResponse>("/browsers/desktop", body),
-  browsersStatus: () => get<BrowsersStatus>("/browsers/status"),
-  browsersRegistry: () =>
-    get<{ ok: boolean; engines: BrowserSpec[] }>("/browsers/registry"),
-
-  // ---------------------------------------------------------------
-  // Live browser sessions (dashboard-driven navigation)
-  // ---------------------------------------------------------------
-  browserSessionStart: (body: BrowserSessionStartRequest) =>
-    post<BrowserSessionEnvelope>("/browsers/session/start", body),
-  browserSessionNavigate: (body: BrowserSessionNavigateRequest) =>
-    post<BrowserSessionEnvelope>("/browsers/session/navigate", body),
-  browserSessionSnapshot: (body: { session_id: string; timeout_s?: number }) =>
-    post<BrowserSessionEnvelope>("/browsers/session/snapshot", body),
-  browserSessionScreenshot: (body: {
-    session_id: string;
-    url?: string;
-    full_page?: boolean;
-    timeout_s?: number;
-  }) =>
-    post<BrowserSessionScreenshotResponse>(
-      "/browsers/session/screenshot",
-      body,
-    ),
-  browserSessionClose: (session_id: string) =>
-    post<{ ok: boolean; removed: boolean; session_id: string }>(
-      "/browsers/session/close",
-      { session_id },
-    ),
-  browserSessionList: () =>
-    get<BrowserSessionListResponse>("/browsers/session/list"),
-  browserSessionGet: (session_id: string) =>
-    get<BrowserSessionRecord>(
-      `/browsers/session/get?session_id=${encodeURIComponent(session_id)}`,
-    ),
-  browserSessionCdpOpen: (body: BrowserSessionStartRequest) =>
-    post<BrowserSessionEnvelope & { current_url?: string }>(
-      "/browsers/session/cdp_open",
-      body,
-    ),
-  browserSessionCdpAction: (body: BrowserCdpActionRequest) =>
-    post<BrowserCdpActionResponse>("/browsers/session/cdp_action", body),
-  browserSessionCdpScreenshot: (body: {
-    session_id: string;
-    full_page?: boolean;
-    timeout_s?: number;
-  }) =>
-    post<BrowserSessionScreenshotResponse>(
-      "/browsers/session/cdp_screenshot",
-      body,
-    ),
-  browserSessionCdpClose: (session_id: string) =>
-    post<{ ok: boolean; closed: boolean; session_id: string; error?: string }>(
-      "/browsers/session/cdp_close",
-      { session_id },
-    ),
-
   // ---------------------------------------------------------------
   // Data-source API keys (Financial Datasets, equities backbone)
   // ---------------------------------------------------------------
@@ -4247,7 +3935,7 @@ export const clientApi = {
    */
   streamEvents: (
     after_seq?: number,
-    opts?: { limit?: number; session_id?: string },
+    opts?: { limit?: number; session_id?: string; epoch?: string },
   ) => {
     const qs = new URLSearchParams();
     if (typeof after_seq === "number" && Number.isFinite(after_seq)) {
@@ -4257,12 +3945,17 @@ export const clientApi = {
       qs.set("limit", String(Math.max(1, Math.floor(opts.limit))));
     }
     if (opts?.session_id) qs.set("session_id", opts.session_id);
+    if (opts?.epoch) qs.set("epoch", opts.epoch);
     const suffix = qs.toString();
     return get<{
       events: Array<Record<string, unknown>>;
       latest_seq: number;
       count: number;
       cursor: number;
+      next_cursor?: number;
+      epoch?: string;
+      has_more?: boolean;
+      reset_required?: boolean;
     }>(`/agent/stream/events${suffix ? `?${suffix}` : ""}`);
   },
   agentTrace: (body: {
@@ -4331,10 +4024,11 @@ export const clientApi = {
     ),
   sessionTranscript: (
     session_id: string,
-    opts?: { full?: boolean; max_pairs?: number; per_msg_cap?: number },
+    opts?: { full?: boolean; max_pairs?: number; per_msg_cap?: number;anchor_message_id?:string },
   ) => {
     const qs = new URLSearchParams();
     qs.set("session_id", session_id);
+    if(opts?.anchor_message_id)qs.set("anchor_message_id",opts.anchor_message_id);
     if (opts?.full) qs.set("full", "1");
     if (typeof opts?.max_pairs === "number") {
       qs.set("max_pairs", String(opts.max_pairs));
@@ -4344,8 +4038,11 @@ export const clientApi = {
     }
     return get<{
       ok: boolean;
+      has_more?: boolean;
       session_id: string;
+      source?: string;
       strategy_id?: string | null;
+      strategy_proposal_id?: string | null;
       title?: string;
       created_at?: string;
       updated_at?: string;

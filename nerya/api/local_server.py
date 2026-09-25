@@ -19,12 +19,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from ..core.config import Config
+from ..core.errors import LLMError
+from ..llm.retry import parse_retry_after
 from ..sdk import InternalClient
 from ..skills.kernel import SkillKernel
 from . import auth as auth_mod
 from . import routes_agent, routes_approvals, routes_auth, routes_capability, routes_dev, routes_discovery, routes_evolution
 from . import routes_exchanges, routes_health, routes_llm, routes_market
-from . import routes_browsers, routes_browsers_session, routes_data_sources, routes_memory, routes_messages, routes_network, routes_oauth, routes_portfolio, routes_provider_auth, routes_scripts, routes_search, routes_security
+from . import routes_browsers, routes_data_sources, routes_memory, routes_messages, routes_network, routes_oauth, routes_portfolio, routes_provider_auth, routes_scripts, routes_search, routes_security
 from . import routes_skills, routes_strategies_runtime, routes_strategy
 from . import routes_strategy_history, routes_trading
 from . import routes_teams
@@ -60,6 +62,23 @@ _THREAD_CLIENTS = threading.local()
 log = logging.getLogger(__name__)
 
 
+def _rate_limit_response(exc: BaseException) -> dict[str, Any] | None:
+    """Expected provider throttling is not a runtime failure or a stack trace."""
+    if not isinstance(exc, LLMError) or getattr(exc, "status_code", None) != 429:
+        return None
+    quota = bool(getattr(exc, "quota_exhausted", False))
+    return {
+        "error": "quota_exhausted" if quota else "rate_limited",
+        "status_code": 429,
+        "message": "Provider quota exhausted." if quota else "Provider rate limit reached.",
+        "provider": getattr(exc, "provider", ""),
+        "request_id": getattr(exc, "request_id", ""),
+        "retryable": bool(getattr(exc, "retryable", not quota)),
+        "retry_after_s": parse_retry_after(getattr(exc, "response_headers", None)),
+        "retry_exhausted": getattr(exc, "retry_exhausted", None),
+    }
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
@@ -74,13 +93,29 @@ _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
     "/browsers/agent",
     "/agent/run_turn",
     "/agent/run_turn_internal",
+    "/agent/commands",
+    "/agent/commands/control",
+    "/agent/interactions/respond",
     "/approvals/callback",
     "/strategy/close_positions",
     "/trading/cancel",
+    "/orders/cancel",
+    "/executors/cancel",
     "/trading/submit",
     "/wallet/swap",
 })
 _DASHBOARD_INTERNAL_HEADER = "x-nerya-dashboard-internal"
+
+
+def _memory_request_client(config: Config, auth: auth_mod.AuthResult, path: str) -> InternalClient:
+    """Memory routes use a request-local authenticated identity, never body ids."""
+    client = _client_for_current_thread(config)
+    if path.startswith("/memory/"):
+        from copy import copy
+        client = copy(client)
+        from ..memory.scope import memory_actor
+        client.actor_id = memory_actor(auth.actor)
+    return client
 
 
 def _stamp_trusted_auth(payload: dict[str, Any], auth: auth_mod.AuthResult) -> dict[str, Any]:
@@ -240,7 +275,7 @@ def _collect_routes(extra_modules: tuple = ()) -> None:
     base_modules = (routes_health, routes_auth, routes_workspace, routes_workspace_ui, routes_agent,
                 routes_skills, routes_triggers, routes_trading,
                 routes_llm, routes_memory, routes_strategy_history, routes_scripts,
-                routes_search, routes_browsers, routes_browsers_session, routes_data_sources,
+                routes_search, routes_browsers, routes_data_sources,
                 routes_messages, routes_evolution, routes_security, routes_network,
                 routes_market, routes_portfolio, routes_wallet,
                 routes_exchanges, routes_discovery, routes_dev,
@@ -391,7 +426,7 @@ def _start_account_refresh_loop(client: InternalClient) -> None:
             try:
                 refresh_account_marks(
                     client.config,
-                    run_executors=True,
+                    run_executors=False,
                     only_due=True,
                 )
             except Exception:  # pragma: no cover - background loop guard
@@ -421,6 +456,8 @@ def _start_live_order_poller(client: InternalClient) -> None:
     The cadence is governed by ``trading.live_order_poll_interval_s``
     (default 5s) — short enough to feel real-time on the dashboard but
     long enough to leave plenty of headroom under venue rate limits.
+    Each cycle also advances order and protection executors, independently
+    of the slower account NAV refresh.
     """
 
     if os.environ.get("NERYA_DISABLE_ORDER_POLLER", "").strip().lower() in {"1", "true", "yes"}:
@@ -441,6 +478,18 @@ def _start_live_order_poller(client: InternalClient) -> None:
                 poll_active_live_orders(client.config)
             except Exception:  # pragma: no cover - background loop guard
                 log.exception("live order poller failed")
+            try:
+                from contextlib import closing
+                from ..trading.executors import ExecutorOrchestrator
+                with closing(ExecutorOrchestrator(client.config)) as orchestrator:
+                    orchestrator.run_once()
+            except Exception:
+                log.exception("trading executor tick failed")
+            try:
+                from ..wallet.swap_approval import reconcile_pending
+                reconcile_pending(client.config)
+            except Exception:
+                log.exception("wallet transaction reconciliation failed")
             time.sleep(max(1.0, tick))
 
     thread = threading.Thread(
@@ -585,6 +634,11 @@ def build_server(
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            if status == 429:
+                self.send_header("Cache-Control", "no-store")
+                retry_after = body.get("retry_after_s")
+                if isinstance(retry_after, (int, float)) and math.isfinite(retry_after) and retry_after >= 0:
+                    self.send_header("Retry-After", str(math.ceil(retry_after)))
             self._cors()
             self.end_headers()
             self.wfile.write(data)
@@ -638,7 +692,7 @@ def build_server(
                     path=path,
                     client_addr=client_addr,
                 )
-            if result.ok and path == "/agent/run_turn_internal":
+            if result.ok and (path == "/agent/interactions/respond" or path == "/agent/run_turn_internal" or path == "/agent/commands" or path.startswith("/agent/commands/")):
                 expected = str(
                     os.environ.get("NERYA_DASHBOARD_INTERNAL_TOKEN")
                     or config.get("runtime.auth.dashboard_internal_token")
@@ -672,7 +726,7 @@ def build_server(
                      for k, v in parse_qs(parsed.query).items()}
             query.update(path_params)
             try:
-                result = handler(_client_for_current_thread(config), query)
+                result = handler(_memory_request_client(config, auth, parsed.path), query)
                 if isinstance(result, StreamingResponse):
                     result.run(self)
                 elif isinstance(result, BinaryResponse):
@@ -681,7 +735,12 @@ def build_server(
                     status, body = _status_body_from_result(result)
                     self._write(status, body)
             except Exception as exc:  # pragma: no cover
-                self._write(500, {"error": f"{type(exc).__name__}: {exc}"})
+                limited = _rate_limit_response(exc)
+                if limited is not None:
+                    log.warning("Provider rate limited: %s", exc, exc_info=True)
+                    self._write(429, limited)
+                else:
+                    self._write(500, {"error": f"{type(exc).__name__}: {exc}"})
 
         def do_POST(self):  # noqa: N802
             if self._mcp():
@@ -705,7 +764,7 @@ def build_server(
                 if path_only in _TRUSTED_AUTH_PAYLOAD_PATHS:
                     payload = _stamp_trusted_auth(payload, auth)
                 result = handler(
-                    _client_for_current_thread(config),
+                    _memory_request_client(config, auth, path_only),
                     payload,
                 )
                 if isinstance(result, StreamingResponse):
@@ -716,6 +775,11 @@ def build_server(
                     status, body = _status_body_from_result(result)
                     self._write(status, body)
             except Exception as exc:  # pragma: no cover
+                limited = _rate_limit_response(exc)
+                if limited is not None:
+                    log.warning("Provider rate limited: %s", exc, exc_info=True)
+                    self._write(429, limited)
+                    return
                 import traceback
                 tb = traceback.format_exc()
                 self._write(500, {

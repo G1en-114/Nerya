@@ -106,6 +106,8 @@ class RouteRule:
 # default to ``admin:ops`` if no rule matches them.
 
 _RULES: tuple[RouteRule, ...] = (
+    RouteRule("GET", "/strategies/runtime/tuning/history", "read:sessions", "recorded strategy review invocations"),
+    RouteRule("GET", "/strategies/runtime/tuning/record", "read:sessions", "recorded review inputs, outputs and conversation"),
     RouteRule("POST", "/strategies/runtime/service/start", "admin:ops", "start a reviewed long-lived strategy; may submit orders within its policy"),
     RouteRule("POST", "/strategies/runtime/service/stop", "write:config", "stop future listener events and cancel pending Agent work"),
     RouteRule("GET", "/strategies/runtime/service/status", "read:runtime", "continuous service lifecycle"),
@@ -143,6 +145,13 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/teams/agents/resume", "write:chat", "continue with original child policy"),
 
     # agent / sessions / streaming
+    RouteRule("POST", "/agent/interactions/respond", "write:chat", "respond to durable user interaction"),
+    RouteRule("POST", "/agent/commands", "write:chat", "durable dashboard ingress; internal assertion required"),
+    RouteRule("POST", "/agent/commands/control", "write:chat", "revision-guarded queue and execution control"),
+    RouteRule("GET", "/agent/commands", "read:sessions", "authoritative command and queue snapshot"),
+    RouteRule("GET", "/agent/commands/events", "read:sessions", "durable ordered command events"),
+    RouteRule("GET", "/agent/commands/reference", "read:sessions", "bounded immutable attachment preview"),
+    RouteRule("POST", "/agent/commands/fork", "write:chat", "new history branch without execution replay"),
     RouteRule("POST", "/agent/run_turn", "write:chat", ""),
     RouteRule("POST", "/agent/run_turn_internal", "write:chat",
               "dashboard server-side internal lane; public research gate is not applied"),
@@ -151,6 +160,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/agent/explain", "read:sessions", ""),
     RouteRule("POST", "/agent/turn_state", "read:sessions", ""),
     RouteRule("GET", "/agent/open_turns", "read:sessions", ""),
+    RouteRule("GET", "/agent/sessions/view", "read:sessions", "unified task projection"),
     RouteRule("GET", "/agent/sessions", "read:sessions", ""),
     RouteRule("GET", "/agent/session", "read:sessions", ""),
     RouteRule("GET", "/agent/session/events", "read:sessions", ""),
@@ -190,24 +200,11 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/skills/lock/sign", "write:skills", ""),
     RouteRule("POST", "/skills/lock/clear_signature", "write:skills", ""),
 
-    # browser engines / browser sessions
+    # managed Chromium browser
     RouteRule("POST", "/browsers/agent", "write:tools",
               "dispatcher-bound actor; expiring operator site grant and exclusive browser lease"),
     RouteRule(None, "/browsers/desktop", "admin:ops",
               "operator-only persistent profiles and reviewed extension packages; not an Agent tool"),
-    RouteRule("GET", "/browsers/registry", "read:runtime", ""),
-    RouteRule("GET", "/browsers/status", "read:runtime", ""),
-    RouteRule("POST", "/browsers/select", "write:config", ""),
-    RouteRule("POST", "/browsers/configure", "write:config", ""),
-    RouteRule("POST", "/browsers/install", "admin:ops",
-              "installs optional browser dependencies"),
-    RouteRule("POST", "/browsers/uninstall", "admin:ops",
-              "removes optional browser dependencies"),
-    RouteRule("POST", "/browsers/probe", "read:runtime", ""),
-    RouteRule("GET", "/browsers/session/list", "read:runtime", ""),
-    RouteRule("GET", "/browsers/session/get", "read:runtime", ""),
-    RouteRule(None, "/browsers/session/", "write:tools",
-              "browser navigation/actions may execute page code or network requests"),
 
     # security / secrets
     RouteRule(None, "/security/secrets/", "write:secrets", "no reveal route"),
@@ -231,6 +228,8 @@ _RULES: tuple[RouteRule, ...] = (
 
     # Read-only schema/AST and version-bound evidence; never imports strategy code.
     RouteRule("GET", "/strategies/runtime/workflow/check", "read:runtime", "workflow configuration and evidence check"),
+    RouteRule("GET", "/strategies/runtime/workflow/export", "read:runtime", "portable strategy source; excludes runtime state and credentials"),
+    RouteRule("POST", "/strategies/runtime/workflow/import", "write:config", "stage a new paper strategy proposal; never execute or promote"),
 
     # trading / portfolio / strategy
     RouteRule(
@@ -385,6 +384,9 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/memory/profile/pin", "write:memory", ""),
     RouteRule("POST", "/memory/profile/forget", "write:memory", ""),
     RouteRule("POST", "/memory/profile/rebuild", "write:memory", ""),
+    RouteRule("GET", "/memory/domains", "read:runtime", ""),
+    RouteRule("POST", "/memory/records", "read:runtime", "scoped built-in memory"),
+    RouteRule("POST", "/memory/capture", "write:memory", ""),
     RouteRule("POST", "/memory/forget", "write:memory", ""),
     # Memory backend installer + tester (Selected backend settings UX)
     RouteRule("POST", "/memory/external/install/run", "admin:ops", ""),
@@ -443,6 +445,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule(None, "/wallet/installed", "read:runtime", ""),
     RouteRule("POST", "/wallet/configure", "write:config", ""),
     RouteRule("POST", "/wallet/quote", "read:runtime", ""),
+    RouteRule("POST", "/wallet/execution", "read:runtime", "read and reconcile an existing transaction only"),
     RouteRule("POST", "/wallet/balance", "read:runtime", ""),
     RouteRule("POST", "/wallet/klines", "read:runtime", ""),
     RouteRule(

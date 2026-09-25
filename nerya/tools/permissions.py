@@ -190,6 +190,7 @@ class PermissionContext:
     session_rules: list[PermissionRule] = field(default_factory=list)
     deny_rules: list[PermissionRule] = field(default_factory=list)
     tool_policy: dict[str, Any] = field(default_factory=dict)
+    plan_only: bool = False
 
 
 class PermissionEngine:
@@ -210,6 +211,10 @@ class PermissionEngine:
         risk = descriptor.per_call_risk(payload)
         scope = descriptor.permission_scope
         auto_approve = descriptor.per_call_auto_approve(payload)
+        # Plan mode is a server-owned ceiling, including YOLO and dynamic risks.
+        if context.plan_only and (not descriptor.read_only or risk is not RiskLevel.READ or scope is PermissionScope.SECRETS):
+            return PermissionDecision(kind=PermissionDecisionKind.DENY,
+                reason="plan mode permits investigation only", risk=risk, scope=scope)
         if not tool_policy_allows(normalise_tool_policy(context.tool_policy), descriptor.name):
             return PermissionDecision(kind=PermissionDecisionKind.DENY,
                 reason="tool outside configured capability scope", risk=risk, scope=scope)

@@ -2,6 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Nerya Outline: one neutral silhouette in both themes. Colour and interaction
+   belong to the control; SVGs never become a separate pointer/focus target. */
+.nerya-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .nerya-icon { animation: none !important; transition: none !important; }
+}
+
 /* The console uses local system fonts: readable CJK fallbacks and no
    remote font requests in a private, sometimes offline workspace. */
 
@@ -925,6 +937,22 @@ body::after {
 .ui-navigation-drawer { position: fixed; z-index: 1101; inset: 0 auto 0 0; display: flex; flex-direction: column; width: min(320px, calc(100vw - 40px)); height: 100dvh; background: var(--overlay-surface); color: var(--text-base); border-right: 1px solid var(--line); }
 .ui-navigation-drawer .nerya-sidebar { width: 100%; height: 100%; border: 0; }
 .nerya-app-shell { height: 100dvh; }
+.nerya-native-window { position: relative; box-sizing: border-box; }
+.nerya-sidebar-titlebar-drag,
+.nerya-content-titlebar-drag { display: none; }
+.nerya-native-window .nerya-sidebar-titlebar-drag,
+.nerya-native-window .nerya-content-titlebar-drag,
+.nerya-login-titlebar-drag {
+  display: block;
+  height: 38px;
+  min-height: 38px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.nerya-native-window .nerya-sidebar-titlebar-drag { background: var(--panel-bg); }
+.nerya-native-window .nerya-content-titlebar-drag,
+.nerya-login-titlebar-drag { background: var(--bg-deep); }
+.nerya-native-login { min-height: 100dvh; background: var(--bg-deep); }
 /* Console controls share tokens in the document, including Radix portals. */
 .ui-choice {
   display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -995,3 +1023,13 @@ input[type=checkbox], input[type=radio] { accent-color: var(--violet); }
   .ui-dialog, .ui-select-menu, .ui-navigation-drawer, .nerya-sidebar { animation: none !important; transition: none !important; }
   .skeleton, .animate-shimmer, .animate-ai-pulse { animation: none !important; }
 }
+
+/* Compact workbench controls retain useful touch targets on narrow screens. */
+@media (max-width: 767px) {
+  [data-chat-composer] button, [data-testid="task-topbar"] button,
+  [data-testid="conversation-controls"] button, [data-testid="user-interaction"] button {
+    min-height: 44px; min-width: 44px;
+  }
+}
+
+.workbench-search-hit { outline: 2px solid var(--violet); outline-offset: 4px; }

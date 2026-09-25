@@ -89,23 +89,8 @@ def _read_messages(client, limit: int = 100) -> list[dict[str, Any]]:
 
 
 def _read_llm_tiers(client) -> list[dict[str, Any]]:
-    cfg = client.config
-    rows: list[dict[str, Any]] = []
-    for name, raw in (cfg.get("llm.tiers") or {}).items():
-        cfg_dict = raw or {}
-        provider = (cfg_dict.get("provider") or "").lower()
-        has_key = bool(
-            cfg_dict.get("provider_key_ref") or cfg_dict.get("provider_key_env")
-        )
-        rows.append(
-            {
-                "tier": name,
-                "provider": provider,
-                "has_key": has_key,
-                "ready": bool(provider and (has_key or provider == "mock")),
-            }
-        )
-    return rows
+    from .routes_operator import _llm_tier_summary
+    return _llm_tier_summary(client)["tiers"]
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +117,7 @@ def _approval_item(rec: dict[str, Any]) -> dict[str, Any]:
         "summary": str(rec.get("summary") or ""),
         "requires_action": True,
         "created_at": rec.get("created_at") or rec.get("ts") or "",
-        "source_refs": [source_ref("approval", str(aid))],
+        "source_refs": [source_ref("approval", str(aid))] + ([source_ref("session",str(rec.get("session_id") or (rec.get("payload") or {}).get("session_id")),href="/chat/"+str(rec.get("session_id") or (rec.get("payload") or {}).get("session_id")))] if rec.get("session_id") or (rec.get("payload") or {}).get("session_id") else []),
         "actions": [
             action(
                 id="approve",
@@ -330,6 +315,7 @@ def _collect_items(
     severities: Optional[Iterable[str]] = None,
     requires_action: Optional[bool] = None,
     status: Optional[Iterable[str]] = None,
+    include_info: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     type_set = set(types) if types else _TYPE_FILTER
@@ -343,10 +329,25 @@ def _collect_items(
         items.extend(_proposal_item(p) for p in _read_proposals(client))
     if "failed_task" in type_set:
         items.extend(_failed_task_item(s) for s in _read_open_turns(client))
+    if "notification" in type_set and getattr(client,"config",None) is not None:
+        from ..db.sqlite import connect
+        from ..agent.workbench import record, session_view
+        con=connect(client.config.paths.db)
+        try:
+            questions=list(con.execute("SELECT * FROM agent_interactions WHERE state IN ('pending','deferred','answered') ORDER BY created_at DESC LIMIT 100"))
+        finally:
+            con.close()
+        for row in questions:
+            payload=record(row["payload_json"])
+            items.append({"id":"interaction:"+row["interaction_id"],"raw_id":row["interaction_id"],"type":"notification","severity":"warn","status":"pending",
+                "title":payload.get("title", "User input"),"summary":payload.get("message", ""),"requires_action":True,"created_at":row["created_at"],
+                "source_refs":[source_ref("session",row["session_id"],href="/chat/"+row["session_id"])],
+                "actions":[action(id="open",label="Answer in task",href="/chat/"+row["session_id"])],
+                "data":{"session_id":row["session_id"],"interaction_id":row["interaction_id"],"workbench_status":session_view(client.config,row["session_id"])["status"]}})
     if "notification" in type_set:
         for m in _read_messages(client):
             sev = (m.get("severity") or m.get("priority") or "info").lower()
-            if sev == "info":
+            if sev == "info" and not include_info:
                 continue
             items.extend([_notification_item(m)])
     if "provider_error" in type_set:
@@ -416,6 +417,8 @@ def _items_handler(client, query):
         severities=severities or None,
         requires_action=requires_action,
         status=statuses or None,
+        # Native reminders opt in; the existing action-oriented Web inbox is unchanged.
+        include_info=str(q.get("include_info", "")).lower() in ("1", "true", "yes"),
         limit=limit,
     )
 

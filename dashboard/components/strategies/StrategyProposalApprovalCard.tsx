@@ -1,6 +1,8 @@
 "use client";
+import { Icon as NeryaGlyph } from "../icons";
 
 import Link from "next/link";
+import { StrategyChatReference } from "../workflows/StrategyChatReference";
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 
@@ -40,7 +42,7 @@ const ACTIVE_STATES = new Set([
   "approved",
 ]);
 
-const TERMINAL_STATES = new Set(["applied", "rejected", "rolled_back"]);
+const TERMINAL_STATES = new Set(["applied", "rejected", "rolled_back", "superseded"]);
 
 function recordOf(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -72,7 +74,7 @@ function firstProposalRecord(value: unknown, actionHint = "", depth = 0): Record
 
   const action = stringValue(record.action) || stringValue(record.name) || actionHint;
   const kind = stringValue(record.kind);
-  const hasStrategyPackageKind = kind === "strategy_package_proposal";
+  const hasStrategyPackageKind = ["strategy_package_proposal", "strategy_tuning_proposal"].includes(kind) || kind === "prompt_patch" && !!strategyIdFromTarget(record.target);
   const hasGenerateAction = action === "strategy_generate_proposal";
   const hasPackageShape =
     !!stringValue(record.proposal_id || record.id) &&
@@ -166,7 +168,7 @@ export function strategyProposalFromToolResult(
   return {
     ...record,
     id,
-    kind: "strategy_package_proposal",
+    kind: stringValue(record.kind) || "strategy_package_proposal",
     state,
     target: target || null,
     strategy_id: strategyId || null,
@@ -185,17 +187,9 @@ export function isActiveStrategyProposal(
   return kind === "strategy_package_proposal" && ACTIVE_STATES.has(state);
 }
 
-// A draft proposal is still being authored (the agent is editing the staged
-// files). It should NOT pop up an approve/delete card in chat yet — only once
-// it has been submitted into the review queue. The chat hoist uses this; the
-// strategies page keeps showing drafts via isActiveStrategyProposal.
-export function isHoistableStrategyProposal(
-  proposal: EvolutionProposal | StrategyProposalView,
-): boolean {
-  return (
-    isActiveStrategyProposal(proposal) &&
-    stringValue(proposal.state || "draft") !== "draft"
-  );
+// Every authored package is visible in chat, including drafts and applied versions.
+export function isHoistableStrategyProposal(proposal: EvolutionProposal | StrategyProposalView): boolean {
+  return ["strategy_package_proposal", "strategy_tuning_proposal"].includes(stringValue(proposal.kind)) || stringValue(proposal.kind) === "prompt_patch" && !!strategyIdFromTarget(proposal.target);
 }
 
 export function StrategyProposalApprovalCard({
@@ -217,7 +211,8 @@ export function StrategyProposalApprovalCard({
 }) {
   const t = useTranslations("strategyProposal");
   const tCommon = useTranslations("common");
-  const normalized = strategyProposalFromToolResult(proposal) ?? proposal;
+  const [editedProposal, setEditedProposal] = useState<StrategyProposalView | null>(null);
+  const normalized = editedProposal || strategyProposalFromToolResult(proposal) || proposal;
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [removed, setRemoved] = useState(false);
@@ -251,14 +246,15 @@ export function StrategyProposalApprovalCard({
       : backtestVerdict === "WARN"
       ? "warn"
       : "danger";
+  const packageProposal = normalized.kind === "strategy_package_proposal";
   const shouldValidate =
-    !!proposalId &&
+    packageProposal && !!proposalId &&
     !normalized.validation &&
     !TERMINAL_STATES.has(state);
   const validationPending = shouldValidate && !validationChecked;
   const canApprove =
     proposalId &&
-    !TERMINAL_STATES.has(state) &&
+    !TERMINAL_STATES.has(state) && state !== "draft" &&
     !hasBlockers &&
     !validationPending &&
     !validating;
@@ -407,7 +403,8 @@ export function StrategyProposalApprovalCard({
       ].join(" ")}
       data-proposal-id={proposalId}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      {strategyId && <StrategyChatReference key={proposalId} strategyId={strategyId} proposalId={proposalId} onSaved={(view) => { setEditedProposal({ ...normalized, id: view.source.proposal_id || proposalId, strategy_id: strategyId, state: view.source.state, summary: String(view.manifest.title || strategyId), validation: undefined }); setStateOverride(null); }} />}
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <StrategiesIcon size={15} className="text-warn" />
@@ -444,6 +441,7 @@ export function StrategyProposalApprovalCard({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {!packageProposal && <Link className="btn btn-ghost text-xs" href={"/self-evolution?tab=proposals&proposal_id=" + encodeURIComponent(proposalId)}>{t("detailsToggle")} <NeryaGlyph name="arrowUpRight" size={16} /></Link>}
           {state === "applied" && strategyId ? (
             <Link
               href={`/strategies/${encodeURIComponent(strategyId)}`}
@@ -467,7 +465,7 @@ export function StrategyProposalApprovalCard({
               {deleting ? tCommon("working") : null}
             </button>
           ) : null}
-          {!TERMINAL_STATES.has(state) ? (
+          {!TERMINAL_STATES.has(state) && state !== "draft" && packageProposal ? (
             <button
               onClick={() => void approve()}
               disabled={!canApprove || busy || deleting}

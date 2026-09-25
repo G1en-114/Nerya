@@ -1,4 +1,6 @@
 "use client";
+import Link from "next/link";
+import {useLocale} from "next-intl";
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
@@ -27,6 +29,7 @@ const TONES: Record<
  */
 export function StrategyRunsCard({ runs, total }: Props) {
   const t = useTranslations("strategyRuns");
+  const zh=useLocale().startsWith("zh");
   const [openId, setOpenId] = useState<string | null>(null);
 
   if (!runs.length) {
@@ -68,6 +71,11 @@ export function StrategyRunsCard({ runs, total }: Props) {
             </button>
             {openId === run.run_id && (
               <div className="mt-2 space-y-2">
+                <div className="flex flex-wrap items-center gap-3 text-xs"><span>{zh?"运行包版本：":"Executed package: "}<code>{run.package_hash}</code></span>
+                  {run.session_id&&<Link className="min-h-11 py-3 underline" href={"/chat/"+encodeURIComponent(run.session_id)}>{zh?"返回来源任务":"Open source task"}</Link>}
+                  <Link className="min-h-11 py-3 underline" href={"/orders?strategy="+encodeURIComponent(run.strategy_id)}>{zh?"查看策略订单":"View strategy orders"}</Link>
+                </div>
+                {run.status==="submitted"&&<p className="text-warn">{zh?"订单已提交，成交状态以订单回执为准。":"Orders submitted. Fill status depends on the order receipts."}</p>}
                 {run.outputs && Object.keys(run.outputs).length > 0 && (
                   <Json value={run.outputs} />
                 )}

@@ -144,6 +144,7 @@ export default function OrdersPage() {
   const filtersRef = useRef({ stateFilter, accountFilter });
   filtersRef.current = { stateFilter, accountFilter };
   const [query, setQuery] = useState("");
+  useEffect(()=>{const strategy=new URLSearchParams(window.location.search).get("strategy");if(strategy)setQuery(strategy);},[]);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [accountError, setAccountError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);

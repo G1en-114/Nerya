@@ -432,7 +432,14 @@ class ToolBatchPhase:
         repeated_loop_abort = False
         batch_budget_calls = 0
 
+        interaction = next((c for c in calls if c.name in ("request_user_input","propose_plan")), None)
         for index, call in enumerate(calls):
+            # A question is a control boundary: no sibling action may race ahead
+            # of the user's answer, including actions emitted in the same batch.
+            if interaction is not None and call.id != interaction.id:
+                prepared_results[index] = ToolResult.from_error(tool_use_id=call.id,name=call.name,
+                    error=ToolError(kind=ToolErrorKind.ABORTED,message="Not started: waiting for user interaction",retryable=False))
+                continue
             if (
                 policy.max_total_calls is not None
                 and state.total_tool_calls + batch_budget_calls

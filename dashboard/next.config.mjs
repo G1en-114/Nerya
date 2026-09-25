@@ -1,6 +1,12 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Desktop ships the actual Node server; Web deployments keep their existing mode.
+  ...(process.env.NERYA_DESKTOP_BUILD === "1" ? { output: "standalone", images: { unoptimized: true } } : {}),
   // Local servers and UI previews isolate build output from other builds.
   // Workers must receive the same directory through normal Next configuration.
   ...(process.env.NERYA_UI_DIST_DIR ? {
@@ -12,9 +18,10 @@ const nextConfig = {
   // proxy route and survives `next dev` restarts.  The proxy route now
   // reads process.env.NERYA_API at request time via a helper function
   // to avoid build-time inlining.
-  env: {},
+  env: { NEXT_PUBLIC_NERYA_BUILD_ID: createHash("sha256").update(readFileSync(new URL("./components/chat/ChatView.tsx",import.meta.url))).digest("hex").slice(0,16) },
   experimental: {
     typedRoutes: false,
+    ...(process.env.NERYA_DESKTOP_BUILD === "1" ? { outputFileTracingRoot: fileURLToPath(new URL("..", import.meta.url)) } : {}),
   },
   // During E2E we frequently restart/clean and run alongside Playwright; the
   // webpack *filesystem* cache then races on `.next/cache/**/*.pack.gz` renames

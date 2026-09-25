@@ -1,4 +1,5 @@
 "use client";
+import { TaskList } from "../chat/TaskList";
 
 /**
  * CodexSidebar — the persistent left rail for the Codex-inspired shell.
@@ -40,15 +41,18 @@ import {
   type ChatThread,
 } from "../../lib/chat";
 import { confirm as confirmDialog } from "../../lib/dialogs";
+import { ConversationActions } from "../chat/ChatHistoryActions";
+import { startDesktopDragging } from "../../lib/desktop";
 import { useOperatorNav } from "../../lib/useOperatorNav";
 import { NeryaLogo } from "../NeryaLogo";
+import { ConversationSourceIcon } from "../chat/ConversationSourceIcon";
+import { isExternalSource } from "../../lib/externalCalls";
 import { useCommandPalette } from "./CommandPalette";
 import { SidebarStrategies } from "./SidebarStrategies";
 import {
   AgentsIcon,
   ChevronDownIcon,
   ComposeIcon,
-  MessagesIcon,
   NAV_ICONS,
   NAV_ICON_BY_NAME,
   OverviewIcon,
@@ -88,7 +92,6 @@ const COVERED_HREFS = new Set([
 const SETTINGS_TOOL_HREFS = new Set([
   "/memory",
   "/web-search",
-  "/browsers",
   "/env-vault",
   "/gateway",
 ]);
@@ -143,7 +146,7 @@ function SideRow({
   const inner = (
     <>
       <Icon
-        size={16}
+        size={18}
         className={`shrink-0 ${active ? "text-brand-200" : "text-[color:var(--text-muted)] group-hover:text-[color:var(--text-base)]"}`}
       />
       {!collapsed ? (
@@ -296,6 +299,8 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
       className={`${width} nerya-sidebar sticky top-0 flex h-dvh shrink-0 flex-col overflow-hidden border-r`}
       style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}
     >
+      <div className="nerya-sidebar-titlebar-drag shrink-0" aria-hidden="true"
+        onMouseDown={(event) => { if (event.button === 0) void startDesktopDragging().catch(() => undefined); }} />
       {/* Brand + collapse */}
       <div className="flex items-center gap-2.5 px-3 py-3">
         <Link href="/" className="flex min-w-0 items-center gap-2" aria-label="Nerya">
@@ -411,48 +416,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="embedded-scroll min-h-0 flex-1 pr-1">
               <SidebarStrategies />
-              {chats.length > 0 ? (
-                <>
-                  <SectionLabel>{t("sectionChats")}</SectionLabel>
-                  <div className="space-y-0.5">
-                    {chats.map((c) => {
-                      const active = pathMatches(pathname, `/chat/${c.id}`);
-                      return (
-                        <div
-                          key={c.id}
-                          className={`group sidebar-item pr-1 ${active ? "sidebar-item-active" : "sidebar-item-idle"}`}
-                        >
-                          <Link
-                            href={`/chat/${encodeURIComponent(c.id)}`}
-                            aria-current={active ? "page" : undefined}
-                            className="flex min-w-0 flex-1 items-center gap-2"
-                            title={c.title}
-                          >
-                            <MessagesIcon
-                              size={14}
-                              className={`shrink-0 ${active ? "text-brand-200" : "text-[color:var(--text-muted)]"}`}
-                            />
-                            <span className="truncate">{c.title || t("untitledChat")}</span>
-                          </Link>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              void removeChat(c.id);
-                            }}
-                            className="ml-1 shrink-0 rounded p-1 text-[color:var(--text-muted)] opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100 group-focus-within:opacity-100"
-                            title={tCommon("delete")}
-                            aria-label={tCommon("delete")}
-                          >
-                            <TrashIcon size={13} />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : null}
+              <TaskList />
             </div>
           </div>
         ) : null}
