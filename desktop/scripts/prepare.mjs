@@ -63,7 +63,7 @@ async function main() {
   const pythonVersion = process.env.NERYA_PYTHON_VERSION || (await fs.readFile(path.join(root, ".python-version"), "utf8")).trim();
   const uv = process.env.UV || "uv";
   // Build-owned cache avoids changing or relying on the user's global cache permissions.
-  const uvOptions = { env: { ...process.env, UV_CACHE_DIR: path.join(desktop, ".runtime-build-uv-cache") } };
+  const uvOptions = { env: { ...process.env, UV_CACHE_DIR: process.env.UV_CACHE_DIR || path.join(desktop, ".runtime-build-uv-cache") } };
   const pythonDir = path.join(stage, "python");
   run(uv, ["python", "install", pythonVersion, "--install-dir", pythonDir, "--no-bin", "--no-config"], uvOptions);
   // uv also creates a minor-version symlink; ship the exact, real distribution.
@@ -120,7 +120,15 @@ async function main() {
   const archive = path.join(stage, archiveName);
   await download(`${dist}/${archiveName}`, archive);
   if (await sha256(archive) !== expected) throw new Error("Node checksum mismatch.");
-  run("tar", ["-xf", archive, "-C", stage]);
+  if (process.platform === "win32") {
+    // Git Bash can put GNU tar ahead of Windows' bsdtar. GNU tar cannot unpack
+    // the official Windows Node ZIP; use the platform ZIP extractor explicitly.
+    run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath $env:NERYA_NODE_ARCHIVE -DestinationPath $env:NERYA_NODE_DESTINATION -Force"],
+    { env: { ...process.env, NERYA_NODE_ARCHIVE: archive, NERYA_NODE_DESTINATION: stage } });
+  } else {
+    run("tar", ["-xf", archive, "-C", stage]);
+  }
   const nodeRel = path.join(nodeName, process.platform === "win32" ? "node.exe" : "bin/node");
 
   const distDir = ".next-desktop-build";

@@ -4,6 +4,10 @@
 *.mjs text eol=lf
 *.yml text eol=lf
 *.toml text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+VERSION text eol=lf
 *.png binary
 *.webp binary
 *.gif binary

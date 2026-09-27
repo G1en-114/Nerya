@@ -32,24 +32,15 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
-        with:
-          version: '0.11.18'
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            desktop/requirements.lock
+      - uses: ./.github/actions/python
       - name: Validate release versions and tag
         run: python scripts/release_version.py
       - name: Install locked runtime and test tooling
-        run: uv pip install --system --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
+        run: uv pip install --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
       - name: Frontend contracts
         run: |
           npm ci --no-audit --no-fund
@@ -97,10 +88,6 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
-          architecture: ${{ matrix.arch }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
@@ -109,11 +96,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             desktop/package-lock.json
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
-        with:
-          version: '0.11.18'
-          enable-cache: true
-          cache-dependency-glob: desktop/requirements.lock
+      - uses: ./.github/actions/python
       - name: Rust toolchain
         run: |
           rustup toolchain install 1.96.0 --profile minimal
@@ -135,7 +118,8 @@ jobs:
           python scripts/release_version.py
           npm ci --no-audit --no-fund
           npm --prefix desktop ci --no-audit --no-fund
-          uv pip install --system --constraint desktop/requirements.lock -e '.[dev,browser]'
+          npm run build:sdk
+          uv pip install --constraint desktop/requirements.lock -e '.[dev,browser]'
       - name: Linux bundled-browser libraries
         if: runner.os == 'Linux'
         run: python -m playwright install-deps chromium

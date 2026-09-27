@@ -1,0 +1,27 @@
+name: Pinned portable Python
+description: Use the same uv-managed CPython distribution on every native runner.
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+      with:
+        version: '0.11.18'
+        enable-cache: true
+        cache-dependency-glob: |
+          pyproject.toml
+          desktop/requirements.lock
+    - name: Install and activate the exact Python release
+      shell: bash
+      run: |
+        version="$(tr -d '\r\n' < .python-version)"
+        uv python install "$version" --no-bin
+        uv venv --managed-python --python "$version" .venv
+        if [[ "$RUNNER_OS" == 'Windows' ]]; then
+          bin="$(cygpath -w "$PWD/.venv/Scripts")"
+          venv="$(cygpath -w "$PWD/.venv")"
+        else
+          bin="$PWD/.venv/bin"
+          venv="$PWD/.venv"
+        fi
+        printf '%s\n' "$bin" >> "$GITHUB_PATH"
+        printf 'VIRTUAL_ENV=%s\n' "$venv" >> "$GITHUB_ENV"
