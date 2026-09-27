@@ -1,0 +1,101 @@
+name: Publish Existing Desktop Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_run_id:
+        description: Desktop run containing the verified Linux and macOS artifacts
+        required: true
+        type: string
+      windows_run_id:
+        description: Desktop run containing the verified Windows artifact
+        required: true
+        type: string
+      target_sha:
+        description: Commit the release tag should point to
+        required: true
+        type: string
+      release_tag:
+        description: Release tag, for example v1.0.0-beta.1
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Verify existing artifacts and publish release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
+
+      - name: Download already verified Linux and macOS artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: desktop-*
+          path: release-artifacts
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.base_run_id }}
+
+      - name: Download the repaired Windows artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: desktop-Windows-x64
+          path: release-artifacts
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.windows_run_id }}
+
+      - name: Verify all four platforms and checksums
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('release-artifacts')
+          version = Path('VERSION').read_text(encoding='utf-8').strip()
+          assert os.environ['RELEASE_TAG'] == f'v{version}'
+
+          reports = [json.loads(path.read_text(encoding='utf-8')) for path in root.glob('build-info-*.json')]
+          assert {(report['platform'], report['arch']) for report in reports} == {
+              ('windows', 'x64'), ('linux', 'x64'), ('macos', 'x64'), ('macos', 'arm64')
+          }
+
+          lines = []
+          for report in reports:
+              assert report['version'] == version
+              for item in report['files']:
+                  path = root / item['name']
+                  assert path.is_file() and path.stat().st_size == item['bytes'], path
+                  value = hashlib.sha256()
+                  with path.open('rb') as stream:
+                      for block in iter(lambda: stream.read(1024 * 1024), b''):
+                          value.update(block)
+                  assert value.hexdigest() == item['sha256'], path
+                  lines.append(f"{item['sha256']}  {path.name}\n")
+
+          assert len(lines) == 8, 'All eight expected installers are required'
+          (root / 'SHA256SUMS.txt').write_text(''.join(sorted(lines)), encoding='utf-8')
+          print(f'Validated {len(reports)} platforms and {len(lines)} installers for {version}.')
+          PY
+
+      - name: Publish prerelease from existing verified artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          options=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then options+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --target "$TARGET_SHA" "${options[@]}" \
+            --title "Nerya ${RELEASE_TAG#v}" --notes-file RELEASE_NOTES.md release-artifacts/*
