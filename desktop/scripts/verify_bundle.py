@@ -29,7 +29,10 @@ def main() -> None:
     args = parser.parse_args()
     bundle = args.bundle_dir.resolve()
     system, _ = native_target()
-    with tempfile.TemporaryDirectory(prefix="Nerya beta installed ") as directory:
+    # Keep the Windows extraction root deliberately short. The MSI contains a
+    # full portable runtime (Python, Node and browser assets), so both path
+    # length and extraction time are materially larger than for a normal app.
+    with tempfile.TemporaryDirectory(prefix="nerya-") as directory:
         extracted = Path(directory)
         if system == "darwin":
             app = only((bundle / "macos").glob("*.app"))
@@ -37,9 +40,18 @@ def main() -> None:
             resources = app / "Contents/Resources/runtime"
         elif system == "win32":
             installer = only((bundle / "msi").glob("*.msi"))
-            result = subprocess.run(["msiexec", "/a", str(installer), "/qn", f"TARGETDIR={extracted}"], timeout=300)
+            log = ROOT / ".tmp/ci/msi-admin-install.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                [
+                    "msiexec", "/a", str(installer), "/qn", "/norestart",
+                    f"TARGETDIR={extracted}", "/L*V", str(log),
+                ],
+                timeout=1200,
+            )
             if result.returncode not in (0, 3010):
-                raise RuntimeError(f"MSI extraction failed: {result.returncode}")
+                tail = log.read_text(encoding="utf-16", errors="replace")[-12000:] if log.exists() else ""
+                raise RuntimeError(f"MSI extraction failed: {result.returncode}\n{tail}")
             resources = only(path.parent for path in extracted.rglob("manifest.json") if path.parent.name == "runtime")
         else:
             installer = only((bundle / "deb").glob("*.deb"))

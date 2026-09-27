@@ -6,6 +6,12 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Rebuild only the failed Windows x64 native installer job
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -26,6 +32,7 @@ env:
 jobs:
   quality:
     name: Release contracts and regression
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.windows_only }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -67,24 +74,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - label: Windows-x64
-            runner: windows-2022
-            arch: x64
-            bundles: nsis,msi
-          - label: macOS-arm64
-            runner: macos-15
-            arch: arm64
-            bundles: app,dmg
-          - label: macOS-x64
-            runner: macos-15-intel
-            arch: x64
-            bundles: app,dmg
-          - label: Linux-x64
-            runner: ubuntu-22.04
-            arch: x64
-            bundles: deb,appimage
+      matrix: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.windows_only && '{"include":[{"label":"Windows-x64","runner":"windows-2022","arch":"x64","bundles":"nsis,msi"}]}' || '{"include":[{"label":"Windows-x64","runner":"windows-2022","arch":"x64","bundles":"nsis,msi"},{"label":"macOS-arm64","runner":"macos-15","arch":"arm64","bundles":"app,dmg"},{"label":"macOS-x64","runner":"macos-15-intel","arch":"x64","bundles":"app,dmg"},{"label":"Linux-x64","runner":"ubuntu-22.04","arch":"x64","bundles":"deb,appimage"}]}') }}
     env:
       APPIMAGE_EXTRACT_AND_RUN: '1'
       NODE_OPTIONS: --max-old-space-size=4096
