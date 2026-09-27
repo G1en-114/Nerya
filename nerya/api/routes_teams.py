@@ -16,7 +16,7 @@ from ..subagents.registry import (
     save_role,
 )
 from ..teams.store import TeamStore
-from ..teams.templates import BUILTIN_TEMPLATES, list_templates
+from ..teams.templates import get_template, list_templates
 from ..teams.orchestrator import TeamOrchestrator
 
 
@@ -85,15 +85,16 @@ def _start_run(client, payload):
         return {"ok": False, "error": "template required"}
     if not goal:
         return {"ok": False, "error": "goal required"}
-    if template not in BUILTIN_TEMPLATES:
+    resolved = get_template(template, client.config.paths)
+    if resolved is None:
         return {
             "ok": False,
             "error": f"unknown template {template!r}",
-            "available": sorted(BUILTIN_TEMPLATES.keys()),
+            "available": sorted(t["id"] for t in list_templates(client.config.paths)),
         }
     orch = TeamOrchestrator(config=client.config, skills=client.skills)
     res = orch.run(
-        template=template,
+        template=resolved,
         goal=goal,
         trigger=payload.get("trigger") or {"kind": "http", "payload": {}},
         memory_preview=payload.get("memory_preview"),
@@ -170,12 +171,17 @@ def _get_role(client, payload):
 def _save_role(client, payload):
     payload = payload or {}
     try:
+        existing = describe_role(client.config.paths, str(payload.get("name") or "").strip()) or {}
         record = save_role(
             client.config.paths,
             name=str(payload.get("name") or "").strip(),
             prompt=str(payload.get("prompt") or ""),
-            allowed_skills=list(payload.get("allowed_skills") or []) or None,
+            allowed_skills=list(payload["allowed_skills"]) if "allowed_skills" in payload else None,
             tier=payload.get("tier"),
+            provider=payload.get("provider", existing.get("provider")),
+            model=payload.get("model", existing.get("model")),
+            execution_policy=existing.get("execution_policy"),
+            enabled=payload.get("enabled") if isinstance(payload.get("enabled"), bool) else None,
         )
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": str(exc)}

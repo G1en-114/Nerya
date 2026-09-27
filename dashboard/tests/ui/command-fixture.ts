@@ -37,8 +37,8 @@ export async function installCommandFixture(page: Page, options: { complete?:boo
       if (!command) {
         const running=[...commands.values()].some(item=>item.state === "running");
         const kind=input.command_type || "send";
-        command={command_id:input.command_id,session_id:input.session_id,kind,turn_id:input.request.resume_turn_id || "turn-"+input.command_id,
-          revision:1,position:commands.size+1,state:kind === "guide" ? "delivered" : options.complete ? "succeeded" : running ? "queued" : "running",
+        command={command_id:input.command_id,session_id:input.session_id,kind,turn_id:input.request.resume_turn_id || (kind === "guide" ? [...commands.values()].find(item=>item.kind!=="guide"&&item.state==="running")?.turn_id : undefined) || "turn-"+input.command_id,
+          revision:1,position:commands.size+1,state:kind === "guide" ? "delivered" : options.complete ? "succeeded" : running || queue.paused&&!input.request.run_only&&kind!=="resume" ? "queued" : "running",
           created_at:Date.now()/1000,updated_at:Date.now()/1000,input:input.request.payload?.text || input.request.continuation_feedback || "",
           attachments:input.request.payload?.attachments || [], context:{input_text:input.request.payload?.text,requested_model:{model_context_window:1048576},accepted_model:{provider:"test",model:"fixture-model"}},
           has_result:!!options.complete,show_user:kind === "send"};

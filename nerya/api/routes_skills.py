@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import yaml_io
+from ..core.errors import SkillActionError
 from ..core.time import now_iso
 from ..skills.installer import install_skill, list_installed, promote_installed
 from ..skills.lock_signing import (
@@ -27,13 +28,17 @@ def _install(client, payload):
     source = payload.get("source")
     if not source:
         return {"error": "source is required"}
-    report = install_skill(
-        client.config.paths,
-        source=source,
-        kind=payload.get("kind", "auto"),
-        subdir=payload.get("subdir"),
-        git_ref=payload.get("git_ref"),
-    )
+    try:
+        report = install_skill(
+            client.config.paths,
+            source=source,
+            kind=payload.get("kind", "auto"),
+            subdir=payload.get("subdir"),
+            git_ref=payload.get("git_ref"),
+        )
+    except SkillActionError as exc:
+        return {"ok": False, "error": "skill_install_failed", "detail": str(exc)}
+    client.skills.reload()
     return report.asdict()
 
 
@@ -43,7 +48,8 @@ def _promote(client, payload):
     if not skill_id:
         return {"error": "skill_id is required"}
     dst = promote_installed(client.config.paths, skill_id)
-    return {"ok": True, "skill_id": skill_id, "installed_at": str(dst)}
+    reloaded = client.skills.reload()
+    return {"ok": True, "skill_id": skill_id, "installed_at": str(dst), "reloaded": reloaded}
 
 
 def _installed(client, _p):

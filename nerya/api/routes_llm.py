@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import copy, deepcopy
+
 from ..llm.gateway import LLMGateway
 from ..llm import ops as _llm_ops
 
@@ -12,7 +14,14 @@ def _messages_probe(client, payload):
     provider can actually complete a provider-native messages call right now.
     """
     body = payload or {}
-    tier = str(body.get("tier") or "medium").strip() or "medium"
+    revision = _llm_ops.config_revision(client.config)
+    if body.get("revision") and body["revision"] != revision:
+        return {"_status": 409, "ok": False, "error": "llm_config_changed", "revision": revision}
+    probe_config = client.config
+    if body.get("revision"):
+        probe_config = copy(client.config)
+        probe_config.data = deepcopy(client.config.data)
+    tier = str(body.get("tier") or _llm_ops._get_cfg(probe_config, "llm.default_tier", "medium")).strip() or "medium"
     model_provider = str(body.get("model_provider") or body.get("provider") or "").strip()
     model_id = str(body.get("model_id") or body.get("model") or "").strip()
     tool_probe = bool(body.get("tool_probe") or body.get("require_tool"))
@@ -47,7 +56,7 @@ def _messages_probe(client, payload):
         ]
         tool_choice = {"type": "tool", "name": "e2e_probe_tool"}
     try:
-        response = LLMGateway(client.config).call_messages(
+        response = LLMGateway(probe_config).call_messages(
             task=str(body.get("task") or "agent.loop"),
             caller=str(body.get("caller") or "e2e:llm_messages_probe"),
             system=system,
@@ -67,13 +76,16 @@ def _messages_probe(client, payload):
             "_status": 503,
             "ok": False,
             "error": "llm_messages_probe_failed",
-            "message": f"{type(exc).__name__}: {exc}",
+            "revision": revision,
+            "message": f"{type(exc).__name__}: saved model connection test failed",
             "status_code": int(getattr(exc, "status_code", 0) or 0),
             "request_id": str(getattr(exc, "request_id", "") or ""),
-            "raw_body": str(getattr(exc, "raw_body", "") or "")[:600],
         }
+    if _llm_ops.config_revision(client.config) != revision:
+        return {"_status": 409, "ok": False, "error": "llm_config_changed", "revision": revision}
     return {
         "ok": True,
+        "revision": revision,
         "tier": tier,
         "provider": response.provider,
         "model": response.model,
@@ -133,6 +145,7 @@ def routes():
                 providers=(payload or {}).get("providers"),
                 tiers=(payload or {}).get("tiers"),
                 vault_passphrase=(payload or {}).get("vault_passphrase"),
+                explicit_overrides=(payload or {}).get("explicit_overrides") is True,
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}

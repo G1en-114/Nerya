@@ -1,5 +1,9 @@
 "use client";
+import { ReviewExplanation } from "../../components/workflows/ReviewExplanation";
+import { timelineReview } from "../../lib/reviewExplanation";
 
+import { ChoiceSelect } from "../../components/ChoiceSelect";
+import { LearningMemoryPanel } from "../../components/LearningMemoryPanel";
 import { ModalFrame } from "../../components/ModalFrame";
 
 import { useEffect, useMemo, useState } from "react";
@@ -56,7 +60,7 @@ import type {
   EvolutionWhyReusedSignal,
 } from "../../lib/evolutionTypes";
 
-type Tab = "workflow" | "inbox" | "timeline" | "assets" | "proposals";
+type Tab = "memory" | "workflow" | "inbox" | "timeline" | "assets" | "proposals";
 type CandidateFilter = "all" | "ready" | "blocked" | "positive" | "negative";
 type ReplayStepKey = "prompt" | "input" | "output" | "change" | "validation";
 type EvidenceDrawerState = {
@@ -85,7 +89,7 @@ type PrimaryReplayArtifactRef = {
 };
 type ReplayDigestKind = "subagent_payload" | "subagent_output" | "validation_plan";
 
-const TAB_IDS: Tab[] = ["workflow", "timeline", "proposals", "inbox", "assets"];
+const TAB_IDS: Tab[] = ["memory", "workflow", "timeline", "proposals", "inbox", "assets"];
 const CANDIDATE_FILTERS: CandidateFilter[] = ["all", "ready", "blocked", "positive", "negative"];
 const HISTORY_PAGE_SIZE = 10;
 const OPEN_PROPOSAL_STATES = ["draft", "pending_review", "proposed", "approved"];
@@ -113,10 +117,10 @@ function stageTone(stage?: string): "neutral" | "ok" | "warn" | "danger" | "bran
 export default function SelfEvolutionPage() {
   const t = useTranslations("selfEvolution");
   const tCommon = useTranslations("common");
-  // The workflow is the default entry. Existing deep links still select
-  // their original inbox/history/proposal tabs after hydration.
+  // Memory is the daily entry; original learning deep links stay valid.
   const workflowText = useWorkflowText();
-  const [tab, setTab] = useState<Tab>("workflow");
+  const [tab, setTab] = useState<Tab>("memory");
+  const [routeReady, setRouteReady] = useState(false);
   const [workflowDirty, setWorkflowDirty] = useState(false);
   const [workflowSettingsOpen, setWorkflowSettingsOpen] = useState(false);
   const [envelope, setEnvelope] = useState<EvolutionTimelineEnvelope | null>(null);
@@ -163,9 +167,9 @@ export default function SelfEvolutionPage() {
   }
 
   useEffect(() => {
-    void load(false);
+    if (routeReady && tab !== "memory" && !envelope) void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [routeReady, tab]);
 
   // Restore ?tab= from the URL after mount, then keep it in sync so the
   // active tab is shareable/linkable (replaceState — no history spam).
@@ -174,14 +178,16 @@ export default function SelfEvolutionPage() {
     if (param && TAB_IDS.includes(param as Tab)) {
       setTab((current) => (current === param ? current : (param as Tab)));
     }
+    setRouteReady(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    if (!routeReady) return;
     const url = new URL(window.location.href);
     url.searchParams.set("tab", tab);
     window.history.replaceState(null, "", url.toString());
-  }, [tab]);
+  }, [tab, routeReady]);
 
   useEffect(() => {
     const schedule = envelope?.config.periodic_reflection;
@@ -470,65 +476,67 @@ export default function SelfEvolutionPage() {
     }
   }
 
+  async function switchView(next: Tab) {
+    if (next === tab) return;
+    if (tab === "workflow" && workflowDirty && !await confirmDiscard(workflowText("copy.app_self_evolution_page.direct001"))) return;
+    if (next !== "workflow") setWorkflowDirty(false);
+    setTab(next);
+  }
+
+  const learningLabels: Record<Exclude<Tab, "memory">, string> = {
+    timeline: workflowText("copy.app_self_evolution_page.direct002"),
+    proposals: workflowText("copy.app_self_evolution_page.direct003"),
+    workflow: workflowText("copy.app_self_evolution_page.direct004"),
+    inbox: workflowText("copy.app_self_evolution_page.direct005"),
+    assets: workflowText("copy.app_self_evolution_page.direct006"),
+  };
+
   return (
     <div>
-      <PageHeader
-        eyebrow={t("eyebrow")}
-        title={t("title")}
-        description={t("description")}
-        actions={
-          <>
-            <button className="btn btn-ghost" onClick={() => void runReflection()} disabled={Boolean(busy)}>
-              <SparkIcon size={14} />
-              {busy === "reflect" ? t("reflecting") : t("runReflection")}
-            </button>
-            <button className="btn btn-primary" onClick={() => void load(true)} disabled={Boolean(busy)}>
-              <EvolutionIcon size={14} />
-              {busy === "collect" ? t("collecting") : t("collectSignals")}
-            </button>
-          </>
-        }
-      />
+      <PageHeader title={t("title")} />
       <PageBody>
-        {error ? <ErrorBanner error={error} /> : null}
-
-        <div className="overflow-x-auto border-b border-brand-500/10" role="tablist" aria-label={t("title")}>
-          {TAB_IDS.map((id) => {
-            const labelKey = id === "inbox" ? "tabInbox" : id === "timeline" ? "tabHistory" : id === "assets" ? "tabAssets" : "tabProposals";
-            const active = tab === id;
-            return (
-              <button
-                key={id}
-                role="tab"
-                aria-selected={active}
-                className={[
-                  "relative shrink-0 px-3 py-2 text-[12px] font-medium transition-colors",
-                  active ? "text-white" : "text-ink-400 hover:text-ink-100",
-                ].join(" ")}
-                onClick={async () => {
-                  if (tab === "workflow" && id !== "workflow" && workflowDirty && !await confirmDiscard(workflowText("丢弃未保存的复盘工作流修改？", "Discard unsaved review workflow edits?"))) return;
-                  if (id !== "workflow") setWorkflowDirty(false);
-                  setTab(id);
-                }}
-              >
-                {id === "workflow" ? workflowText("工作流", "Workflow") : t(labelKey)}
-                {active ? (
-                  <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-brand-400" />
-                ) : null}
-              </button>
-            );
+        <div className="flex gap-6 border-b border-[color:var(--line)]" role="tablist" aria-label={t("title")}>
+          {(["memory", "timeline"] as const).map((id, index) => {
+            const active = id === "memory" ? tab === "memory" : tab !== "memory";
+            return <button key={id} id={"learning-tab-" + id} role="tab" aria-selected={active}
+              aria-controls={"learning-panel-" + id} tabIndex={active ? 0 : -1}
+              className={["relative min-h-11 px-1 pb-3 text-[14px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500", active ? "font-medium text-[color:var(--text-base)]" : "text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]"].join(" ")}
+              onClick={() => void switchView(id === "timeline" && tab !== "memory" ? tab : id)} onKeyDown={(event) => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+                  event.preventDefault();
+                  const next = event.key === "Home" ? "memory" : event.key === "End" ? "timeline" : index === 0 ? "timeline" : "memory";
+                  void switchView(next).then(() => document.getElementById("learning-tab-" + next)?.focus());
+                }
+              }}>
+              {id === "memory" ? workflowText("copy.app_self_evolution_page.direct007") : workflowText("copy.app_self_evolution_page.direct008")}
+              {active && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-brand-400" />}
+            </button>;
           })}
         </div>
 
-        <Filters
-          strategy={strategy}
-          query={query}
-          busy={busy}
-          onStrategy={setStrategy}
-          onQuery={setQuery}
-          onFilter={() => void load(false)}
-          onTuning={runTuningDryRun}
-        />
+        <div id="learning-panel-memory" role="tabpanel" aria-labelledby="learning-tab-memory" hidden={tab !== "memory"}>
+          <LearningMemoryPanel />
+        </div>
+
+        {tab !== "memory" && <div id="learning-panel-timeline" role="tabpanel" aria-labelledby="learning-tab-timeline" className="space-y-5">
+          {error && <ErrorBanner error={error} onRetry={() => void load(false)} />}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="w-full sm:w-52"><ChoiceSelect value={tab} aria-label={workflowText("copy.app_self_evolution_page.direct009")} searchable={false} onValueChange={(value) => void switchView(value as Tab)}>
+              {Object.entries(learningLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+            </ChoiceSelect></div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button className="btn btn-ghost" onClick={() => void load(true)} disabled={Boolean(busy)}>
+                {busy === "collect" ? t("collecting") : t("collectSignals")}
+              </button>
+              <button className="btn btn-primary" onClick={() => void runReflection()} disabled={Boolean(busy)}>
+                <SparkIcon size={14} />{busy === "reflect" ? t("reflecting") : t("runReflection")}
+              </button>
+            </div>
+          </div>
+          {tab !== "workflow" && <Advanced title={workflowText("copy.app_self_evolution_page.direct010")}>
+            <Filters strategy={strategy} query={query} busy={busy} onStrategy={setStrategy} onQuery={setQuery}
+              onFilter={() => void load(false)} onTuning={runTuningDryRun} />
+          </Advanced>}
 
         {tab === "workflow" ? <>
           {workflowSettingsOpen && <DreamReflectionPanel schedule={envelope?.config.periodic_reflection} enabled={dreamEnabled} time={dreamTime} timezone={dreamTimezone} busy={busy} onEnabled={setDreamEnabled} onTime={setDreamTime} onTimezone={setDreamTimezone} onSave={saveDreamReflection} onRunNow={runDreamReflectionNow} />}
@@ -573,11 +581,8 @@ export default function SelfEvolutionPage() {
               onPostApplyObservation={recordPostApplyObservation}
             />
           ) : (
-            <EmptyHistory
-              busy={busy}
-              onCollect={() => void load(true)}
-              onOpenProposals={() => setTab("proposals")}
-            />
+            <Empty title={workflowText("copy.app_self_evolution_page.direct011")}
+              subtitle={workflowText("copy.app_self_evolution_page.direct012")} />
           )
         ) : null}
 
@@ -613,8 +618,8 @@ export default function SelfEvolutionPage() {
           )
         ) : null}
 
-        <Advanced
-          title={t("dreamPanelTitle")}
+        {tab !== "workflow" && <Advanced
+          title={workflowText("copy.app_self_evolution_page.direct013")}
           description={t("dreamPanelHint")}
           storageKey="nerya.evolution.advanced.dream"
         >
@@ -630,7 +635,8 @@ export default function SelfEvolutionPage() {
             onSave={saveDreamReflection}
             onRunNow={runDreamReflectionNow}
           />
-        </Advanced>
+        </Advanced>}
+        </div>}
 
         <EvidenceDrawer
           state={evidenceDrawer}
@@ -813,39 +819,6 @@ function PanelSkeleton({ rows = 4 }: { rows?: number }) {
         ))}
       </div>
     </section>
-  );
-}
-
-function EmptyHistory({
-  busy,
-  onCollect,
-  onOpenProposals,
-}: {
-  busy: string;
-  onCollect: () => void;
-  onOpenProposals: () => void;
-}) {
-  const t = useTranslations("selfEvolution");
-  return (
-    <Card title={t("noHistoryTitle")}>
-      <div className="py-6 text-center">
-        <div className="text-sm text-ink-300">{t("noMatchTitle")}</div>
-        <div className="mt-1 text-[12px] text-ink-500">{t("noMatchSubtitle")}</div>
-        <div className="mt-5 flex flex-wrap justify-center gap-2">
-          <button className="btn btn-primary" onClick={onCollect} disabled={Boolean(busy)}>
-            <EvolutionIcon size={14} />
-            {t("collectSignals")}
-          </button>
-          <button
-            type="button"
-            onClick={onOpenProposals}
-            className="text-[12px] text-brand-300 transition hover:text-brand-200"
-          >
-            {t("openProposalsBtn")} →
-          </button>
-        </div>
-      </div>
-    </Card>
   );
 }
 
@@ -1533,6 +1506,7 @@ function TimelineDetail({
   onPostApplyObservation: (proposalId: string, status: "healthy" | "regressed") => Promise<void>;
 }) {
   const t = useTranslations("selfEvolution");
+  const wx = useTranslations("workflowExperience");
   if (!item) {
     return (
       <Card title={t("timelineDetail")}>
@@ -1549,7 +1523,8 @@ function TimelineDetail({
       actions={<Pill tone={toneForStatus(item.status)}>{item.status || t("unknown")}</Pill>}
     >
       <div className="space-y-4 text-sm">
-        <AgentRunReplayPanel item={item} process={process} onEvidenceRef={onEvidenceRef} />
+        <ReviewExplanation {...timelineReview(item)} status={item.status} />
+        <details key={item.id}><summary>{wx("technicalDetails")}</summary><AgentRunReplayPanel item={item} process={process} onEvidenceRef={onEvidenceRef} /></details>
         <RunResultSummary
           proposalId={item.proposal_id}
           validationPlanId={item.validation_plan_id}

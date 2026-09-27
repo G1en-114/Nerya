@@ -293,7 +293,7 @@ def test_max_entries_is_enforced_per_category_and_scope(tmp_path):
     assert [hit.content for hit in runtime.recall("风险偏好")] == ["新风险偏好是保守。"]
 
 
-def test_external_recall_requires_matching_session_and_no_strategy_scope(
+def test_retired_external_configuration_never_changes_builtin_recall(
     tmp_path,
     monkeypatch,
 ):
@@ -346,18 +346,17 @@ def test_external_recall_requires_matching_session_and_no_strategy_scope(
         strategy_id="alpha",
     ).context("private fact")
 
-    assert "session one private fact" in session_context.dynamic
+    assert "session one private fact" not in session_context.dynamic
     assert "another actor's private fact" not in session_context.dynamic
     assert "private fact" not in strategy_context.dynamic
-    assert requested_sessions and requested_sessions[0] != "s1"
-    assert requested_sessions[0].endswith(":s1")
+    assert requested_sessions == []
 
 
 def test_end_session_replaces_the_previous_summary_for_that_session(tmp_path):
     from nerya.memory.runtime import MemoryRuntime
 
     runtime = MemoryRuntime(
-        Config(paths=WorkspacePaths(root=tmp_path), data={}),
+        Config(paths=WorkspacePaths(root=tmp_path), data={"memory": {"auto_save_enabled": True}}),
         actor_id="operator-1",
         session_id="s1",
     )
@@ -447,7 +446,8 @@ def test_stable_notebook_prefix_does_not_change_when_dynamic_recall_appears(
 
     after = runtime.context("波动率风险预算", max_chars=700)
 
-    assert before.stable
+    assert not before.stable
+    assert before.metadata["omitted"][0]["reason"] == "budget"
     assert after.dynamic
     assert before.stable == after.stable
 
@@ -457,7 +457,7 @@ def test_runtime_rejects_plaintext_secrets_without_logging_them(tmp_path):
 
     config = Config(paths=WorkspacePaths(root=tmp_path), data={})
     runtime = MemoryRuntime(config, actor_id="operator-1")
-    secret = "api_key=sk-this-is-a-plaintext-secret-value-1234567890"
+    secret = "api_key=sk-test000000000000000000000000000000000000000"
 
     result = runtime.remember(
         category="learning",
@@ -476,8 +476,8 @@ def test_runtime_rejects_plaintext_secrets_without_logging_them(tmp_path):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("category", "api_key=sk-secret-category-value-1234567890"),
-        ("key", "api_key=sk-secret-metadata-value-1234567890"),
+        ("category", "api_key=sk-test0000000000000000000000000000"),
+        ("key", "api_key=sk-test0000000000000000000000000000"),
         ("title", "password=hunter-secret-metadata-value-1234567890"),
         ("tags", ["api_key=sk-secret-tag-value-1234567890"]),
         ("source", "secret=metadata-source-value-1234567890"),
@@ -526,7 +526,7 @@ def test_empty_memory_cannot_log_a_secret_key(tmp_path):
 
     config = Config(paths=WorkspacePaths(root=tmp_path), data={})
     runtime = MemoryRuntime(config, actor_id="operator-1")
-    secret = "api_key=sk-empty-memory-secret-value-1234567890"
+    secret = "api_key=sk-test00000000000000000000000000000000"
 
     result = runtime.remember(
         category="learning",

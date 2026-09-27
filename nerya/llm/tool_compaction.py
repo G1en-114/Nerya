@@ -794,6 +794,44 @@ def _reduce_orders(name: str, output: Any) -> Optional[CompactedResult]:
     )
 
 
+def _reduce_ranked_universe(name: str, output: Any) -> Optional[CompactedResult]:
+    """A ranked universe is input, not a sample; never drop its last markets."""
+    if name not in {"market_data", "market_data.ranked_universe"} or not isinstance(output, dict):
+        return None
+    if output.get("rank_by") != "market_cap" or not isinstance(output.get("market_ids"), list):
+        return None
+    kept = _compact_top_level_fields(output)
+    ids = output["market_ids"]
+    # The producer accepts at most 50 assets. Keep that complete bounded set.
+    kept["market_ids"] = [_compact_scalar(m, limit=512) for m in ids[:50]]
+    rows = output.get("markets") or []
+    kept["markets"] = [
+        {k: _compact_scalar(row[k]) for k in
+         ("market", "rank", "coin_id", "name", "symbol", "market_cap_usd", "exchange_symbol", "quote") if k in row}
+        for row in rows[:50] if isinstance(row, dict)
+    ]
+    if len(ids) > 50:
+        kept["universe_truncated"] = True
+        kept["venue_mapping_complete"] = False
+    return CompactedResult(rule_id="market.ranked_universe",
+        summary=f"ranked universe: {output.get('count', len(ids))} markets on {output.get('venue', '')}",
+        kept=kept, original_bytes=_bytes_of(output))
+
+
+def _compact_execution_evidence(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return _compact_top_level_value(value)
+    # Scalar counters must not compete with an arbitrary reason_counts map for
+    # a shared leaf budget. Losing these fields made zero orders look unknown.
+    kept = {str(k): _compact_top_level_value(v) for k, v in list(value.items())[:64]
+            if not _SENSITIVE_JSON_KEY_RE.search(str(k))
+            and (isinstance(v, (str, int, float, bool)) or v is None)}
+    for key in ("status_counts", "rejection_reasons", "action_counts", "reason_counts"):
+        if key in value:
+            kept[key] = _compact_top_level_value(value[key])
+    return kept
+
+
 def _reduce_backtest(name: str, output: Any) -> Optional[CompactedResult]:
     if "backtest" not in name:
         return None
@@ -808,6 +846,24 @@ def _reduce_backtest(name: str, output: Any) -> Optional[CompactedResult]:
     error_count = len(errors) if isinstance(errors, (dict, list, tuple)) else int(bool(errors))
     summary = f"backtest: metrics={metric_keys}, errors={error_count}"
     kept = _compact_top_level_fields(output)
+    for key in ("result_type", "backtest_status", "strategy_id", "proposal_id", "backtest_ts", "title", "engine",
+                "evaluation_mode", "execution_mode", "performance_evidence", "replay", "provenance",
+                "metrics_display", "start_utc", "end_utc", "coverage_message", "flags", "next_required_action", "equity_preview",
+                "requested_window_days", "requested_window_complete", "requested_start_utc", "requested_end_utc", "primary_timeframe", "data_manifest",
+                "run_receipt", "failure_path", "phase"):
+        if key in output:
+            kept[key] = _compact_top_level_value(output[key])
+    preview = output.get("equity_preview")
+    if "replay" in output:
+        kept["replay"] = _compact_execution_evidence(output["replay"])
+    for key in ("markets", "market_ids"):
+        values = output.get(key)
+        if isinstance(values, list) and all(isinstance(v, str) for v in values) and len(values) <= 100:
+            kept[key] = [_compact_scalar(v, limit=512) for v in values]
+    if isinstance(preview, list) and preview:
+        # Preserve the real terminal valuation as well as bounded preview
+        # points. Generic collection truncation used to cut off the final fee.
+        kept["equity_preview"] = [_compact_top_level_value(p) for p in (preview if len(preview) <= 64 else preview[:63] + preview[-1:])]
     # Keep the report's common collections bounded even when a producer adds
     # thousands of metrics, errors, or symbols.
     for key, value in (
@@ -1635,6 +1691,7 @@ _REDUCERS: tuple[Callable[[str, Any], Optional[CompactedResult]], ...] = (
     _reduce_shell_git,
     _reduce_shell_pytest,
     _reduce_web_fetch,
+    _reduce_ranked_universe,
     _reduce_candles,
     _reduce_orders,
     _reduce_backtest,

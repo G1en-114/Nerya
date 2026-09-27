@@ -207,7 +207,7 @@ def test_vaultify_unknown_fields_default_to_sensitive(tmp_path, monkeypatch):
     monkeypatch.setattr(
         routes_wallet,
         "_wallet_schema",
-        lambda _provider: [
+        lambda _provider, workspace=None: [
             {"name": "rpc_url", "sensitive": False},
             {"name": "api_key", "sensitive": True},
         ],

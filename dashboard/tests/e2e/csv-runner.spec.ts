@@ -1215,7 +1215,6 @@ function evidenceContractFromApiCheck(spec: string): Record<string, unknown> | u
       core_config_patch: "evolve_core_config_patch",
       learning_update: "evolve_reflect",
       provider_proposal: "evolve_provider_proposal",
-      skill_proposal: "evolve_skill_proposal",
     };
     const tool = proposalToolByKind[kind];
     if (tool) {

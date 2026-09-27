@@ -140,6 +140,16 @@ class CcxtConnector(CEXConnectorBase):
     prefer_perpetual: bool = False
     _client: Any = None
 
+    def venue_client_order_id(self, value: str) -> str:
+        import hashlib
+        if self.exchange_id == "hyperliquid" and not value.startswith("0x"):
+            return "0x" + hashlib.sha256(value.encode()).hexdigest()[:32]
+        if self.exchange_id in ("okx", "okxus"):
+            return "n" + hashlib.sha256(value.encode()).hexdigest()[:30]
+        if self.exchange_id == "htx" and not value.isdigit():
+            return str(int(hashlib.sha256(value.encode()).hexdigest()[:15], 16))
+        return value
+
     def __post_init__(self) -> None:
         if not self.venue:
             self.venue = self.exchange_id.upper()
@@ -213,6 +223,21 @@ class CcxtConnector(CEXConnectorBase):
             return float(mkt.get("contractSize") or 1.0)
         except Exception:
             return 1.0
+
+    def _base_amount(self, sym: str, amount: Any, *, price: float | None = None) -> float | None:
+        if amount is None:
+            return None
+        market = self.markets.get(sym) or {}
+        value = float(amount)
+        if market.get("contract") or market.get("swap") or market.get("future"):
+            value *= self._contract_size(sym)
+            if market.get("inverse"):
+                if not price or price <= 0:
+                    if value == 0:
+                        return 0.0
+                    raise TradingError("inverse order amount requires an execution price")
+                value /= price
+        return value
 
     def _round_amount(self, sym: str, size: float, price: float | None = None) -> float:
         """Round an order amount down without exceeding the approved size,
@@ -715,6 +740,17 @@ class CcxtConnector(CEXConnectorBase):
             ))
         return out
 
+    def protection_capabilities(self, market: str, *, order_type: str, side: str, legs: list[str]) -> dict[str, str]:
+        from .ccxt_protection import protection_routes
+        sym = self._normalise_symbol(market)
+        instrument = {**self.markets[sym], "symbol": sym}
+        return protection_routes(self.client, instrument, order_type=order_type, side=side, legs=legs)
+
+    def protection_query_params(self, market: str, kind: str) -> dict[str, Any]:
+        from .ccxt_protection import conditional_query_params
+        sym = self._normalise_symbol(market)
+        return conditional_query_params(self.exchange_id, self.markets[sym], kind)
+
     def place_order(
         self,
         *,
@@ -735,6 +771,9 @@ class CcxtConnector(CEXConnectorBase):
         trigger_price: float | None = None,
         extra_params: dict[str, Any] | None = None,
         reference_price: float | None = None,
+        protection_kind: str | None = None,
+        protection_mode: str = "hybrid",
+        managed_protection: bool = False,
     ) -> OrderAck:
         self._check_live_and_keys()
         sym = self._normalise_symbol(market)
@@ -750,6 +789,30 @@ class CcxtConnector(CEXConnectorBase):
                 f"silently degrade"
             )
         is_deriv = self._is_derivatives(sym)
+        if (markets.get(sym) or {}).get("inverse"):
+            raise TradingError("inverse contract execution is not supported by the base-sized trading pipeline")
+        requested_type = order_type.lower()
+        if requested_type not in ("market", "limit", "stop", "stop_limit"):
+            raise TradingError(f"unsupported order type: {order_type}")
+        if requested_type in ("stop", "stop_limit") and trigger_price is None:
+            raise TradingError(f"{requested_type} requires trigger_price")
+        order_type = {"stop": "market", "stop_limit": "limit"}.get(requested_type, requested_type)
+        if order_type == "limit" and price is None:
+            raise TradingError("limit order requires price")
+        from .ccxt_protection import protection_routes
+        instrument = {**markets[sym], "symbol": sym}
+        levels = {key: value for key, value in (("stop_loss", stop_loss), ("take_profit", take_profit)) if value is not None}
+        routes = protection_routes(self.client, instrument, order_type=requested_type, side=side.lower(), legs=list(levels))
+        if protection_mode == "hard_exchange" and any(route == "local" for route in routes.values()):
+            raise TradingError(f"{self.venue} cannot host requested protection for {sym}: {routes}")
+        if not managed_protection and any(route != "attached" for route in routes.values()):
+            raise TradingError(f"{self.venue} requires the strategy protection executor for {routes}; refusing an unmanaged entry")
+        if protection_kind is not None:
+            if protection_kind not in ("stop_loss", "take_profit") or trigger_price is None or not reduce_only:
+                raise TradingError("protective order requires kind, trigger price and reduce_only")
+            from .ccxt_protection import supports_standalone
+            if not supports_standalone(self.client, instrument, protection_kind):
+                raise TradingError(f"{self.venue} does not support this protective order")
 
         # Pre-trade derivative setup (leverage / margin mode). Idempotent.
         if is_deriv:
@@ -782,7 +845,7 @@ class CcxtConnector(CEXConnectorBase):
         # Build the ccxt params dict.
         params: dict[str, Any] = {}
         if client_order_id:
-            params["clientOrderId"] = client_order_id
+            params["clientOrderId"] = self.venue_client_order_id(client_order_id)
         if time_in_force and order_type.lower() == "limit":
             # E8: ccxt expects uppercase TIF codes; post_only is a
             # separate flag, not a timeInForce value.
@@ -803,18 +866,43 @@ class CcxtConnector(CEXConnectorBase):
                 params["positionSide"] = str(position_side)
             if position_idx is not None:
                 params["positionIdx"] = int(position_idx)
-            # Native bracket — Bybit V5 uses stopLossPrice / takeProfitPrice;
-            # ccxt normalises these for other venues too.
-            if stop_loss is not None:
-                params["stopLossPrice"] = self._price_param(sym, float(stop_loss))
-            if take_profit is not None:
-                params["takeProfitPrice"] = self._price_param(sym, float(take_profit))
-            if trigger_price is not None:
+        # CCXT's *Price scalars describe standalone closing triggers, not
+        # brackets attached to an entry (Bybit even switches endpoints).
+        for field, level in (("stopLoss", stop_loss), ("takeProfit", take_profit)):
+            leg = "stop_loss" if field == "stopLoss" else "take_profit"
+            if level is not None and routes.get(leg) == "attached":
+                params[field] = {"triggerPrice": self._price_param(sym, float(level))}
+        if is_deriv and self.exchange_id == "bybit" and (stop_loss is not None or take_profit is not None):
+            # Full mode changes the whole symbol position, including other
+            # strategies. Partial brackets cover only this entry's filled qty.
+            params["tpslMode"] = "Partial"
+        if protection_kind is not None:
+            field = "stopLossPrice" if protection_kind == "stop_loss" else "takeProfitPrice"
+            params[field] = self._price_param(sym, float(trigger_price))
+            if self.exchange_id == "bitmex":
+                params.pop(field)
                 params["triggerPrice"] = self._price_param(sym, float(trigger_price))
+                ascending = (side.lower() == "buy") == (protection_kind == "stop_loss")
+                params["triggerDirection"] = "above" if ascending else "below"
+        elif trigger_price is not None:
+            params["triggerPrice"] = self._price_param(sym, float(trigger_price))
+            if is_deriv and self.exchange_id == "bybit":
+                params["triggerDirection"] = (extra_params or {}).get(
+                    "triggerDirection", "ascending" if side.lower() == "buy" else "descending",
+                )
         if extra_params:
             for k, v in extra_params.items():
                 if v is not None and k not in params:
                     params[k] = v
+        if protection_kind is not None and self.exchange_id in ("binance", "binanceusdm", "binancecoinm"):
+            if str(params.get("positionSide") or "BOTH").upper() in ("LONG", "SHORT"):
+                # Binance rejects reduceOnly in hedge mode; a closing side
+                # plus positionSide carries the same reduce-position semantics.
+                params.pop("reduceOnly", None)
+        if self.exchange_id == "hyperliquid" and order_type == "market" and px is None:
+            if not reference_price:
+                raise TradingError("hyperliquid market order requires reference_price for slippage")
+            px = float(reference_price)
 
         try:
             raw = self.client.create_order(
@@ -837,14 +925,19 @@ class CcxtConnector(CEXConnectorBase):
             raw, market=market, avg_price=float(raw.get("average") or 0) or None,
         )
         bracket = _extract_bracket_order_ids(raw)
+        if protection_kind and not raw.get("id"):
+            raise TradingError(f"{self.venue} protective order acknowledged without id", ambiguous=True)
+        raw = dict(raw)
+        if routes:
+            raw["nerya_protection_routes"] = routes
         return OrderAck(
             order_id=str(raw.get("id") or ""),
             client_order_id=str(raw.get("clientOrderId") or client_order_id or ""),
             status=_map_order_status(raw.get("status")),
             market=market, side=side.lower(),
             price=float(raw.get("price") or px or 0) or None,
-            size=float(raw.get("amount") or amount or 0) or None,
-            filled=float(raw.get("filled") or 0) or None,
+            size=self._base_amount(sym, raw.get("amount") if raw.get("amount") is not None else amount),
+            filled=self._base_amount(sym, raw.get("filled")),
             avg_price=float(raw.get("average") or 0) or None,
             fee_usd=fee_usd,
             fee_breakdown=fee_breakdown,
@@ -852,11 +945,11 @@ class CcxtConnector(CEXConnectorBase):
             raw=dict(raw),
         )
 
-    def cancel_order(self, *, market: str, order_id: str) -> OrderAck:
+    def cancel_order(self, *, market: str, order_id: str, query_params: dict[str, Any] | None = None) -> OrderAck:
         self._check_live_and_keys()
         sym = self._normalise_symbol(market)
         try:
-            raw = self.client.cancel_order(order_id, sym)
+            raw = self.client.cancel_order(order_id, sym, query_params) if query_params else self.client.cancel_order(order_id, sym)
         except Exception as exc:
             # R3T3: preserve ccxt's definitive not-found classification so
             # callers can tell "order gone" from transport noise.
@@ -872,11 +965,23 @@ class CcxtConnector(CEXConnectorBase):
             raw=dict(raw),
         )
 
-    def get_order(self, *, market: str, order_id: str) -> OrderAck:
+    def get_order(self, *, market: str, order_id: str, query_params: dict[str, Any] | None = None) -> OrderAck:
         self._check_live_and_keys()
         sym = self._normalise_symbol(market)
         try:
-            raw = self.client.fetch_order(order_id, sym)
+            raw = self.client.fetch_order(order_id, sym, query_params) if query_params else self.client.fetch_order(order_id, sym)
+            # An algo trigger being closed is not evidence its child trade filled.
+            if query_params:
+                info = raw.get("info") or {}
+                child = info.get("actualOrderId") or info.get("fired_order_id")
+                if self.exchange_id in ("gate", "gateio"):
+                    child = next((v for v in (info.get("trade_id"), info.get("me_order_id"), child)
+                                  if v and str(v) != "0"), None)
+                if child and str(child) not in ("0", str(order_id)):
+                    raw = self.client.fetch_order(str(child), sym)
+                    raw = {**raw, "id": str(order_id), "info": {**info, "execution_order_id": str(child)}}
+                elif raw.get("status") == "closed" and not raw.get("filled"):
+                    raw = {**raw, "status": "open"}
         except Exception as exc:
             # R3T3: preserve ccxt's definitive not-found classification
             # (OrderNotFound) on the raised TradingError so the order
@@ -896,8 +1001,8 @@ class CcxtConnector(CEXConnectorBase):
             status=_map_order_status(raw.get("status")),
             market=market, side=str(raw.get("side") or ""),
             price=float(raw.get("price") or 0) or None,
-            size=float(raw.get("amount") or 0) or None,
-            filled=float(raw.get("filled") or 0) or None,
+            size=self._base_amount(sym, raw.get("amount"), price=avg or raw.get("price")),
+            filled=self._base_amount(sym, raw.get("filled"), price=avg or raw.get("price")),
             avg_price=avg,
             fee_usd=fee_usd,
             fee_breakdown=fee_breakdown,
@@ -1020,7 +1125,7 @@ class CcxtConnector(CEXConnectorBase):
             )
         except Exception as exc:
             raise TradingError(f"{self.venue} fetch_my_trades failed: {exc}") from exc
-        return [_raw_order_to_ack(self, r) for r in raw_trades or []]
+        return [_raw_order_to_ack(self, r, trade=True) for r in raw_trades or []]
 
     # ------------------------------------------------------------------
     # Fee extraction
@@ -1150,13 +1255,9 @@ def _extract_bracket_order_ids(raw: dict[str, Any]) -> dict[str, str]:
     tp_id: str | None = None
     if isinstance(sl, dict):
         sl_id = sl.get("orderId") or sl.get("id")
-    elif isinstance(sl, str):
-        sl_id = sl or None
     sl_id = sl_id or raw.get("stopLossOrderId")
     if isinstance(tp, dict):
         tp_id = tp.get("orderId") or tp.get("id")
-    elif isinstance(tp, str):
-        tp_id = tp or None
     tp_id = tp_id or raw.get("takeProfitOrderId")
     if sl_id:
         out["stop_loss"] = str(sl_id)
@@ -1179,21 +1280,22 @@ def _extract_bracket_order_ids(raw: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _raw_order_to_ack(conn: "CcxtConnector", r: dict[str, Any]) -> OrderAck:
+def _raw_order_to_ack(conn: "CcxtConnector", r: dict[str, Any], *, trade: bool = False) -> OrderAck:
     """Map a raw ccxt order/trade dict to :class:`OrderAck` for reconciliation."""
-    avg = float(r.get("average") or 0.0) or None
+    avg = float(r.get("average") or (r.get("price") if trade else 0) or 0.0) or None
+    sym = conn._normalise_symbol(str(r.get("symbol") or ""))
     fee_usd, fee_breakdown = conn._extract_fee_usd(
         r, market=str(r.get("symbol") or ""), avg_price=avg,
     )
     return OrderAck(
-        order_id=str(r.get("id") or ""),
+        order_id=str((r.get("order") if trade else None) or r.get("id") or ""),
         client_order_id=str(r.get("clientOrderId") or r.get("client_order_id") or ""),
-        status=_map_order_status(r.get("status")),
+        status="filled" if trade else _map_order_status(r.get("status")),
         market=str(r.get("symbol") or ""),
         side=str(r.get("side") or ""),
         price=float(r.get("price") or 0.0) or None,
-        size=float(r.get("amount") or 0.0) or None,
-        filled=float(r.get("filled") or r.get("amount") or 0.0) or None,
+        size=conn._base_amount(sym, r.get("amount"), price=avg or r.get("price")),
+        filled=conn._base_amount(sym, r.get("amount") if trade else r.get("filled"), price=avg or r.get("price")),
         avg_price=avg,
         fee_usd=fee_usd,
         fee_breakdown=fee_breakdown,

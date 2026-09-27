@@ -1,8 +1,8 @@
-"use client";
-import { useLocale } from 'next-intl';
-import { BrowserPreferences } from '../../components/BrowserPreferences';
+import { BrowserWorkspacePanel } from '../../components/chat/BrowserWorkspacePanel';
 
-export default function BrowsersPage(){
-  const zh=useLocale().startsWith('zh');
-  return <div className="mx-auto max-w-4xl p-5 sm:p-8"><header className="mb-7"><h1 className="text-xl font-semibold">{zh?'浏览器设置':'Browser settings'}</h1><p className="mt-2 text-sm text-[color:var(--text-muted)]">{zh?'一个工作浏览器，随任务自动启动。':'One work browser, ready for every task.'}</p></header><BrowserPreferences/></div>;
+/** A browser is usable without creating a conversation or starting an Agent. */
+export default function BrowsersPage() {
+  return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="standalone-browser">
+    <BrowserWorkspacePanel conversationId="" />
+  </div>;
 }

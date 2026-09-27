@@ -27,6 +27,47 @@ from nerya.tools.types import ToolCall
 pytestmark = pytest.mark.smoke
 
 
+def test_multi_market_trend_scaffold_uses_trigger_market_and_replayable_protection(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="multi_trend",
+        strategy_class="trend",
+        execution_mode="script",
+        markets=("BINANCE:BTCUSDT", "BINANCE:ETHUSDT"),
+        accounts=("paper_main",),
+    )
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req, validate=True, create_proposal_record=False,
+    )
+    source = out.files["main.py"]
+    assert "market = ctx.trigger.get('market') or ctx.config.markets[0]" in source
+    assert "protective_exit" in source
+    assert 'protection={' in source
+    assert 'protection=(None if' not in source
+
+
+def test_generated_trend_checks_risk_exit_even_without_a_cross():
+    from types import SimpleNamespace
+    req = StrategyGenerationRequest(strategy_id="risk_exit", strategy_class="trend",
+        execution_mode="script", markets=("BINANCE:BTCUSDT",), accounts=("paper_main",))
+    namespace = {}
+    exec(StrategyCodeGenerator._render_main(req), namespace)
+    calls = []
+    candles = [{"open": 80, "high": 81, "low": 79, "close": 80, "volume": 1} for _ in range(160)]
+    def close_position(**kwargs):
+        calls.append(kwargs)
+        return {"status": "submitted"}
+    ctx = SimpleNamespace(runmode="backtest", trigger={"market": "BINANCE:BTCUSDT", "timeframe": "1h"},
+        config=SimpleNamespace(markets=["BINANCE:BTCUSDT"]),
+        market=SimpleNamespace(candles=lambda *a, **kw: candles, features=lambda *a, **kw: {}),
+        portfolio=SimpleNamespace(positions=lambda *a: [{"size": 1, "avg_price": 100}]),
+        trading=SimpleNamespace(close_position=close_position),
+        result=SimpleNamespace(hold=lambda **kw: {"status": "hold"}))
+    assert namespace["_ma_cross_signal"](candles)["cross"] == "none"
+    assert namespace["run"](ctx)["status"] == "submitted"
+    assert len(calls) == 1 and calls[0]["side"] == "long"
+    assert "protective_exit" in calls[0]["reasoning_ref"]
+
+
 def test_strategy_generator_normalizes_natural_language_tuning_objectives(tmp_path):
     req = StrategyGenerationRequest(
         strategy_id="amzn_daily_team_long",
@@ -691,7 +732,7 @@ def test_strategy_generator_agent_team_uses_agent_task_runtime(tmp_path):
     ]
     assert "trade_intent_submit" in manifest["agent_profile"]["allowed_tools"]
     assert manifest["policy"]["max_run_seconds"] >= 600
-    assert manifest["agent_session"]["policy"] == "per_signal"
+    assert manifest["agent_session"]["policy"] == "per_strategy"
     main_py = out.files["main.py"]
     assert "def build_agent_task" in main_py
     assert "StrategyAgentTask.dispatch" in main_py
@@ -1325,11 +1366,10 @@ def test_equity_news_falls_back_to_yahoo_rss_when_fd_key_missing(monkeypatch, tm
 
 def test_strategy_generate_tool_and_handler_share_tuning_default():
     """Guard against schema/default drift without importing native bootstrap."""
-
-    root = Path(__file__).resolve().parents[1]
-    source = (root / "nerya" / "tools" / "native" / "strategy_runtime.py").read_text(
-        encoding="utf-8",
+    from nerya.tools.native.strategy_runtime import (
+        STRATEGY_GENERATE_PROPOSAL_SCHEMA, STRATEGY_DRAFT_PROPOSAL_SCHEMA, _request_from_args,
     )
-
-    assert '"default": True' in source
-    assert 'create_tuning=bool(args.get("create_tuning", True))' in source
+    for schema in (STRATEGY_GENERATE_PROPOSAL_SCHEMA, STRATEGY_DRAFT_PROPOSAL_SCHEMA):
+        assert schema["properties"]["create_tuning"]["default"] is False
+    assert _request_from_args({"strategy_id": "static_by_default"}).create_tuning is False
+    assert _request_from_args({"strategy_id": "explicit_tuner", "create_tuning": True}).create_tuning is True

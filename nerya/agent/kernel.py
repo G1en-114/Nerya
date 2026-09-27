@@ -84,7 +84,7 @@ from .session_compaction import (
     compact_session_history,
 )
 from .verifier import compute_verifier_nudge, compute_verifier_outcome, VerifierOutcome
-from .streaming import get_default_bus
+from .streaming import get_default_bus, thinking_event_fields
 from .transcript_blocks import BlockEnvelope, TextBlock
 from .chart_hook import extract_chart_blocks, extract_chart_marker_ids
 # ``..charting`` and ``..workspace.artifact_store`` are imported lazily
@@ -125,6 +125,7 @@ _ASSISTANT_TURN_META_CAP = 256 * 1024
 
 _TURN_ACTIVITY_EVENT_KINDS = frozenset(
     {
+        "compact.start", "compact.complete", "context.degraded",
         "team.start",
         "team.event",
         "team.member.start",
@@ -564,6 +565,8 @@ def _compact_turn_activity_event(event: dict[str, Any]) -> dict[str, Any]:
         "owner",
         "tier",
         "status",
+        "cause", "before_message_count", "after_message_count", "before_chars", "after_chars",
+        "preservation_status", "dropped_message_count", "dropped_pair_count", "attempt",
         "phase",
         "ok",
         "error",
@@ -1366,12 +1369,6 @@ class AgentKernel:
 
         sid = str(session_id or "").strip()
         claim_id = str(expected_claim_id or "").strip() or None
-        max_bytes = int(
-            self.config.get(
-                "agent.native.turn_checkpoint_max_bytes",
-                2 * 1024 * 1024,
-            )
-        )
         con = connect(self.config.paths.db)
         try:
             repo = AgentSessionRepository(con)
@@ -1395,30 +1392,12 @@ class AgentKernel:
                     "reason": checkpoint.resume_block_reason or "not_resumable",
                 }
 
-            try:
-                saved = repo.save_turn_checkpoint(
-                    sid,
-                    turn_id=checkpoint.turn_id,
-                    checkpoint=checkpoint.asdict(),
-                    expected_claim_id=claim_id,
-                    max_bytes=max_bytes,
-                )
-            except ValueError as exc:
-                if claim_id:
-                    raise TurnCheckpointResumeError(
-                        "turn_checkpoint_too_large",
-                        str(exc),
-                        status=413,
-                    ) from exc
-                _LOG.warning("durable turn checkpoint not saved: %s", exc)
-                return {
-                    "state": "not_saved",
-                    "persisted": False,
-                    "resumable": True,
-                    "turn_id": checkpoint.turn_id,
-                    "resume_count": checkpoint.resume_count,
-                    "reason": "size_limit",
-                }
+            saved = repo.save_turn_checkpoint(
+                sid,
+                turn_id=checkpoint.turn_id,
+                checkpoint=checkpoint.asdict(),
+                expected_claim_id=claim_id,
+            )
             if not saved:
                 if claim_id:
                     raise TurnCheckpointResumeError(
@@ -1589,6 +1568,22 @@ class AgentKernel:
             )
             raise
         finally:
+            if session_id and checkpoint_claim_id:
+                # CAS cleanup is harmless after persistence removed the claim,
+                # and never removes a different worker's checkpoint. Failed
+                # execution cannot safely replay an old pre-side-effect state.
+                from ..db.repositories import AgentSessionRepository
+                from ..db.sqlite import connect
+                try:
+                    con = connect(self.config.paths.db)
+                    try:
+                        AgentSessionRepository(con).clear_turn_checkpoint(
+                            session_id, turn_id=turn_id, claim_id=checkpoint_claim_id,
+                        )
+                    finally:
+                        con.close()
+                except Exception:
+                    _LOG.exception("failed to clean up owned turn checkpoint lease")
             if session_id and result is not None:
                 try:
                     invoked: list[str] = []
@@ -1686,7 +1681,28 @@ class AgentKernel:
         continuation_feedback: str = "",
         checkpoint_claim_id: str | None = None,
     ) -> AgentTurnResult:
+        # Adopt approved disk changes at the turn boundary; pending proposals
+        # have not changed this registry and must never be treated as applied.
+        refresh_skills = getattr(self.skills, "reload", None)
+        if callable(refresh_skills):
+            refresh_skills()
         deps = self._ensure_registry()
+        if session_id:
+            from .task_continuity import session_task_snapshot, restore_task_state
+            from ..db.repositories import AgentSessionRepository
+            from ..db.sqlite import connect
+            task_con = connect(self.config.paths.db)
+            try:
+                task_repo = AgentSessionRepository(task_con)
+                session_meta = _json_obj((task_repo.get_session(session_id) or {}).get("meta_json"))
+                snapshot = session_task_snapshot(task_repo, session_id,
+                    checkpoint=checkpoint_from_session_meta(session_meta),
+                    transcript=getattr(turn_checkpoint, "transcript", ()) if turn_checkpoint else (),
+                    tool_results=(turn_checkpoint.tool_ledger.get("completed_tool_results", ()) if turn_checkpoint else ()))
+                deps.task_state.set_todos([], source={"session_id": session_id})
+                restore_task_state(deps.task_state, snapshot)
+            finally:
+                task_con.close()
         strategy_order_auto_approve = _strategy_triggered_order_turn(
             strategy_id,
             trigger,
@@ -1791,6 +1807,10 @@ class AgentKernel:
             """
 
             try:
+                from ..tools.native.task import preserve_task_context
+                task_snapshot = deps.task_state.snapshot_for_checkpoint()
+                if task_snapshot.get("source", {}).get("session_id") == session_id:
+                    transcript = preserve_task_context(transcript, task_snapshot)
                 snapshot = deps.file_state.snapshot()
             except Exception:
                 return transcript
@@ -1966,28 +1986,22 @@ class AgentKernel:
                 "trigger_event_id": trigger_event_id,
             }
             try:
-                if kind == "text":
+                if kind in {"text", "text_delta"}:
                     bus.publish(
                         "message.delta",
                         text=str(block.get("text") or ""),
-                        completed=False,
+                        completed=kind == "text" and bool(block.get("stream_id")),
+                        mode="replace" if kind == "text" and block.get("stream_id") else "append" if kind == "text_delta" else "legacy",
+                        stream_id=block.get("stream_id"), stream_mode=block.get("stream_mode"),
                         **common,
                     )
-                elif kind == "thinking":
-                    bus.publish(
-                        "turn.step",
-                        step={
-                            "kind": "thinking",
-                            "status": "ok",
-                            "wall_ms": 0,
-                            "detail": {
-                                "text": (str(block.get("text") or ""))[:4096],
-                                "summary": str(block.get("summary") or ""),
-                                **({"retry": block["retry"]} if isinstance(block.get("retry"), dict) else {}),
-                            },
-                        },
-                        **common,
-                    )
+                elif kind in {"thinking", "thinking_delta"}:
+                    bus.publish("turn.step", **thinking_event_fields(block), **common)
+                elif kind in {"tool_input_delta", "model_transport"}:
+                    bus.publish("model." + kind, stream_id=block.get("stream_id"),
+                        stream_mode=block.get("stream_mode"), call_id=block.get("call_id"),
+                        name=block.get("name"), partial_json=block.get("partial_json"),
+                        index=block.get("index"), status=block.get("status"), **common)
                 elif kind == "tool_use":
                     call_id = str(block.get("call_id") or "")
                     tool_payloads[call_id] = dict(block.get("payload") or {})
@@ -2016,6 +2030,8 @@ class AgentKernel:
                         error_kind=block.get("error_kind"),
                         elapsed_ms=block.get("elapsed_ms"),
                         result=block.get("result"),
+                        display_result=block.get("display_result"),
+                        compaction=block.get("compaction"),
                         **common,
                     )
                     try:
@@ -2213,20 +2229,12 @@ class AgentKernel:
             if approval_continue
             else user_text
         )
+        frozen_memory = self._freeze_memory_prompt_context(
+            deps, session_id=session_id, strategy_id=strategy_id, query=system_user_text)
         system_prompt = self._build_system_prompt(
-            deps,
-            attached_skills=attached_skills,
-            strategy_id=strategy_id,
-            session_id=session_id,
-            conversation_id=session_id or turn_id,
-            user_text=system_user_text,
-            frozen_memory_context=self._freeze_memory_prompt_context(
-                deps,
-                session_id=session_id,
-                strategy_id=strategy_id,
-                query=system_user_text,
-            ),
-        )
+            deps, attached_skills=attached_skills, strategy_id=strategy_id,
+            session_id=session_id, conversation_id=session_id or turn_id,
+            user_text=system_user_text, frozen_memory_context=frozen_memory)
         effective_provider, _effective_model, effective_meta = gw.effective_model_metadata(
             self.llm_tier or self.config.get("agent.native.tier"),
             provider_override=self.model_provider,
@@ -2341,6 +2349,20 @@ class AgentKernel:
                     _unsubscribe_activity_events()
                 except Exception:
                     pass
+
+        memory_usage = dict(getattr(frozen_memory, "metadata", {}) or {})
+        # The returned model outcome proves a request happened; prompt previews never log use.
+        if outcome.llm_calls and memory_usage and not checkpoint_continue:
+            try:
+                from ..memory.activity import MemoryActivityEvent, MemoryActivityLog
+                from ..memory.scope import memory_actor
+                MemoryActivityLog(config=self.config).append(MemoryActivityEvent(
+                    kind="inject", actor_id=memory_actor(deps.active_actor_id),
+                    source="runtime:context", extra={**memory_usage,"turn_id":turn_id}))
+            except Exception:
+                _LOG.debug("memory injection receipt unavailable", exc_info=True)
+        elif checkpoint_continue:
+            memory_usage = {"reason":"checkpoint_context_reused","included":[],"session_id":session_id}
 
         # Push the MCP per-session cache. Mirror anything the
         # loop newly described or cached back to the long-lived
@@ -2458,6 +2480,8 @@ class AgentKernel:
                 "output_tokens_total": outcome.output_tokens_total,
                 "prompt_tokens_last": outcome.prompt_tokens_last,
                 "context_window": outcome.context_window,
+                "requested_context_window": outcome.requested_context_window,
+                "memory_usage": memory_usage,
                 "compaction_count": outcome.compaction_count,
                 "reactive_compaction_count": outcome.reactive_compaction_count,
                 "steer_messages": outcome.steer_messages,
@@ -2673,6 +2697,8 @@ class AgentKernel:
                 "output_tokens_total": outcome.output_tokens_total,
                 "prompt_tokens_last": outcome.prompt_tokens_last,
                 "context_window": outcome.context_window,
+                "requested_context_window": outcome.requested_context_window,
+                "memory_usage": memory_usage,
                 "compaction_count": outcome.compaction_count,
                 "reported_provider": (outcome.checkpoint.usage if outcome.checkpoint else {}).get("provider"),
                 "reported_model": (outcome.checkpoint.usage if outcome.checkpoint else {}).get("model"),
@@ -3012,6 +3038,7 @@ class AgentKernel:
                             "error",
                             "error_kind",
                             "elapsed_ms",
+                            "task_state",
                         )
                         if k in block
                     },
@@ -3434,12 +3461,16 @@ class AgentKernel:
                         )
                     ),
                 )
+                from .task_continuity import session_task_snapshot
+                task_snapshot = session_task_snapshot(repo, session_id, checkpoint=existing_checkpoint,
+                    live=getattr(getattr(self, "_deps", None), "task_state", None))
                 compacted = compact_session_history(
                     rows,
                     existing_checkpoint=existing_checkpoint,
                     policy=policy,
                     exclude_turn_id=exclude_turn_id,
                     compaction_epoch=compaction_epoch,
+                    task_snapshot=task_snapshot,
                 )
                 if compacted.checkpoint is not None:
                     saved = repo.update_context_checkpoint(
@@ -3448,23 +3479,31 @@ class AgentKernel:
                         expected_epoch=compaction_epoch,
                     )
                     if not saved:
-                        recent = repo.transcript(
-                            session_id,
-                            limit=policy.keep_recent_messages,
-                        )
-                        con.close()
-                        return [
-                            {
-                                "role": str(row.get("role") or ""),
-                                "content": str(row.get("content") or "")[
-                                    :policy.per_message_chars
-                                ],
-                            }
-                            for row in recent
-                            if str(row.get("role") or "")
-                            in ("user", "assistant")
-                            and str(row.get("content") or "").strip()
-                        ]
+                        # One bounded re-read after a concurrent history edit. Never inject the stale digest.
+                        latest = repo.get_session(session_id) or {}
+                        latest_epoch = int(latest.get("compaction_epoch") or 0)
+                        fresh = _filter_failed_history_rows(repo.compaction_transcript(session_id, after_seq=0),
+                            tool_events_by_turn={}, preserve_approval_pauses=include_interrupted_resume_context)
+                        latest_task = session_task_snapshot(repo, session_id,
+                            checkpoint=checkpoint_from_session_meta(_json_obj(latest.get("meta_json"))))
+                        compacted = compact_session_history(fresh, policy=policy,
+                            exclude_turn_id=exclude_turn_id, compaction_epoch=latest_epoch, task_snapshot=latest_task)
+                        if compacted.checkpoint is not None and not repo.update_context_checkpoint(
+                                session_id, compacted.checkpoint, expected_epoch=latest_epoch):
+                            current = repo.transcript(session_id, limit=policy.keep_recent_messages)
+                            con.close()
+                            from ..tools.native.task import preserve_task_context
+                            degraded = [{"role":"user", "kind":"context.degraded", "pinned":True,
+                                "content":"Context history changed during compaction. Only the recent canonical messages and scoped task state are attached; earlier history is unavailable in this request. Re-read evidence before relying on omitted constraints or repeating actions.",
+                                "meta":{"reason":"checkpoint_conflict", "session_id":session_id}}]
+                            degraded.extend({"role":str(row.get("role") or ""), "content":str(row.get("content") or "")[:policy.per_message_chars]}
+                                for row in current if row.get("role") in ("user","assistant") and str(row.get("content") or "").strip())
+                            try:
+                                from .streaming import get_default_bus
+                                get_default_bus().publish("context.degraded", session_id=session_id, reason="checkpoint_conflict")
+                            except Exception:
+                                _LOG.debug("context degradation event unavailable", exc_info=True)
+                            return preserve_task_context(degraded, latest_task)
                 con.close()
                 if compacted.messages:
                     return compacted.messages
@@ -3554,7 +3593,7 @@ class AgentKernel:
         concluded.
         """
 
-        if not bool(self.config.get("agent.native.memory_write_on_turn", False)):
+        if not bool(self.config.get("memory.auto_save_enabled", self.config.get("agent.native.memory_write_on_turn", False))):
             return
         text = (result.final_text or "").strip()
         if not text:
@@ -3588,6 +3627,7 @@ class AgentKernel:
                 source_turn_id=turn_id,
                 evidence_refs=[f"turn:{turn_id}"],
                 writer_id="agent_kernel",
+                automatic=True,
             )
             if remembered.ok and not remembered.skipped:
                 self._evolution_hooks.on_memory_write(
@@ -3672,6 +3712,7 @@ class AgentKernel:
                 source_turn_id=turn_id,
                 evidence_refs=[f"turn:{turn_id}"],
                 writer_id="agent_kernel",
+                automatic=True,
             )
         except Exception:
             _LOG.debug("verifier nudge memory write failed", exc_info=True)

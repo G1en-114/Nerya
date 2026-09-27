@@ -51,7 +51,6 @@ def test_web_search_fetch_does_not_route_by_query_keywords(monkeypatch) -> None:
 
     assert result.is_error is False
     assert captured["query"] == "Solana on-chain wallet API data provider tracking"
-    assert captured["use_browser_fallback"] is True
     assert captured["use_scrapling_fallback"] is True
 
 

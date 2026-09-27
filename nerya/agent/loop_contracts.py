@@ -26,7 +26,7 @@ class LoopConfig:
     """
 
     turn_id: str | None = None
-    max_iterations: int = 24
+    max_iterations: int = 0
     compact_threshold: int = 60
     keep_tail_messages: int = 24
     max_tokens: int = 4096
@@ -52,7 +52,7 @@ class LoopConfig:
     repeated_tool_stop_after: int = 2
     max_extra_llm_attempts_per_turn: int = DEFAULT_EXTRA_ATTEMPT_LIMIT
     llm_retry_attempts: int = 10
-    llm_retry_base_delay: float = 3.0
+    llm_retry_base_delay: float = 2.0
     llm_retry_max_delay: float = 60.0
     llm_retry_full_jitter: bool = True
     enable_microcompact: bool = True
@@ -65,6 +65,7 @@ class LoopConfig:
     diminishing_returns_window: int = 3
     reactive_compact_max_attempts: int = 3
     model_context_window: int | None = None
+    requested_model_context_window: int | None = None
     token_pressure_compact_ratio: float = 0.85
     workspace_root: str | None = None
     tool_argument_defaults: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -98,7 +99,39 @@ class LoopConfig:
             if cast is bool and type(value) is not bool:
                 raise ValueError(f"agent.native.{name} must be a boolean")
             options[name] = cast(value) if value is not None else None
-        return cls(**{**options, **overrides})
+            if name in {"max_wall_seconds", "max_total_tool_calls"} and options[name] == 0:
+                options[name] = None
+        result = cls(**{**options, **overrides})
+        from ..llm.gateway import LLMGateway
+        from ..llm.model_registry import resolve_context_window
+        from ..llm.route_candidates import configured_models, first_configured_route
+
+        # Resolve the same provider/model route without locking the selection
+        # or touching credentials. The caller limit survives route changes.
+        gateway = LLMGateway(config)
+        from ..core.errors import LLMTaskNotAllowed
+        try:
+            resolved_tier = gateway.tier_policy.resolve(
+                task=result.task, requested_tier=tier, caller_allowed_tiers=None,
+            )
+        except LLMTaskNotAllowed:
+            # Building policy remains valid before routes are ready. Dispatch
+            # still performs its authoritative task/tier admission check.
+            resolved_tier = tier
+        route = first_configured_route(gateway._effective_tier_cfg(
+            resolved_tier, provider_override=result.model_provider, model_override=result.model_id,
+        ))
+        result.requested_model_context_window = overrides.get(
+            "requested_model_context_window", overrides.get(
+                "model_context_window", config.get("agent.native.model_context_window"),
+            ),
+        ) or 0
+        result.model_context_window = resolve_context_window(
+            str(route.get("provider") or ""), configured_models(route, model_override=result.model_id)[0],
+            result.requested_model_context_window, route.get("context_window"), route.get("context_length"),
+            workspace=config.paths.root,
+        )
+        return result
 
     def model_options(self) -> dict[str, Any]:
         """One source of provider settings for every normal/recovery/final call."""
@@ -112,11 +145,19 @@ class LoopConfig:
             "reasoning_summary": self.reasoning_summary,
             "model_provider": self.model_provider,
             "model_id": self.model_id,
+            "model_context_window": (
+                self.requested_model_context_window
+                if self.requested_model_context_window is not None else self.model_context_window
+            ),
         }
 
     @property
+    def iteration_limit(self) -> int | float:
+        return self.max_iterations if self.max_iterations and self.max_iterations > 0 else float("inf")
+
+    @property
     def tool_call_limit(self) -> int | None:
-        return int(self.max_total_tool_calls) if self.max_total_tool_calls is not None else None
+        return int(self.max_total_tool_calls) if self.max_total_tool_calls and self.max_total_tool_calls > 0 else None
 
 
 @dataclass
@@ -138,6 +179,7 @@ class LoopOutcome:
     output_tokens_total: int = 0
     prompt_tokens_last: int = 0
     context_window: int = 0
+    requested_context_window: int = 0
     compaction_count: int = 0
     reactive_compaction_count: int = 0
     steer_messages: int = 0

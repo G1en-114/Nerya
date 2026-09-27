@@ -112,7 +112,7 @@ def _is_system(msg: dict[str, Any]) -> bool:
 def _is_operator_user_anchor(msg: dict[str, Any]) -> bool:
     """Return true for real operator/harness user text, not tool observations."""
 
-    if msg.get("role") != "user":
+    if msg.get("role") != "user" or str(msg.get("kind") or "").startswith("transcript.compact."):
         return False
     content = msg.get("content")
     if isinstance(content, str):
@@ -357,6 +357,12 @@ def compact_transcript(
     # preserves the actual task intent after long tool-heavy turns compact.
     for i, m in enumerate(messages):
         if _is_operator_user_anchor(m):
+            keep_idx.add(i)
+            break
+    # Keep the latest actual request as well: the first intent may have been
+    # replaced. Do not infer cancellation or authorization from summary regexes.
+    for i in range(n - 1, -1, -1):
+        if _is_operator_user_anchor(messages[i]):
             keep_idx.add(i)
             break
 

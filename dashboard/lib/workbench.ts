@@ -2,21 +2,30 @@ import type { ChatThread, TurnPayload } from "./chat";
 import type { ConversationCommand } from "./conversationCommands";
 import { recordOf } from "./externalCalls";
 
+/** Legacy session lists keep titles in meta; normalize at the API boundary. */
+export function taskEntryTitle(entry: {title?: unknown; meta?: unknown}): string {
+  const title = typeof entry.title === "string" ? entry.title.trim() : "";
+  const legacy = recordOf(entry.meta).title;
+  return title || (typeof legacy === "string" ? legacy.trim() : "");
+}
+
 export type TaskStatus = {
   execution: string; waiting_for: "user" | "approval" | "configuration" | null;
   completion: "external_reported" | "turn_finished" | null; validation: string;
   needs_attention: boolean; external: boolean; turn_id?: string;
 };
+export type InteractionQuestion = { id: string; question: string; options: string[]; multiple: boolean };
 export type Interaction = {
   interaction_id: string; session_id: string; turn_id: string; revision: number;
   kind: "question" | "plan"; state: "pending" | "deferred" | "answered";
-  payload: { title: string; message?: string; choices?: string[]; multiple?: boolean;
+  payload: { questions?: InteractionQuestion[]; title: string; message?: string; choices?: string[]; multiple?: boolean;
     steps?: string[]; deliverables?: string[]; constraints?: string[] };
 };
 export type SessionView = {
   ok: boolean; session_id: string; revision: string; observed_at: number;
   status: TaskStatus; pending_interactions: Interaction[];
   queue: { count: number; paused: boolean }; approvals: { id: string; kind?: string }[];
+  approval_resolutions?: {id:string; state:string; kind?:string; turn_id?:string}[];
   agents: { id: string; name: string; state: string; title: string; attempt: number }[];
   result_refs: { kind: string; path: string; turn_id: string; message_id: string }[];
   available_actions: { send: boolean; guide: boolean; stop: boolean };
@@ -40,7 +49,8 @@ export function taskStatus(thread: ChatThread | null, commands: ConversationComm
   const last = messages.findLast(m => m.role === "assistant");
   const turn: TurnPayload | undefined = last?.role === "assistant" ? last.turn : undefined;
   const work = commands.filter(c => c.kind !== "guide" && c.state !== "removed").sort((a,b) => a.created_at-b.created_at);
-  const command = work.findLast(c => ["running","stopping","unconfirmed"].includes(c.state)) || work.at(-1);
+  const executed=work.findLast(c=>c.state!=="queued");
+  const command = work.findLast(c => ["running","stopping","unconfirmed"].includes(c.state)) || (executed&&["failed","blocked","awaiting_approval","awaiting_input","interrupted"].includes(executed.state)?executed:work.at(-1));
   let execution = command?.state || (last?.role === "assistant" && last.loading ? "running" : last?.role === "assistant" && last.error ? "failed" : "idle");
   let completion: TaskStatus["completion"] = null;
   if (!command && turn?.stopped_reason) execution = ["end_turn","completed","stop"].includes(turn.stopped_reason) ? "succeeded" : turn.stopped_reason.includes("approval") ? "awaiting_approval" : turn.stopped_reason.includes("cancel") ? "interrupted" : "blocked";

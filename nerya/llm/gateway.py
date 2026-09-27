@@ -12,12 +12,13 @@ import logging
 import os
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..core import jsonl
 from ..core.config import Config
 from ..core.errors import LLMError
+from ..harness.cancellation import CancelledError, raise_if_cancelled
 from ..core.errors import PromptInjectionDetected
 from ..core.redaction import redact_display_dict
 from ..core.time import now_iso
@@ -26,10 +27,11 @@ from ..db import LLMUsageRepository
 from ..db.sqlite import connect
 from ..security.prompt_injection import flag_suspicious
 from .adapters.openai import DEFAULT_BASE_URLS as _OPENAI_DEFAULT_BASE_URLS
-from .adapters._base import wire_trace
+from .adapters._base import wire_trace, io_control
 from .messages import (
     AnthropicMessagesBackend,
     BedrockAnthropicMessagesBackend,
+    CodexResponsesMessagesBackend,
     GeminiMessagesBackend,
     MessagesBackend,
     MessagesRequest,
@@ -38,6 +40,7 @@ from .messages import (
     OllamaMessagesBackend,
     OpenAIMessagesBackend,
     normalise_provider_native_web_search,
+    normalise_reasoning_effort,
 )
 from .model_router import CallResult, ModelRouter
 from .provider_catalog import lookup as _provider_lookup
@@ -45,6 +48,7 @@ from .redaction import scrub
 from .route_candidates import (
     RESOLVED_PROVIDER_KEY,
     configured_routes,
+    configured_models,
     expand_tier_route_cfgs,
     first_configured_route,
     split_csv_values,
@@ -781,8 +785,12 @@ class LLMGateway:
         reasoning_summary: str | None = None,
         model_provider: str | None = None,
         model_id: str | None = None,
+        model_context_window: int | None = None,
         deadline: float | None = None,
         metadata: dict[str, Any] | None = None,
+        stream: bool = False,
+        on_event: Any = None,
+        cancel_token: object | None = None,
     ) -> MessagesResponse:
         """Provider-native messages call.
 
@@ -827,10 +835,11 @@ class LLMGateway:
             tool_choice=tool_choice,
             max_tokens=max_tokens,
             temperature=temperature,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=normalise_reasoning_effort(reasoning_effort),
             reasoning_summary=reasoning_summary,
             deadline=deadline,
             metadata=request_metadata,
+            stream=stream, on_event=on_event, cancel_token=cancel_token,
         )
 
         context_full = self._context_full_logging_enabled()
@@ -871,6 +880,32 @@ class LLMGateway:
         last_exc: Exception | None = None
         for index, route_cfg in enumerate(route_cfgs or [tier_cfg]):
             try:
+                from .model_registry import ModelRegistry, resolve_context_window
+                from .compression import estimate_tokens
+
+                route_provider = str(route_cfg.get("provider") or "")
+                route_model = str(route_cfg.get("model") or "")
+                window = resolve_context_window(
+                    route_provider, route_model, model_context_window,
+                    route_cfg.get("context_window"), route_cfg.get("context_length"),
+                    workspace=self.config.paths.root,
+                )
+                output_limit = ModelRegistry(workspace=self.config.paths.root).lookup(
+                    route_provider, route_model,
+                ).max_output_tokens
+                route_max_tokens = min(request.max_tokens, output_limit) if output_limit else request.max_tokens
+                if window:
+                    import json
+                    input_estimate = estimate_tokens(request.system) + estimate_tokens(
+                        json.dumps([request.messages, request.tools], ensure_ascii=False)
+                    )
+                    remaining = window - input_estimate
+                    if remaining <= 0:
+                        raise LLMError(
+                            f"context_length_exceeded: estimated input {input_estimate} "
+                            f"exceeds {route_provider}/{route_model} context window {window}"
+                        )
+                    route_max_tokens = min(route_max_tokens, remaining)
                 route_metadata = dict(request_metadata)
                 route_metadata["provider_native_web_search"] = (
                     normalise_provider_native_web_search(
@@ -885,13 +920,18 @@ class LLMGateway:
                     messages=list(request.messages),
                     tools=list(request.tools or []),
                     tool_choice=request.tool_choice,
-                    max_tokens=request.max_tokens,
+                    max_tokens=route_max_tokens,
                     temperature=request.temperature,
                     stream=request.stream,
-                    reasoning_effort=request.reasoning_effort,
+                    reasoning_effort=(
+                        request.reasoning_effort
+                        if request.reasoning_effort is not None
+                        else normalise_reasoning_effort(route_cfg.get("reasoning_effort"))
+                    ),
                     reasoning_summary=request.reasoning_summary,
                     deadline=request.deadline,
                     metadata=route_metadata,
+                    on_event=request.on_event, cancel_token=request.cancel_token,
                 )
                 backend = self._resolve_messages_backend(
                     resolved_tier,
@@ -914,12 +954,23 @@ class LLMGateway:
                         correlation=context_correlation,
                         event=event,
                     )
-                with wire_trace(wire_callback):
+                with wire_trace(wire_callback), io_control(cancel_token, deadline):
                     response = backend(route_request)
+                if on_event is not None:
+                    try:
+                        on_event({"type": "transport", "stream_mode": response.stream_mode,
+                                  "provider": response.provider, "model": response.model})
+                    except Exception:
+                        _LOG.exception("model transport observer failed")
+                response.context_window = window
+                response.requested_context_window = model_context_window
                 active_route_cfg = route_cfg
                 break
             except Exception as exc:
                 last_exc = exc
+                response = None
+                if isinstance(exc, CancelledError) or getattr(exc, "stream_interrupted", False):
+                    break
                 if index < len(route_cfgs) - 1:
                     continue
         if response is None:
@@ -1012,6 +1063,7 @@ class LLMGateway:
 
         if provider:
             provider_cfg: dict | None = None
+            connection_cfg: dict | None = None
             # Check the requested tier's own routes first. Plain dict order
             # used to win here: with provider_override=stepfun and tier=medium,
             # the scan hit the *light* tier's stepfun fallback route first and
@@ -1033,6 +1085,10 @@ class LLMGateway:
                 for route in candidate_routes:
                     if str((route or {}).get("provider") or "").lower() != provider:
                         continue
+                    if connection_cfg is None:
+                        connection_cfg = dict(route)
+                    if model_override and str(model_override).strip() not in configured_models(route):
+                        continue
                     if name == tier:
                         provider_cfg = dict(route or {})
                         break
@@ -1049,9 +1105,16 @@ class LLMGateway:
                     or provider_cfg.get("provider_key_env")
                 ):
                     break
-            cfg = {key: value for key, value in base_cfg.items() if key != "routes"}
-            if provider_cfg:
-                cfg.update(provider_cfg)
+            # Legacy configurations keep connection details on routes. An
+            # unlisted model can reuse these, but never another model's policy.
+            cfg = dict(provider_cfg or {key: base_cfg[key] for key in (
+                "allowed_tasks", "allowed_classes", "max_tokens", "temperature",
+            ) if key in base_cfg})
+            if not provider_cfg and connection_cfg:
+                for key in ("base_url", "provider_key_ref", "provider_key_env", "kind"):
+                    value = (provider_profiles.get(provider) or {}).get(key, connection_cfg.get(key))
+                    if value:
+                        cfg[key] = value
             cfg["provider"] = provider
             if model_override:
                 cfg["model"] = str(model_override).strip()
@@ -1137,12 +1200,16 @@ class LLMGateway:
         )
         route = first_configured_route(cfg)
         provider = str(route.get("provider") or cfg.get("provider") or "mock").strip().lower()
-        model = str(route.get("model") or cfg.get("model") or "").strip()
-        from .model_registry import ModelRegistry
+        model = configured_models(route, model_override=model_override)[0]
+        from .model_registry import ModelRegistry, resolve_context_window
 
-        return provider, model, ModelRegistry(workspace=self.config.paths.root).lookup(
-            provider,
-            model,
+        metadata = ModelRegistry(workspace=self.config.paths.root).lookup(provider, model)
+        return provider, model, replace(
+            metadata,
+            context_window=resolve_context_window(
+                provider, model, route.get("context_window"), route.get("context_length"),
+                workspace=self.config.paths.root,
+            ),
         )
 
     def _mock_messages_or_raise(
@@ -1178,6 +1245,7 @@ class LLMGateway:
 
         * ``anthropic`` / ``claude``     — :class:`AnthropicMessagesBackend`
         * ``openai``                     — :class:`OpenAIMessagesBackend`
+        * ``openai-codex``               — :class:`CodexResponsesMessagesBackend`
         * OpenAI-compatible providers and custom provider profiles with
           ``kind: chat_completions``     — :class:`OpenAIMessagesBackend` with
                                            the provider/profile base URL
@@ -1223,6 +1291,71 @@ class LLMGateway:
                 model=model or "claude-sonnet-4-5",
                 base_url=base_url or "https://api.anthropic.com/v1",
                 provider_name="anthropic" if provider in {"anthropic", "claude"} else provider,
+            )
+
+        if provider == "openai-codex" or api_mode == "codex_responses":
+            try:
+                from .oauth_login import resolve_oauth_token
+                from ..security.provider_auth import ProviderAuthStore
+
+                api_key = resolve_oauth_token(
+                    self.config,
+                    provider="openai-codex",
+                )
+                store = ProviderAuthStore.open(self.config.paths.provider_auth)
+                record = store.get("openai-codex", "default")
+                account_id = str(
+                    (record.metadata or {}).get("account_id")
+                    if record is not None
+                    else ""
+                ).strip()
+            except Exception:
+                api_key = ""
+                account_id = ""
+            if not api_key:
+                _LOG.warning(
+                    "openai-codex OAuth token missing on tier %s; "
+                    "LLM messages backend unavailable", tier,
+                )
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider="openai-codex",
+                    model=model,
+                    reason="missing_oauth_token",
+                )
+            if not account_id:
+                _LOG.warning(
+                    "openai-codex account id missing on tier %s; "
+                    "LLM messages backend unavailable", tier,
+                )
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider="openai-codex",
+                    model=model,
+                    reason="missing_account_id",
+                )
+            if not model:
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider="openai-codex",
+                    model=model,
+                    reason="missing_model",
+                )
+            entry = _provider_lookup("openai-codex")
+            codex_base_url = (
+                str(base_url or "").strip()
+                or (entry.base_url if entry is not None else "")
+                or "https://chatgpt.com/backend-api/codex"
+            )
+            return CodexResponsesMessagesBackend(
+                api_key=api_key,
+                account_id=account_id,
+                model=model,
+                base_url=codex_base_url,
+                provider_name="openai-codex",
+                timeout=float(cfg.get("timeout_s") or cfg.get("timeout") or 180.0),
+                reasoning_effort=cfg.get("reasoning_effort"),
+                reasoning_summary=cfg.get("reasoning_summary"),
             )
 
         if provider == "openai" or api_mode == "chat_completions":

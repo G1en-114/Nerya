@@ -219,13 +219,14 @@ def _default_tuner_prompt(
         "## Custom guidance\n\n"
         f"{custom}\n\n"
         "## What you must produce\n\n"
+        "Load Skill(skill=\"strategy_author\", file=\"references/explanations.md\") for the human-readable review and source annotation contract.\n\n"
         "Return strict JSON shaped like:\n\n"
         "```json\n"
         "{\n"
         '  "summary": "<one-line takeaway>",\n'
         '  "evidence": [{ "source": "strategy_runs", "finding": "..." }],\n'
         '  "proposed_changes": [\n'
-        '    {"file": "main.py", "kind": "code_patch", "rationale": "..."}\n'
+        '    {"file": "main.py", "kind": "full_file", "after_content": "<complete source with @nerya comments>", "summary": "<plain-language change>", "before_summary": "<previous behavior>", "after_summary": "<proposed behavior>", "scope": ["<affected rule or branch>"], "rationale": "<reason tied to evidence>"}\n'
         '  ],\n'
         '  "expected_effect": {"return": "neutral_or_better", "drawdown": "lower"},\n'
         '  "validation_plan": ["unit", "fixture_replay", "backtest"],\n'

@@ -10,12 +10,15 @@ import subprocess
 import sys
 import time
 import zipfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .....data.candles import fetch_candles
+from .....data.history_store import HistoryStore, HistoryDataError, normalize_row, timeframe_seconds, is_sample
 
 
 class NoHistoricalDataError(RuntimeError):
@@ -35,15 +38,14 @@ class CandleRange:
 
 
 def _tf_seconds(tf: str) -> int:
-    unit = tf[-1].lower()
-    qty = int(tf[:-1] or 1)
-    if unit == "m":
-        return qty * 60
-    if unit == "h":
-        return qty * 3600
-    if unit == "d":
-        return qty * 86400
-    raise ValueError(f"unsupported timeframe: {tf}")
+    return timeframe_seconds(tf)
+
+
+class HistoricalRows(list):
+    """List-compatible result carrying explicit download/coverage evidence."""
+    def __init__(self, rows, receipt):
+        super().__init__(rows)
+        self.history_receipt = receipt
 
 
 def cache_path_for(rng: CandleRange, cache_root: str | Path) -> Path:
@@ -68,35 +70,30 @@ def get_candles(
     *,
     allow_mock: bool | None = None,
     config_like: Any | None = None,
+    offline: bool = False,
+    progress=None,
+    check_cancel=None,
+    timeout_seconds: float = 300,
 ) -> list[dict[str, Any]]:
-    rng = CandleRange(market=market, tf=tf, start=int(start), end=int(end))
-    path = cache_path_for(rng, cache_root)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-
-    rows = _source_fetch(
-        market,
-        tf=tf,
-        start=start,
-        end=end,
-        allow_mock=allow_mock,
-        config_like=config_like,
-    )
+    if _venue_of(market) in {"MOCK", "PAPER"} or allow_mock is True:
+        if offline:
+            raise NoHistoricalDataError("sample data is not stored in the historical cache")
+        rows = _source_fetch(market, tf=tf, start=start, end=end,
+                             allow_mock=allow_mock, config_like=config_like)
+        filtered = [_normalise_row(row) for row in rows]
+        filtered = [row for row in filtered if int(start) <= row["ts"] <= int(end)]
+        if not filtered:
+            raise NoHistoricalDataError(f"no candles in requested range for {market} {tf}")
+        return HistoricalRows(filtered, {"status": "sample", "complete": False, "persistent": False})
+    from .history_data import prepare_series
+    rows, receipt = prepare_series(HistoryStore(cache_root), market, tf, int(start), int(end) + 1,
+        config_like=config_like, offline=offline, progress=progress,
+        check_cancel=check_cancel, timeout_seconds=timeout_seconds)
     if not rows:
-        raise NoHistoricalDataError(f"no historical candles for {market} {tf}")
-    filtered = [
-        _normalise_row(row)
-        for row in rows
-        if start <= int(row.get("ts", row.get("ts_ms", 0))) <= end
-    ]
-    if not filtered:
-        raise NoHistoricalDataError(f"no historical candles in requested range for {market} {tf}")
-    if not _is_mock_result(market, filtered):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # V1 keeps a stable .parquet filename but stores JSON so the skill has no
-        # pyarrow dependency. The suffix is reserved for a v2 transparent swap.
-        path.write_text(json.dumps(filtered, ensure_ascii=False), encoding="utf-8")
-    return filtered
+        error = NoHistoricalDataError(f"no historical candles for {market} {tf}; download status={receipt['status']}")
+        error.receipt = receipt
+        raise error
+    return HistoricalRows(rows, receipt)
 
 
 def _source_fetch(
@@ -128,15 +125,7 @@ def _source_fetch(
 
 
 def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
-    ts = _to_seconds(row.get("ts", row.get("ts_ms", 0)))
-    return {
-        "ts": ts,
-        "open": float(row.get("open", 0.0)),
-        "high": float(row.get("high", 0.0)),
-        "low": float(row.get("low", 0.0)),
-        "close": float(row.get("close", 0.0)),
-        "volume": float(row.get("volume", 0.0)),
-    }
+    return normalize_row(row)
 
 
 def _venue_of(market: str) -> str:
@@ -189,6 +178,21 @@ def _fetch_binance_vision(
     while day <= end_day:
         if time.monotonic() >= deadline:
             break
+        # Long ranges use one monthly archive instead of 28-31 daily requests.
+        # The caller commits each month and checks actual gaps; hitting this
+        # bounded fetch deadline can never certify an incomplete year as full.
+        month_end = (day.replace(year=day.year + (day.month == 12), month=day.month % 12 + 1, day=1) - timedelta(days=1))
+        if (min(month_end, end_day) - day).days >= 2:
+            month = day.strftime("%Y-%m")
+            monthly_base = base.replace("/daily/", "/monthly/")
+            url = f"https://data.binance.vision/{monthly_base}/{symbol}/{tf}/{symbol}-{tf}-{month}.zip"
+            monthly = _read_binance_vision_zip(url, start=start, end=end)
+            if monthly:
+                rows.extend(monthly)
+                day = month_end + timedelta(days=1)
+                continue
+            if time.monotonic() >= deadline:
+                break
         url = (
             f"https://data.binance.vision/{base}/"
             f"{symbol}/{tf}/{symbol}-{tf}-{day.isoformat()}.zip"
@@ -210,6 +214,8 @@ def _read_binance_vision_zip(url: str, *, start: int, end: int) -> list[dict[str
     out: list[dict[str, Any]] = []
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            if sum(info.file_size for info in zf.infolist()) > 256 * 1024 * 1024:
+                raise HistoryDataError("expanded historical archive exceeds 256 MiB")
             for name in zf.namelist():
                 if not name.lower().endswith(".csv"):
                     continue
@@ -228,36 +234,36 @@ def _read_binance_vision_zip(url: str, *, start: int, end: int) -> list[dict[str
                             "low": float(row[3]),
                             "close": float(row[4]),
                             "volume": float(row[5]),
+                            "_envelope": {"source": "binance_vision", "mode": "live"},
                         })
-    except Exception:
-        return []
+    except (zipfile.BadZipFile, UnicodeError, ValueError, OSError) as exc:
+        raise HistoryDataError(f"invalid historical archive: {exc}") from exc
     return out
 
 
 def _download_binance_vision_payload(url: str, *, timeout: float) -> bytes | None:
-    code = (
-        "import sys, urllib.error, urllib.request\n"
-        "url = sys.argv[1]\n"
-        "timeout = float(sys.argv[2])\n"
-        "try:\n"
-        "    with urllib.request.urlopen(url, timeout=timeout) as resp:\n"
-        "        sys.stdout.buffer.write(resp.read())\n"
-        "except urllib.error.HTTPError as exc:\n"
-        "    sys.exit(0 if exc.code == 404 else 1)\n"
-    )
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-c", code, url, str(float(timeout))],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=max(float(timeout) + 1.0, 1.0),
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if completed.returncode != 0:
-        return None
-    return completed.stdout
+    # No interpreter process per archive; use the normal, bounded HTTP path.
+    # Only absent archives return None. Network and authorization errors remain
+    # errors, so a transient failure is not mistaken for unavailable history.
+    request = urllib.request.Request(url, headers={"User-Agent": "Nerya/history-v2"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = response.read(128 * 1024 * 1024 + 1)
+            if len(payload) > 128 * 1024 * 1024:
+                raise HistoryDataError("historical archive exceeds download size limit")
+            return payload
+        except urllib.error.HTTPError as exc:
+            if exc.code in {404, 410}:
+                return None
+            if (exc.code == 429 or 500 <= exc.code < 600) and attempt < 2:
+                try:
+                    delay = float(exc.headers.get("Retry-After", 0.5 * 2 ** attempt))
+                except (TypeError, ValueError):
+                    delay = 0.5 * 2 ** attempt
+                time.sleep(max(0, min(delay, 8)))
+                continue
+            raise
 
 
 def _binance_vision_request_timeout_seconds() -> float:
@@ -295,6 +301,4 @@ def _to_seconds(value: Any) -> int:
 
 
 def _is_mock_result(market: str, rows: list[dict[str, Any]]) -> bool:
-    if _venue_of(market) in {"MOCK", "PAPER"}:
-        return False
-    return bool(rows and isinstance(rows[0], dict) and rows[0].get("_envelope", {}).get("truth") == "mock")
+    return any(is_sample(market, row) for row in rows)

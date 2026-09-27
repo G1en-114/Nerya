@@ -223,6 +223,7 @@ class BSCNative(EVMNative):
         gas_price_gwei: float | None = None,
         gas_limit: int | None = None,
         confirm: bool = True,
+        on_broadcast: Any = None,
     ) -> dict[str, Any]:
         """Submit an ERC-20 ``approve`` tx. Returns ``{tx_hash, nonce, ...}``."""
         self._check_live()
@@ -235,6 +236,7 @@ class BSCNative(EVMNative):
             gas_price_gwei=gas_price_gwei,
             gas_limit=gas_limit,
             confirm=confirm,
+            on_broadcast=(lambda tx:on_broadcast({**tx,'phase':'approval'})) if on_broadcast else None,
         )
 
     def swap(
@@ -253,6 +255,9 @@ class BSCNative(EVMNative):
         gas_price_gwei: float | None = None,
         gas_limit: int | None = None,
         confirm: bool = True,
+        native_in: bool = False,
+        native_out: bool = False,
+        on_broadcast: Any = None,
     ) -> dict[str, Any]:
         """Execute a PancakeSwap v2 swap through the router.
 
@@ -277,8 +282,8 @@ class BSCNative(EVMNative):
         deadline = int(time.time()) + int(deadline_seconds)
         p = quote["path"]
 
-        is_native_in = token_in.lower() == self.wbnb.lower()
-        is_native_out = token_out.lower() == self.wbnb.lower()
+        is_native_in = native_in
+        is_native_out = native_out
 
         if is_native_in:
             # swapExactETHForTokens(uint amountOutMin, address[] path, address to, uint deadline)
@@ -314,6 +319,7 @@ class BSCNative(EVMNative):
             gas_price_gwei=gas_price_gwei,
             gas_limit=gas_limit,
             confirm=confirm,
+            on_broadcast=on_broadcast,
         )
         out["quote"] = quote
         out["recipient"] = recipient
@@ -351,6 +357,7 @@ class BSCNative(EVMNative):
         gas_price_gwei: float | None,
         gas_limit: int | None,
         confirm: bool = True,
+        on_broadcast: Any = None,
     ) -> dict[str, Any]:
         """Sign a legacy (type-0) transaction with EIP-155 and broadcast.
 
@@ -389,6 +396,11 @@ class BSCNative(EVMNative):
             else signed.rawTransaction.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
+        expected_hash = signed.hash.hex()
+        if not expected_hash.startswith("0x"):
+            expected_hash = "0x" + expected_hash
+        if on_broadcast:
+            on_broadcast({"tx_hash":expected_hash,"chain":self.chain,"from":from_addr,"nonce":nonce})
         tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex])
         if not tx_hash:
             raise TradingError("bsc eth_sendRawTransaction returned empty result")
@@ -405,9 +417,13 @@ class BSCNative(EVMNative):
             "confirmed": False,
         }
         if confirm:
-            receipt = self.wait_for_receipt(tx_hash)
-            out["confirmed"] = True
-            out["status"] = receipt.get("status")
+            try:
+                receipt = self.wait_for_receipt(tx_hash)
+                out["confirmed"] = True
+                out["receipt"] = receipt
+                out["status"] = receipt.get("status")
+            except TradingError as exc:
+                out["confirmation_error"] = str(exc)
         return out
 
 

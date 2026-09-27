@@ -167,3 +167,23 @@ class StrategyAgentTask:
 
 
 __all__ = ["AgentTaskStatus", "StrategyAgentTask"]
+
+
+def prepare_agent_task(value: Any, ctx: Any, *, context_config: dict[str, Any], roles: Any = ()) -> StrategyAgentTask:
+    """The same input/role contract for live dispatch and isolated replay.
+
+    This collects historical inputs in replay, never executes a model. Stopped
+    branches must not fetch downstream sources or turn into implicit dispatch.
+    """
+    from .input_context import collect_task_context
+
+    task = StrategyAgentTask.from_value(value)
+    if task.status == "dispatch":
+        if not task.prompt.strip():
+            raise ValueError("Agent dispatch requires a non-empty prompt")
+        if task.roles is not None:
+            if any(role not in roles for role in task.roles):
+                raise ValueError("Task roles must refer to declared strategy subagents")
+            task.metadata["selected_roles"] = list(task.roles)
+    collect_task_context(task, ctx, context_config)
+    return task

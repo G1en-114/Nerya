@@ -56,7 +56,7 @@ const FALLBACK: OperatorNavData = {
       id: "runtime_library",
       label: "Runtime Library",
       href: "/agents",
-      match_hrefs: ["/skills", "/tasks"],
+      match_hrefs: ["/skills"],
       icon: "agents",
       always_visible: true,
     },

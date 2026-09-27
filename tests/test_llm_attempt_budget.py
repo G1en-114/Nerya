@@ -16,7 +16,7 @@ class _StatusTransport:
         return status, {"status": status}
 
 
-def test_turn_budget_caps_nested_provider_wire_retries() -> None:
+def test_turn_budget_leaves_retries_to_the_agent_owner() -> None:
     transport = _StatusTransport([503, 503, 200])
     budget = AttemptBudget(limit=1)
 
@@ -34,12 +34,12 @@ def test_turn_budget_caps_nested_provider_wire_retries() -> None:
             deadline=None,
         )
 
-    assert transport.calls == 2
+    assert transport.calls == 1
     assert status == 503
     assert body == {"status": 503}
-    assert budget.used == 1
-    assert budget.remaining == 0
-    assert budget.by_reason == {"transport_retry": 1}
+    assert budget.used == 0
+    assert budget.remaining == 1
+    assert budget.by_reason == {}
 
 
 def test_tightening_restored_budget_preserves_actual_attempt_history() -> None:

@@ -1,0 +1,2 @@
+import {defineConfig} from "@playwright/test";
+export default defineConfig({testDir:"tests/ui",testMatch:["questions.spec.ts","workbench.spec.ts"],workers:1,timeout:60000,expect:{timeout:15000},use:{baseURL:"http://127.0.0.1:3151",headless:true},webServer:{command:"NERYA_API=http://127.0.0.1:1 NERYA_E2E=1 NERYA_E2E_MOCKED_UI=1 NERYA_UI_DIST_DIR=.next-questions-review NERYA_UI_TSCONFIG=tsconfig.questions.json ../node_modules/.bin/next dev -p 3151",url:"http://127.0.0.1:3151",reuseExistingServer:false,timeout:120000},reporter:"list",outputDir:"test-results/questions"});

@@ -442,13 +442,17 @@ def task_stop_handler(
     if not task_id:
         return _usage_error(call, "task_id is required")
     found = store.request_stop(task_id)
+    record = store.load(task_id)
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
         data={
             "task_id": task_id,
-            "stop_requested": True,
+            "stop_requested": record is not None and not record.is_terminal(),
             "live_worker_found": found,
+            "state": record.state if record else "not_found",
+            "stop_confirmed": bool(record and record.state == "cancelled" and
+                                   (record.name != "run_shell" or record.output.get("process_group_stopped"))),
             "hint": (
                 "Cancellation is cooperative — the worker checks "
                 "between iterations. Use task_get to confirm the "

@@ -1,0 +1,25 @@
+.root { flex-shrink:0; background:var(--bg); color:var(--text-base); }
+.inner { max-width:800px; margin:auto; padding:4px 24px; font-size:12px; line-height:1.65; }
+.inner > details { border:1px solid var(--line); border-radius:10px; padding:2px 10px; background:var(--card); }
+.queueHeader { color:var(--text-muted); }
+.status,.queueHeader,.guidance,.resume { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:6px 0; }
+.status > span:nth-child(2),.queueHeader > span,.resume > span { flex:1; min-width:150px; }
+.dot { width:6px; height:6px; border-radius:50%; background:var(--text-base); }
+.muted { color:var(--text-muted); }
+.notice { padding:8px 10px; border:1px solid var(--line-hi); border-radius:8px; margin:4px 0; }
+.notice p { margin:0 0 4px; }
+.inner button { padding:4px 8px; min-height:32px; border-radius:6px; color:var(--text-base); white-space:nowrap; }
+.inner button:hover { background:var(--line); }
+.inner button:focus-visible,.inner summary:focus-visible,.inner textarea:focus-visible { outline:2px solid var(--violet); outline-offset:2px; }
+.inner button:disabled { opacity:.45; cursor:not-allowed; }
+.inner summary { cursor:pointer; padding:5px 0; }
+.actions { display:flex; align-items:center; flex-wrap:wrap; gap:2px; }
+.queue { list-style:none; margin:0; padding:0; max-height:220px; overflow:auto; overscroll-behavior:contain; }
+.queue li { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 0; border-top:1px solid var(--line); }
+.preview { min-width:100px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.queue form { width:100%; }
+.queue textarea { width:100%; min-height:64px; border:1px solid var(--line-hi); border-radius:6px; background:var(--bg); padding:8px; resize:vertical; }
+.guidance { color:var(--text-muted); }
+.error { color:var(--err); margin:6px 0; }
+.srOnly { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; }
+@media(max-width:600px) { .inner { padding:4px 16px; } .queue li > .actions { width:100%; justify-content:flex-end; } }

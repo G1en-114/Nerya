@@ -373,7 +373,9 @@ def test_trend_aligned_cross_does_not_double_down(trend_template_code):
 
     closes = _trend_closes(slope=200, n=55) + _trend_closes(slope=400, base=91_000, n=25)
     ctx = _make_ctx(
-        position={"size": 0.5, "avg_price": 80_000.0},
+        # Keep the position below the 5% take-profit; a 25% gain is an
+        # exit test, not a hold/no-double-down test.
+        position={"size": 0.5, "avg_price": closes[-1] / 1.02},
         closes=closes,
     )
 
@@ -381,6 +383,15 @@ def test_trend_aligned_cross_does_not_double_down(trend_template_code):
 
     assert ctx.trading.last_call is None
     assert ctx.result.last_hold is not None
+
+
+def test_trend_protective_exit_is_not_hidden_by_an_aligned_signal(trend_template_code):
+    ns = _exec_template(trend_template_code)
+    closes = _trend_closes(slope=200, n=55) + _trend_closes(slope=400, base=91_000, n=25)
+    ctx = _make_ctx(position={"size": 0.5, "avg_price": 80_000.0}, closes=closes)
+    ns["run"](ctx)
+    assert ctx.trading.last_kind == "close_position"
+    assert ctx.trading.last_call["reasoning_ref"].startswith("protective_exit")
 
 
 def test_trend_no_position_opens_on_cross_with_bracket(trend_template_code):

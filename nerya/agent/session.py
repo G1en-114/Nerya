@@ -206,8 +206,9 @@ def merge_session_dict(
     file_meta = file_data.get("meta") if isinstance(file_data.get("meta"), dict) else {}
     db_meta = db_state.get("meta") if isinstance(db_state.get("meta"), dict) else {}
     meta = {**db_meta, **file_meta}
-    if not meta.get("title") and db_meta.get("title"):
+    if db_meta.get("title") and (db_meta.get("title_source") == "operator" or not meta.get("title")):
         meta["title"] = db_meta["title"]
+        meta["title_source"] = db_meta.get("title_source")
     merged["meta"] = meta
     if not merged.get("strategy_id"):
         merged["strategy_id"] = db_state.get("strategy_id")

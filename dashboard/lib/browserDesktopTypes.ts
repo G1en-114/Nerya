@@ -22,6 +22,7 @@ export interface DesktopBrowserResponse {
   error?: string;
   hint?: string;
   running?: boolean;
+  engine?: 'chromium' | 'chrome';
   closing?: boolean;
   paused?: boolean;
   human_control?: boolean;
@@ -40,6 +41,9 @@ export interface DesktopBrowserResponse {
   preferences?: { automatic: boolean };
   history?: { id: string; url: string; at: number }[];
   image?: string;
+  viewport?: { width: number; height: number };
+  viewport_revision?: number;
+  dialog?: { id: string; type: string; message: string; default_value?: string; url: string } | null;
   upload?: { id: string; name: string; bytes: number };
   agent_access?: {
     enabled: boolean;
@@ -54,9 +58,16 @@ export interface DesktopBrowserResponse {
     last_actions?: { kind: string; action?: string; ok?: boolean }[];
   };
   tabs?: { id: string; url: string; selected: boolean; protected: boolean }[];
-  config?: { id: string; version: number; extensions: DesktopExtension[] };
+  config?: { id: string; version: number; engine?: 'chromium' | 'chrome'; extensions: DesktopExtension[] };
   review?: DesktopExtension;
   capabilities?: {
+    engine?: 'chromium' | 'chrome';
+    chrome_web_store_install?: boolean;
+    native_password_manager?: boolean;
+    native_extensions?: boolean;
+    native_window?: boolean;
+    embedded?: boolean;
+    resizable_viewport?: boolean;
     playwright_installed: boolean;
     persistent_profile: boolean;
     credential_import: boolean;

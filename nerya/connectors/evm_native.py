@@ -127,7 +127,7 @@ class EVMNative(NativeDEXConnector):
     def _verify_chain_id(self) -> None:
         """Refuse to sign when the RPC speaks for a different chain."""
         actual = self.get_chain_id()
-        if actual and int(self.chain_id) and actual != int(self.chain_id):
+        if not actual or actual != int(self.chain_id):
             raise TradingError(
                 f"chain-id mismatch: rpc_url serves chain {actual} but the "
                 f"connector is configured for chain_id={self.chain_id} "
@@ -218,6 +218,7 @@ class EVMNative(NativeDEXConnector):
         gas_price_gwei: float | None = None,
         gas_limit: int = 250_000,
         confirm: bool = True,
+        on_broadcast: Any = None,
     ) -> dict[str, Any]:
         """Generic signed contract call / ETH transfer.
 
@@ -250,6 +251,11 @@ class EVMNative(NativeDEXConnector):
             else signed.rawTransaction.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
+        expected_hash = signed.hash.hex()
+        if not expected_hash.startswith("0x"):
+            expected_hash = "0x" + expected_hash
+        if on_broadcast:
+            on_broadcast({"tx_hash":expected_hash, "chain":self.chain, "from":from_addr, "nonce":nonce})
         tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex])
         if not tx_hash:
             raise TradingError("evm eth_sendRawTransaction returned empty result")
@@ -258,10 +264,14 @@ class EVMNative(NativeDEXConnector):
                "chain": self.chain, "chain_id": self.chain_id,
                "confirmed": False}
         if confirm:
-            receipt = self.wait_for_receipt(tx_hash)
-            out["confirmed"] = True
-            out["block_number"] = _as_int(receipt.get("blockNumber"))
-            out["gas_used"] = _as_int(receipt.get("gasUsed"))
+            try:
+                receipt = self.wait_for_receipt(tx_hash)
+                out["confirmed"] = True
+                out["receipt"] = receipt
+                out["block_number"] = _as_int(receipt.get("blockNumber"))
+                out["gas_used"] = _as_int(receipt.get("gasUsed"))
+            except TradingError as exc:
+                out["confirmation_error"] = str(exc)
         return out
 
 

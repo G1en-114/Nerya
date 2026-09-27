@@ -523,7 +523,27 @@ def _load_role_meta(root: Path, name: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
+# Discovery families, not dispatch aliases. Exact profiles retain their prompt,
+# output schema, model budget and permissions, including independent reviewers.
+ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "web_researcher": (),
+    "market_analyst": (
+        "technical_analyst", "fundamentals_analyst", "macro_strategist",
+        "sentiment_analyst", "news_interpreter", "onchain_watcher", "explore_lane",
+        "bull_researcher", "bear_researcher", "research_manager", "research_editor",
+        "message_writer", "buffett_lens", "damodaran_lens", "marks_lens",
+        "mauboussin_lens", "druckenmiller_lens", "serenity_lens",
+        "unusual_whales_lens", "kobeissi_lens",
+    ),
+    "quant_researcher": (),
+    "risk_critic": ("portfolio_auditor",),
+    "portfolio_manager": ("execution_planner",),
+    "coding_agent": ("strategy_tuner", "plan_lane"),
+    "strategy_reviewer": ("code_critic", "verification_lane"),
+}
+
+
+def list_roles(paths: WorkspacePaths, *, include_profiles: bool = True) -> list[dict[str, Any]]:
     """Return every role visible to the agent — workspace + defaults.
 
     Workspace entries shadow default entries with the same name. The
@@ -537,7 +557,17 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
     seen: set[str] = set()
 
     workspace = load_registry(paths)
+    parents = {profile: root for root, profiles in ROLE_FAMILIES.items() for profile in profiles}
     for name, spec in sorted(workspace.items()):
+        # Seeded builtin files are not custom roles. Operator changes to any
+        # prompt/config field stay visible, even for an old specialist profile.
+        customized = (
+            spec.prompt.strip() != DEFAULT_SUBAGENT_PROMPTS.get(name, "").strip()
+            or set(spec.allowed_skills) != set(DEFAULT_SUBAGENT_SKILLS.get(name, []))
+            or spec.tier != DEFAULT_TIERS.get(name, "medium")
+            or bool(spec.provider or spec.model)
+            or spec.execution_policy.asdict() != default_execution_policy(name).asdict()
+        )
         out.append({
             "name": name,
             "tier": spec.tier,
@@ -545,11 +575,13 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
             "persistent": True,
             "source": "workspace",
             "canonical_name": spec.canonical_name or name,
+            "enabled": _load_role_meta(paths.subagents, name).get("enabled", True) is not False,
             "provider": spec.provider,
             "model": spec.model,
             "execution_policy": spec.execution_policy.asdict(),
             "prompt_path": str(spec.prompt_path),
             "prompt_excerpt": (spec.prompt or "")[:280],
+            "catalog_parent": "" if customized else parents.get(name, ""),
         })
         seen.add(name)
 
@@ -568,8 +600,11 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
             "execution_policy": default_execution_policy(name).asdict(),
             "prompt_path": None,
             "prompt_excerpt": "",
+            "catalog_parent": parents.get(name, ""),
         })
-    return out
+    for row in out:
+        row["profiles"] = [child["name"] for child in out if child["catalog_parent"] == row["name"]]
+    return out if include_profiles else [row for row in out if not row["catalog_parent"]]
 
 
 def describe_role(paths: WorkspacePaths, name: str) -> Optional[dict[str, Any]]:
@@ -586,6 +621,7 @@ def describe_role(paths: WorkspacePaths, name: str) -> Optional[dict[str, Any]]:
             "persistent": True,
             "source": "workspace",
             "canonical_name": spec.canonical_name or name,
+            "enabled": _load_role_meta(paths.subagents, name).get("enabled", True) is not False,
             "provider": spec.provider,
             "model": spec.model,
             "execution_policy": spec.execution_policy.asdict(),
@@ -620,6 +656,7 @@ def save_role(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     execution_policy: Any = None,
+    enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Upsert a persistent role. Creates ``<name>.agent.md`` + ``<name>.role.yaml``.
 
@@ -667,6 +704,7 @@ def save_role(
         meta["model"] = final_model
     if final_policy.asdict():
         meta["execution_policy"] = final_policy.asdict()
+    meta["enabled"] = enabled if enabled is not None else _load_role_meta(paths.subagents, name).get("enabled", True)
     yaml_io.dump(_meta_path(paths, name), meta)
 
     return {
@@ -674,6 +712,7 @@ def save_role(
         "tier": final_tier,
         "allowed_skills": final_skills,
         "canonical_name": canonical,
+        "enabled": meta["enabled"],
         "provider": final_provider,
         "model": final_model,
         "execution_policy": final_policy.asdict(),
@@ -726,9 +765,8 @@ def generic_role_prompt(name: str) -> str:
         "web_search_fetch / news_social / market_data when available). Every "
         "material claim must cite a tool result or a fetched source. For "
         "company primary sources (IR pages, filings, annual reports) prefer "
-        "web_fetch — it renders JS pages via the configured browser engine "
-        "automatically; open an interactive ``browser`` session (via "
-        "script_run browser_session.py) only when navigation or clicks are "
+        "web_fetch for readable document retrieval; use the managed "
+        "``browser`` Skill only when navigation, JavaScript interaction, or clicks are "
         "required.\n"
         "3. If a required source, credential, feed, or dataset is missing, say "
         "so plainly and report the evidence gap — never invent mock, "

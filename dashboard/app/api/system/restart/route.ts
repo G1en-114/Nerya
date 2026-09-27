@@ -27,7 +27,10 @@ export async function POST(req: NextRequest) {
 
   const dashboardDir = process.cwd();
   const repoRoot = path.resolve(dashboardDir, "..");
-  const scriptPath = path.join(repoRoot, "scripts", "windows", "start-local.ps1");
+  const projectRoot = path.resolve(repoRoot, "..");
+  const windowsScript = path.join(repoRoot, "scripts", "windows", "start-local.ps1");
+  const posixScript = path.join(projectRoot, "start-demo-services.command");
+  const scriptPath = process.platform === "win32" ? windowsScript : posixScript;
   if (!fs.existsSync(scriptPath)) {
     return NextResponse.json(
       {
@@ -54,31 +57,50 @@ export async function POST(req: NextRequest) {
     typeof body.apiPort === "number" || typeof body.apiPort === "string"
       ? String(body.apiPort)
       : null,
-    18318,
+    18317,
   );
   const hasDashboardPort =
     typeof body.dashboardPort === "number" || typeof body.dashboardPort === "string";
   const dashboardPort = hasDashboardPort
     ? parsePort(String(body.dashboardPort), 18380)
-    : null;
+    : parsePort(req.nextUrl.port, 18380);
 
-  const command =
-    `Start-Sleep -Seconds 2; ` +
-    `& '${scriptPath.replace(/'/g, "''")}' ` +
-    `-Workspace '${workspace.replace(/'/g, "''")}' ` +
-    `-ApiPort ${apiPort}` +
-    (dashboardPort === null ? "" : ` -DashboardPort ${dashboardPort}`);
-
-  const child = spawn(
-    "pwsh",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-    {
-      cwd: repoRoot,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    },
-  );
+  const child = process.platform === "win32"
+    ? spawn(
+        "pwsh",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `Start-Sleep -Seconds 2; & '${scriptPath.replace(/'/g, "''")}' ` +
+            `-Workspace '${workspace.replace(/'/g, "''")}' ` +
+            `-ApiPort ${apiPort} -DashboardPort ${dashboardPort}`,
+        ],
+        {
+          cwd: repoRoot,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        },
+      )
+    : spawn(
+        "/bin/bash",
+        ["-lc", 'sleep 2; exec /bin/bash "$NERYA_RESTART_SCRIPT" restart --no-open'],
+        {
+          cwd: projectRoot,
+          detached: true,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            NERYA_RESTART_SCRIPT: scriptPath,
+            NERYA_DEMO_WORKSPACE: workspace,
+            NERYA_DEMO_API_PORT: String(apiPort),
+            NERYA_DEMO_DASHBOARD_PORT: String(dashboardPort),
+            NERYA_DEMO_NO_OPEN: "1",
+          },
+        },
+      );
   child.unref();
 
   return NextResponse.json({
@@ -86,6 +108,6 @@ export async function POST(req: NextRequest) {
     status: "queued",
     workspace,
     apiPort,
-    dashboardPort: dashboardPort ?? "config",
+    dashboardPort,
   });
 }

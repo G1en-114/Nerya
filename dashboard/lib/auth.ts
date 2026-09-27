@@ -23,18 +23,24 @@ export function isLocalDashboardHost(hostname?: string): boolean {
 export function getStoredAuthToken(): string {
   if (!browser()) return "";
   try {
+    const expires = Number(window.localStorage.getItem(AUTH_EXPIRES_KEY));
+    if (expires > 0 && expires <= Date.now() / 1000) return "";
     return window.localStorage.getItem(AUTH_TOKEN_KEY) || "";
   } catch {
     return "";
   }
 }
 
-export function setStoredAuthToken(token: string, expiresAt?: number): void {
+/** Suppress same-tab notification only when a caller is completing a save transaction.
+ * Requests still send the new token; navigation mounts and validates AuthGate again.
+ */
+export function setStoredAuthToken(token: string, expiresAt?: number, options?: { notify?: boolean }): void {
   if (!browser()) return;
   try {
     window.localStorage.setItem(AUTH_TOKEN_KEY, token);
     if (expiresAt) window.localStorage.setItem(AUTH_EXPIRES_KEY, String(expiresAt));
-    window.dispatchEvent(new Event(AUTH_EVENT));
+    else window.localStorage.removeItem(AUTH_EXPIRES_KEY);
+    if (options?.notify !== false) window.dispatchEvent(new Event(AUTH_EVENT));
   } catch {
     // ignore storage failures; requests will simply remain unauthenticated.
   }
@@ -60,16 +66,29 @@ export function authHeaders(base?: HeadersInit): Headers {
   return headers;
 }
 
-export function redirectToLogin(): void {
-  if (!browser() || isLocalDashboardHost()) return;
-  const path = `${window.location.pathname}${window.location.search || ""}`;
-  if (window.location.pathname === "/login") return;
-  window.location.assign(`/login?next=${encodeURIComponent(path)}`);
+export function safeLoginNext(value: string | null): string {
+  if (!value || !value.startsWith("/") || value.startsWith("//") || /[\\\\\x00-\x1f\x7f]/.test(value)) return "/dashboard";
+  const parsed = new URL(value, "http://nerya.invalid");
+  if (parsed.origin !== "http://nerya.invalid") return "/dashboard";
+  const path = parsed.pathname;
+  return path === "/login" || path.startsWith("/login/") ? "/dashboard" : `${path}${parsed.search}${parsed.hash}`;
 }
 
-export function handleAuthFailure(status: number): void {
-  if (status !== 401 && status !== 403) return;
-  if (isLocalDashboardHost()) return;
+let loginRedirectPending = false;
+export function redirectToLogin(): void {
+  if (!browser() || window.location.pathname === "/login" || loginRedirectPending) return;
+  loginRedirectPending = true;
+  const path = `${window.location.pathname}${window.location.search || ""}${window.location.hash || ""}`;
+  window.location.replace(`/login?next=${encodeURIComponent(path)}`);
+}
+
+export function handleAuthFailure(status: number, responseBody = ""): void {
+  // A denied operation is not necessarily an expired session. Keep valid
+  // credentials on permission errors, but recover rejected tokens everywhere.
+  let reason = "";
+  try { reason = JSON.parse(responseBody)?.reason || ""; } catch { /* non-JSON error */ }
+  const rejectedToken = ["invalid_token", "expired_token", "missing_token", "not_jwt", "jwt_not_configured", "remote_without_token", "remote_dashboard_missing_token"].includes(reason);
+  if (status !== 401 && !(status === 403 && rejectedToken)) return;
   clearStoredAuthToken();
   redirectToLogin();
 }

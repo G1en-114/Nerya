@@ -23,7 +23,7 @@ from ..core.config import Config
 from ..llm.gateway import LLMGateway
 from ..skills.kernel import SkillKernel
 from ..strategy_history import store as history_store
-from .registry import SubAgentSpec
+from .registry import SubAgentSpec, describe_role
 from .runtime import (
     DEFAULT_CONTEXT_SCOPE,
     SubAgentContextScope,
@@ -100,9 +100,8 @@ class SubAgentDispatcher:
         session_id: str | None = None, strategy_id: str | None = None,
         turn_id: str = "", actor_id: str = "default",
     ) -> "SubAgentDispatcher":
-        from ..tools import NativeToolExecutor, PermissionContext, PermissionEngine
-        from ..tools.permissions import PermissionMode
-        from ..tools.capability_policy import normalise_tool_policy
+        from ..tools import NativeToolExecutor, PermissionEngine
+        from .permissions import child_permission_context
         from ..tools.native.bootstrap import build_native_tool_deps, register_native_tools
         from ..tools.registry import ToolRegistry
         from ..tools.tool_approvals import ToolApprovalCoordinator, ToolApprovalScope
@@ -119,10 +118,7 @@ class SubAgentDispatcher:
         register_native_tools(registry, deps)
         executor = NativeToolExecutor(
             registry=registry, permission_engine=PermissionEngine(),
-            permission_context=PermissionContext(
-                mode=PermissionMode(config.get("runtime.permission_mode", "default")),
-                tool_policy=normalise_tool_policy(config.get("agent.native.tool_policy")),
-            ),
+            permission_context=child_permission_context(config, strategy_id=strategy_id),
             approval_resolver=ToolApprovalCoordinator(
                 config, scope=ToolApprovalScope.from_values(
                     session_id=session_id, strategy_id=strategy_id, actor_id=actor_id,
@@ -189,6 +185,10 @@ class SubAgentDispatcher:
                 strategy_id = saved.get("strategy_id")
             else:
                 spec = inline_spec or self._resolve_spec(name, strategy_id=strategy_id)
+            # Read persisted operator state at dispatch time, including resume paths.
+            role_state = describe_role(self.config.paths, spec.name)
+            if role_state and role_state.get("enabled") is False:
+                return SubAgentResult(ok=False, subagent=name, error_kind="disabled", error="Agent is disabled")
             _assert_allowed_skills(spec)
             required_native_tools = tuple(
                 getattr(spec.execution_policy, "required_native_tools", ()) or ()

@@ -26,7 +26,8 @@ def execution_view(commands, turns, source="", approvals=(), interactions=(), ag
     """No inference of success from prose or the existence of an artifact."""
     work = sorted((c for c in commands if c.get("kind") != "guide" and c.get("state") != "removed"),
                   key=lambda c: c.get("created_at", 0))
-    current = work[-1] if work else {}
+    latest_executed=next((c for c in reversed(work) if c.get("state")!="queued"),{})
+    current = latest_executed if latest_executed.get("state") in ("failed","blocked","awaiting_approval","awaiting_input","interrupted") else work[-1] if work else {}
     active = next((c for c in reversed(work) if c.get("state") in ("running", "stopping", "unconfirmed")), None)
     if active:
         current = active
@@ -72,8 +73,13 @@ def session_view(config, sid, *, summary=False):
     sid = _session_id(sid)
     if not config.paths.db.exists():
         raise CommandError("session_not_found",404)
-    con = sqlite3.connect(config.paths.db.resolve().as_uri()+"?mode=ro",uri=True)
-    con.row_factory=sqlite3.Row
+    # The unified dashboard projection must stay readable while a long command
+    # is writing WAL. A raw SQLite ``mode=ro`` URI can intermittently surface
+    # ``disk I/O error`` while WAL/SHM files are being maintained. Open through
+    # the shared query-only helper instead; it cannot mutate the database and
+    # follows the same WAL path as repository readers.
+    from ..db.sqlite import connect_readonly
+    con = connect_readonly(config.paths.db)
     try:
         con.execute("BEGIN")
         if is_session_deleted(con, sid):
@@ -108,9 +114,10 @@ def session_view(config, sid, *, summary=False):
     approvals = []
     path = config.paths.approvals_pending
     if path.exists():
+        from ..approval_service import ApprovalService
         for item in jsonl.read_all(path):
             payload = record(item.get("payload"))
-            if (item.get("requester_session_id") or item.get("session_id") or payload.get("session_id")) == sid and item.get("state", "pending") == "pending":
+            if (item.get("requester_session_id") or item.get("session_id") or payload.get("session_id")) == sid and item.get("state", "pending") == "pending" and not ApprovalService.expired(item):
                 approvals.append({"id": item.get("approval_id") or item.get("id"), "kind": item.get("kind"), "state": "pending"})
     agents = []
     child_db = config.paths.root / "state" / "agent_threads.sqlite3"
@@ -123,6 +130,8 @@ def session_view(config, sid, *, summary=False):
         finally:
             child.close()
     status = execution_view(commands, turns, session.get("source", ""), approvals, interactions, agents)
+    from ..approval_service import ApprovalService
+    approval_resolutions = ApprovalService(config).resolution_states(sid)
     refs = []
     for row, turn in zip(reversed(rows), turns):
         index = record(turn.get("artifact_index"))
@@ -130,12 +139,13 @@ def session_view(config, sid, *, summary=False):
             refs.append({"kind": "file", "path": name, "turn_id": row["turn_id"], "message_id": row["message_id"]})
     versions = {"commands": [[c["command_id"], c["revision"]] for c in commands],
                 "session_updated_at": session.get("updated_at"), "status":status, "queue_revision":queue["revision"] if queue else 0, "approvals": approvals,
-                "interactions": [[i["interaction_id"], i["revision"]] for i in interactions], "agents": agents}
+                "interactions": [[i["interaction_id"], i["revision"]] for i in interactions], "agents": agents,
+                "approval_resolutions": approval_resolutions}
     revision = hashlib.sha256(json.dumps(versions, sort_keys=True, default=str).encode()).hexdigest()[:20]
     return {"ok": True, "session_id": sid, "title": session.get("title", ""), "source": session.get("source", ""),
             "status": status, "revision": revision, "observed_at": time.time(), "source_revisions": versions,
             "queue": {"count": sum(c["state"] == "queued" and c["kind"] != "guide" for c in commands), "paused": bool(queue and queue["paused"])},
-            "pending_interactions": interactions, "approvals": approvals, "agents": agents, "result_refs": refs,
+            "pending_interactions": interactions, "approvals": approvals, "approval_resolutions": approval_resolutions, "agents": agents, "result_refs": refs,
             "available_actions": {"send": not status["external"] and not interactions and status["execution"] != "unconfirmed",
                                   "stop": not status["external"] and status["execution"] == "running",
                                   "guide": not status["external"] and status["execution"] == "running"}}

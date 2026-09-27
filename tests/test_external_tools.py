@@ -23,44 +23,101 @@ def tools(tmp_path):
 
 
 def writable(tools):
-    cfg = tools.client.config.data["mcp"]
-    cfg["allow_mutating"] = True
-    cfg["native_tools"].update(allow_mutating=True, mode="auto")
     return build_catalog(tools)
 
 
-def test_default_catalog_is_read_only_and_has_real_schemas(tools):
+def test_default_catalog_is_trusted_and_has_real_schemas(tools):
     catalog = build_catalog(tools)
     assert tools.client.config.get("mcp.enabled") is False
     assert "nerya_native_role_list" in catalog.tools
-    assert "nerya_native_role_save" not in catalog.tools
-    assert "nerya_trigger_emit" not in catalog.tools
-    assert "nerya_strategy_generate" not in catalog.tools
-    assert all(t.read_only for t in catalog.tools.values())
+    assert "nerya_native_role_save" in catalog.tools
+    assert "nerya_trigger_emit" in catalog.tools
+    assert "nerya_strategy_generate" in catalog.tools
+    assert catalog.tools["nerya_native_read_file"].read_only
+    assert not catalog.tools["nerya_native_write_file"].read_only
+    assert not catalog.tools["nerya_native_run_shell"].read_only
     schema = catalog.describe("nerya_market_ticker")["inputSchema"]
     assert schema["required"] == ["market"]
     assert schema["properties"]["market"]["type"] == "string"
     assert "kwargs" not in schema["properties"]
-    assert catalog.call("nerya_native_role_save", {"name": "x", "prompt": "y"})["error"]["code"] == "not_found"
+    assert not is_error(catalog.call("nerya_native_role_save", {"name": "external_example", "prompt": "Workspace assistant."}))
 
 
-def test_native_allowlist_filters_dispatch_not_only_discovery(tools):
+def test_retired_native_allowlist_does_not_limit_trusted_agents(tools):
     tools.client.config.data["mcp"]["native_tools"]["allow_tools"] = ["role_get"]
     catalog = build_catalog(tools)
     assert "nerya_native_role_get" in catalog.tools
-    assert "nerya_native_role_list" not in catalog.tools
-    assert is_error(catalog.call("nerya_native_role_list", {}))
+    assert "nerya_native_role_list" in catalog.tools
+    assert not is_error(catalog.call("nerya_native_role_list", {}))
     assert is_error(catalog.call("nerya_native_role_get", {}))
     assert is_error(catalog.call("nerya_native_role_get", {"name": "x", "_trusted": True}))
 
 
-def test_writes_do_not_expose_approval_shell_or_trading(tools):
+def test_native_catalog_matches_main_agent_tools(tools):
     catalog = writable(tools)
     assert "nerya_native_role_save" in catalog.tools
     assert "nerya_native_evolve_core_config_patch" in catalog.tools
     assert "nerya_strategy_generate" in catalog.tools
-    for name in ("run_shell", "strategy_promote", "strategy_run_tick", "strategy_service", "team_run"):
-        assert "nerya_native_" + name not in catalog.tools
+    from nerya.agent.kernel import AgentKernel
+    from nerya.mcp.registry_bridge import native_mcp_tool_name
+    registry, _ = AgentKernel(config=tools.client.config, skills=tools.client.skills).prepare_tools()
+    expected = {native_mcp_tool_name(tool.name) for tool in registry.list_tools()}
+    assert {name for name, row in catalog.tools.items() if row.source == "native"} == expected
+    assert "nerya_native_run_shell" in expected
+
+
+def test_shared_workspace_policy_still_applies(tools):
+    tools.client.config.data["agent"]["native"]["tool_policy"] = {"deny": ["run_shell", "write_file"]}
+    catalog = build_catalog(tools)
+    assert "nerya_native_read_file" in catalog.tools
+    assert "nerya_native_run_shell" not in catalog.tools
+    assert "nerya_native_write_file" not in catalog.tools
+    assert is_error(catalog.call("nerya_native_run_shell", {"command": "printf forbidden"}))
+
+
+def test_trusted_agent_reads_edits_writes_and_runs_workspace_command(tools, tmp_path):
+    path = tmp_path / "external.txt"
+    path.write_text("before\n")
+    catalog = build_catalog(tools)
+    assert not is_error(catalog.call("nerya_native_read_file", {"path": "external.txt"}))
+    edited = catalog.call("nerya_native_edit_file", {
+        "path": "external.txt", "old_string": "before", "new_string": "after",
+    })
+    assert not is_error(edited), edited
+    assert path.read_text() == "after\n"
+    assert not is_error(catalog.call("nerya_native_read_file", {"path": "external.txt"}))
+    written = catalog.call("nerya_native_write_file", {"path": "external.txt", "contents": "complete\n"})
+    assert not is_error(written), written
+    assert path.read_text() == "complete\n"
+    shell = catalog.call("nerya_native_run_shell", {"command": "printf mcp-shell-ok"})
+    assert not is_error(shell), shell
+    assert "mcp-shell-ok" in json.dumps(shell)
+
+
+def test_shared_approval_can_be_resumed_once_without_bypassing_risk(tools):
+    from nerya.core import jsonl
+    from nerya.tools import ToolRegistry
+    from nerya.tools.types import ToolCall, ToolDescriptor, ToolResult, RiskLevel, PermissionScope
+    from nerya.mcp.registry_bridge import build_native_mcp_registry
+    invoked = []
+    registry = ToolRegistry()
+    registry.register(ToolDescriptor(name="sensitive_example", description="Test approval only",
+        input_schema={"type": "object", "properties": {}}, risk=RiskLevel.DANGEROUS,
+        permission_scope=PermissionScope.WORKSPACE, read_only=False,
+        handler=lambda call: invoked.append(call.id) or ToolResult.from_text(
+            tool_use_id=call.id, name=call.name, text="approved test action")))
+    _, executor = build_native_mcp_registry(registry=registry, config=tools.client.config)
+    assert executor.execute(ToolCall(id="first", name="sensitive_example", arguments={})).is_error
+    assert not invoked
+    paths = tools.client.config.paths
+    pending = jsonl.read_all(paths.approvals_pending)
+    assert len(pending) == 1
+    jsonl.write_all(paths.approvals_approved, pending)
+    jsonl.write_all(paths.approvals_pending, [])
+    assert not executor.execute(ToolCall(id="retry", name="sensitive_example", arguments={})).is_error
+    assert invoked == ["retry"]
+    assert executor.execute(ToolCall(id="again", name="sensitive_example", arguments={})).is_error
+    assert invoked == ["retry"]
 
 
 def test_real_agent_role_create_read_delete(tools, tmp_path):
@@ -131,11 +188,15 @@ def test_config_redaction_and_symlink_boundary(tools, tmp_path):
 def test_public_envelopes_remove_traces_and_secret_text():
     value = {"text": '{"token":"short-secret"}', "diff": "+api_key: other-secret",
              "metadata": {"access_token": "third-secret", "trace": "private stack"},
-             "expected_hash": "a" * 64, "tokens": 12}
+             "expected_hash": "a" * 64, "revision": "b" * 64,
+             "enabled_revision": "c" * 64, "catalog_generation": "d" * 64, "tokens": 12}
     result = public_result(value)
     text = json.dumps(result)
     assert all(s not in text for s in ("short-secret", "other-secret", "third-secret", "private stack"))
     assert result["expected_hash"] == "a" * 64
+    assert result["revision"] == "b" * 64
+    assert result["enabled_revision"] == "c" * 64
+    assert result["catalog_generation"] == "d" * 64
     assert result["tokens"] == 12
     assert not is_error({"status": {"healthy": True}})
 
@@ -240,16 +301,18 @@ def test_duplicate_catalog_names_and_bad_arguments():
     assert calls == []
 
 
-def test_global_allowlist_and_denylist_cover_every_layer(tools):
+def test_retired_global_permission_lists_do_not_hide_tools(tools):
     cfg = tools.client.config.data["mcp"]
     cfg["allow_tools"] = ["nerya_info", "nerya_native_role_list", "nerya_native_role_save"]
     cfg["deny_tools"] = ["nerya_info"]
     catalog = build_catalog(tools)
-    assert set(catalog.tools) == {"nerya_native_role_list"}
-    assert is_error(catalog.call("nerya_info"))
-    assert is_error(catalog.call("nerya_native_role_save", {"name": "x", "prompt": "y"}))
+    assert not is_error(catalog.call("nerya_info"))
+    assert "nerya_native_write_file" in catalog.tools
+    expected = set(catalog.tools)
     cfg["allow_tools"] = []
-    assert build_catalog(tools).list_tools() == []
+    cfg["native_tools"].update(enabled=False, allow_mutating=False, allow_exec=False, allow_tools=[])
+    cfg["dynamic_tools"].update(enabled=False, allow_mutating=False, allow_skills=[])
+    assert set(build_catalog(tools).tools) == expected
 
 
 def test_dynamic_catalog_and_compatibility_helper_use_client_and_real_schema(tools, monkeypatch):

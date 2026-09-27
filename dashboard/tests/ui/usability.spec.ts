@@ -89,11 +89,9 @@ async function mockDashboard(page: Page, options: { failModelsOnce?: boolean } =
     } else if (path === "/memory/providers") {
       body = { builtin: null, external: null, available_external: [] };
     } else if (path === "/auth/status") {
-      body = { ok: true, authenticated: true, password_set: true, enabled: true };
+      body = { ok: true, authenticated: true, local_access: true, password_set: true, enabled: true };
     } else if (path === "/data/financial_datasets/status") {
       body = { ok: true, available: false, configured: false, keys: [] };
-    } else if (path === "/browsers/status") {
-      body = { ok: true, browsers: [], engines: [], active: null };
     } else if (path === "/search/engines/status") {
       body = { ok: true, engines: [], chain: [], safe_search: true };
     }
@@ -173,13 +171,40 @@ test("Radix choice menu supports keyboard selection and returns focus", async ({
   expect(state.errors).toEqual([]);
 });
 
+test("browser language becomes the first-run language until the operator saves a choice", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["zh-CN", "en-US"] });
+    Object.defineProperty(navigator, "language", { configurable: true, value: "zh-CN" });
+    localStorage.setItem("nerya.ui_settings.v1", JSON.stringify({ darkMode: "dark" }));
+  });
+  const state = await mockDashboard(page);
+  await page.goto("/settings#interface");
+  await expect(page.getByRole("button", { name: "中文", exact: true })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh");
+  expect(state.errors).toEqual([]);
+});
+
+test("saved language choice takes priority over the browser language", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["zh-CN", "en-US"] });
+    Object.defineProperty(navigator, "language", { configurable: true, value: "zh-CN" });
+    localStorage.setItem("nerya.ui_settings.v1", JSON.stringify({ language: "en", darkMode: "dark" }));
+  });
+  const state = await mockDashboard(page);
+  await page.goto("/settings#interface");
+  await expect(page.getByRole("button", { name: "English", exact: true })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  expect(state.errors).toEqual([]);
+});
+
 test("language change updates document language without remounting settings", async ({ page }) => {
   const state = await mockDashboard(page);
   await interfacePage(page);
+  const requestCount = state.requests.length;
   await page.getByRole("button", { name: "English", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: /中文/ }).click();
+  await page.getByRole("menuitemradio", { name: "Chinese", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("lang", "zh");
-  expect(state.requests.filter((request) => request === "GET /market/venues")).toHaveLength(1);
+  expect(state.requests).toHaveLength(requestCount);
   expect(state.errors).toEqual([]);
 });
 

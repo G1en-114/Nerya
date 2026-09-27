@@ -23,6 +23,12 @@ const { NativeBlocksTrack, activeProposalsFromTurn } = require('../components/ch
 const { ResearchReplyCards } = require('../components/chat/ResearchReplyCards.tsx');
 const { ResearchInstrumentContext, ResearchVisualContext } = require('../components/chat/ResearchVisualContext.tsx');
 const messages = require('../messages/en/research-workspace.json');
+test('strategy lifecycle trace labels describe the actual native operation', () => {
+  const { toolTitle } = require('../lib/externalConversation.ts');
+  assert.equal(toolTitle({ tool: 'nerya_native_strategy_backtest' }, true), '回测策略');
+  assert.equal(toolTitle({ tool: 'nerya_native_strategy_validate' }, false), 'Validate strategy');
+  assert.equal(toolTitle({ tool: 'nerya_native_skill_view' }, true), '阅读 Skill');
+});
 const trace = extra => ({ source: 'tunnel', remote_session_id: 'session-unit', call_id: 'call-unit', tool: 'nerya_native_run_shell',
   status: 'succeeded', arguments: { command: 'unit only' }, started_at: '2026-09-23T10:00:00Z', nodes: [], ...extra });
 const chart = { kind: 'chart', chart_id: 'unit-chart', title: 'UNIT ONLY', chart_kind: 'candlestick', path: 'inline',
@@ -43,8 +49,26 @@ test('strategy uses the exact normal card, actions, links and glyphs', () => {
   const common = html(React.createElement(NativeBlocksTrack, { envelopes: message.turn.blocks, presentation: 'expanded' }));
   const external = html(React.createElement(ExternalCallMessage, { trace: call }));
   assert.match(common, /data-strategy-proposal-hoist/);
-  assert.match(external, /Review candidate and validation/);
+  assert.match(external, /data-testid="strategy-proposal-card"/);
+  assert.match(external, /data-proposal-id="proposal-unit"/);
+  assert.match(external, /Open strategy workspace/);
   assert.doesNotMatch(external, /data-testid="workflow-native-panel"/);
+});
+test('external timeline renders a proposal once, on its latest result, with the matching backtest verdict', () => {
+  const { ExternalSessionTimeline } = require('../components/chat/ExternalSessionTimeline.tsx');
+  const proposal = { kind: 'strategy_package_proposal', proposal_id: 'proposal-unit', strategy_id: 'strategy-unit', state: 'pending_review',
+    summary: 'UNIT ONLY', files: ['strategies/strategy-unit/strategy.yml'], validation: { ok: true, blockers: [] } };
+  const calls = [trace({ call_id: 'draft', sequence: 1, tool: 'nerya_native_strategy_draft_proposal', result: { ok: true, content: [{ type: 'json', data: proposal }] } }),
+    trace({ call_id: 'submit', sequence: 2, tool: 'nerya_native_strategy_submit_proposal', result: { ok: true, content: [{ type: 'json', data: proposal }] } }),
+    trace({ call_id: 'backtest', sequence: 3, tool: 'nerya_native_strategy_backtest', result: { ok: true, content: [{ type: 'json', data: {
+      ok: true, result_type: 'backtest_result', backtest_status: 'completed', strategy_id: 'strategy-unit', proposal_id: 'proposal-unit',
+      backtest_ts: '20260926_220000', verdict: 'FAIL', evaluation_mode: 'trading', metrics_display: { total_return_pct: '0.0291%' },
+    } }] } })];
+  const markup = html(React.createElement(ExternalSessionTimeline, { traces: calls }));
+  assert.equal((markup.match(/data-testid="strategy-proposal-card"/g) || []).length, 1);
+  assert.match(markup, /0.0291%/);
+  assert.match(markup, /id="submit"[\s\S]*data-proposal-id="proposal-unit"/);
+  assert.doesNotMatch(markup.split('id="submit"')[0], /data-testid="strategy-proposal-card"/);
 });
 test('structured research and ordinary reply produce identical instrument card markup', () => {
   const call = trace({ result: { ok: true, content: [{ type: 'json', data: { chart_blocks: [chart] } }] } });

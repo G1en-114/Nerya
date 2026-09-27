@@ -1,0 +1,31 @@
+{
+  "chatHistory": {
+    "actions": "会话操作：{title}",
+    "rename": "重命名会话",
+    "renameHelp": "仅修改标题，不改变消息，也不会运行 Agent。",
+    "title": "会话标题",
+    "deleteConversation": "删除会话",
+    "deleteConversationHelp": "从对话历史中删除此会话，操作不可撤销。策略、已执行的操作和审计日志不会被删除。",
+    "deleteMessage": "删除消息",
+    "deleteMessageHelp": "仅删除这条消息，已有回复会保留。删除消息不会撤销 Agent 已执行的操作。",
+    "editLabel": "编辑消息",
+    "editHelp": "仅修改消息文本，不重新生成已有回复，也不会再次运行 Agent。",
+    "save": "保存修改",
+    "saving": "正在保存…",
+    "delete": "删除",
+    "deleting": "正在删除…",
+    "cancel": "取消",
+    "edited": "已编辑",
+    "discardTitle": "放弃消息修改？",
+    "discardHelp": "尚未保存的修改将丢失，原始消息保持不变。",
+    "discard": "放弃修改",
+    "keepEditing": "继续编辑",
+    "busy": "此会话正在运行或有待继续的任务，请先完成或停止任务再修改历史。",
+    "conflict": "这条消息已在其他位置修改。编辑内容已保留，请刷新会话后再保存。",
+    "missing": "这条消息或会话已不存在，请刷新以查看最新历史。",
+    "notSynced": "这条消息尚未由服务端确认，请刷新或重试原请求后再修改。",
+    "tooLong": "消息最多 16,000 个字符，内容未被截断或保存。",
+    "readOnly": "这条记录不支持编辑。",
+    "failed": "服务端尚未确认此次修改，原内容保持不变。连接恢复后可重试。"
+  }
+}

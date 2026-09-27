@@ -79,8 +79,9 @@ class AdminOAuthProvider:
         cfg = self.current_config()
         if cfg.get("mcp.enabled") is not True or not has_admin_password(cfg):
             return "disabled"
+        # Old management-only grants must re-consent to the full workspace surface.
         return digest(str(cfg.get("runtime.auth.admin_password_hash")) + self.resource
-                      + str(cfg.get("mcp.oauth_epoch", "")))
+                      + str(cfg.get("mcp.oauth_epoch", "")) + "workspace-tools-v2")
 
     def put(self, db, kind, key, body, expires, family=""):
         db.execute("DELETE FROM records WHERE expires < ?", (time.time(),))
@@ -210,8 +211,8 @@ class AdminOAuthProvider:
 <style>body{{font:16px system-ui;margin:0;background:#f6f7fa;color:#18202b}}main{{max-width:32rem;margin:8vh auto;padding:2rem}}label,input,button{{display:block}}input{{box-sizing:border-box;width:100%;padding:.8rem;margin:1rem 0}}button{{padding:.8rem 1rem;margin:.7rem 0}}p{{line-height:1.6;overflow-wrap:anywhere}}.error{{color:#a51c30}}</style>
 <main><h1>Nerya MCP</h1><h2>授权外部客户端 / Authorize client</h2>
 <p><strong>{esc(data['client_name'])}</strong></p><p>{esc(data['params']['redirect_uri'])}</p>
-<p>使用 Nerya 管理员密码登录。此客户端将可以读取并调用当前开放的工具；开启写权限时可管理角色、Skill 和配置提案。密码不会交给客户端。</p>
-<p>Sign in with your Nerya administrator password. This grants access to the configured MCP tools, including enabled management writes. Your password is not shared with the client.</p>
+<p>此客户端将被完全信任，可像主 Agent 一样调用全部 Workspace 工具，包括文件读写、命令执行和管理操作；仍遵循 Workspace 的执行与审批规则。仅授权你信任的客户端。管理员密码不会交给客户端。</p>
+<p>This client will be fully trusted with the same Workspace tools as the main agent, including file changes, commands and management operations. Workspace execution and approval rules still apply. Authorize only a client you trust. Your administrator password is never shared.</p>
 <p class="error" role="alert">{esc(error)}</p>
 <form method="post" action="{esc(self.issuer)}/login"><input type="hidden" name="ticket" value="{esc(ticket)}"><input type="hidden" name="csrf" value="{csrf}">
 <label for="password">管理员密码 / Administrator password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">

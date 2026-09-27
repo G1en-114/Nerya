@@ -116,6 +116,14 @@ class TradingAPI:
         Paper-mode market orders fill synchronously, so there is usually
         nothing to cancel — the envelope says so instead of erroring.
         """
+        from contextlib import closing
+        from ..trading.order_tracker import OrderTracker
+        from ..trading.cancellation import cancel_tracked_order
+        with closing(OrderTracker(self.config.paths)) as tracker:
+            tracked = tracker.get(order_id)
+        if tracked is not None:
+            return cancel_tracked_order(self.config, order_id, strategy_id=strategy_id,
+                                        auth_context=auth_context)
         record = self._find_ledger_record(
             strategy_id, ledger="orders", order_id=order_id
         )
@@ -430,37 +438,32 @@ class TradingAPI:
         account_id: str,
         position_id: str,
         market: str,
-        side: Literal["buy", "sell"],
+        side: Literal["buy", "sell", "long", "short"],
         stop_loss: StopLossSpec | dict[str, Any] | None = None,
         take_profit: TakeProfitSpec | dict[str, Any] | None = None,
         trailing_stop: TrailingStopSpec | dict[str, Any] | None = None,
         partial_exits: list[PartialExitSpec | dict[str, Any]] | None = None,
         time_limit_sec: int | None = None,
-        mode: Literal["soft", "hard", "advisory"] = "soft",
+        mode: Literal["soft", "hard", "soft_runtime", "hard_exchange", "hybrid"] = "soft",
     ) -> dict[str, Any]:
         """Attach (or replace) a protection rule on an open position."""
 
-        rule = ProtectionRule(
-            position_id=position_id,
-            strategy_id=strategy_id,
-            account_id=account_id,
-            market=market,
-            side=side,
-            mode=mode,
-            stop_loss=_coerce_stop_loss(stop_loss),
-            take_profit=_coerce_take_profit(take_profit),
-            trailing_stop=_coerce_trailing_stop(trailing_stop),
-            partial_exits=[_coerce_partial(p) for p in (partial_exits or [])],
-            time_limit_sec=time_limit_sec,
-        )
-        from ..trading.protection_store import ProtectionStore
+        from ..trading.protection_store import activate_protection
 
-        store = ProtectionStore(self.config.paths)
-        store.upsert(rule)
+        rule = _coerce_protection({
+            "position_id": position_id, "strategy_id": strategy_id,
+            "account_id": account_id, "market": market, "side": side, "mode": mode,
+            "stop_loss": stop_loss, "take_profit": take_profit,
+            "trailing_stop": trailing_stop, "partial_exits": partial_exits or [],
+            "time_limit_sec": time_limit_sec,
+        })
+        assert rule is not None
+        if rule.mode == "hard_exchange":
+            raise ValueError("standalone hard_exchange attachment is unsupported; use soft_runtime or submit an entry with attached native protection")
+        rule = activate_protection(self.config, rule)
         return {
-            "status": "attached",
-            "protection_id": rule.protection_id,
-            "rule": rule.asdict(),
+            "status": "attached", "protection_id": rule.protection_id,
+            "executor_id": rule.executor_id, "rule": rule.asdict(),
         }
 
     def cancel_executor(self, *, executor_id: str) -> dict[str, Any]:
@@ -692,6 +695,8 @@ def _coerce_protection(
 
     if p is None or isinstance(p, ProtectionRule):
         return p
+    if p == {}:
+        return None
     d = dict(p)
     base = dict(defaults or {})
 
@@ -702,8 +707,10 @@ def _coerce_protection(
         mode = "hard_exchange"
     elif raw_mode in ("hard_exchange", "soft_runtime", "hybrid"):
         mode = raw_mode
-    else:
+    elif not raw_mode:
         mode = "soft_runtime"
+    else:
+        raise ValueError(f"unsupported protection mode: {raw_mode}")
 
     raw_side = str(d.get("side") or base.get("side") or "long").strip().lower()
     if raw_side in ("buy", "long"):
@@ -711,7 +718,7 @@ def _coerce_protection(
     elif raw_side in ("sell", "short"):
         side = "short"
     else:
-        side = "long"
+        raise ValueError(f"unsupported protection side: {raw_side}")
 
     return ProtectionRule(
         position_id=str(d.get("position_id") or ""),

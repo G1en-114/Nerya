@@ -20,7 +20,8 @@ pytestmark = pytest.mark.smoke
 def test_evolve_reflect_uses_canonical_runner_payload(tmp_path, monkeypatch) -> None:
     paths = WorkspacePaths(root=tmp_path)
 
-    def fake_evolve(config: Config) -> dict:
+    def fake_evolve(config: Config, *, strategy_id=None, isolated=False) -> dict:
+        assert isolated is True
         assert config.paths is paths
         return {
             "proposal": {

@@ -141,7 +141,7 @@ def run(
     if payload.get("ends_at") is not None:
         entry_kwargs["ends_at"] = payload.get("ends_at")
     if session_kind == "agent":
-        entry_kwargs["session_mode"] = payload.get("session_mode") or "ephemeral"
+        entry_kwargs["session_mode"] = payload.get("session_mode") or "reuse"
         if payload.get("session_id"):
             entry_kwargs["session_id"] = payload.get("session_id")
         if payload.get("session_ids"):

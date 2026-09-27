@@ -203,7 +203,7 @@ def test_r3t1_partial_fill_cancel_keeps_reservation_and_poller_consumes(
     )
     try:
         run = orch.cancel(executor.run.executor_id, reason="operator_cancel")
-        assert run is not None and run.state == "canceled"
+        assert run is not None and run.state == "canceling"
 
         tracker = OrderTracker(cfg.paths)
         row = tracker.get(order.order_id)
@@ -255,7 +255,7 @@ def test_r3t2_both_cancel_and_refetch_failed_stays_polled(tmp_path, monkeypatch)
     )
     try:
         run = orch.cancel(executor.run.executor_id)
-        assert run is not None and run.state == "canceled"
+        assert run is not None and run.state == "canceling"
 
         tracker = OrderTracker(cfg.paths)
         row = tracker.get(order.order_id)
@@ -404,6 +404,9 @@ def test_r3t3_ccxt_adapter_preserves_order_not_found():
 
 
 class _ClosedOrderClient:
+    def load_markets(self):
+        return {"BTC/USDT": {"spot": True}}
+
     def __init__(self) -> None:
         self.closed: list[dict[str, Any]] = []
 

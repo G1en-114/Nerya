@@ -8,6 +8,11 @@ from at runtime.
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from threading import Lock
+from time import time
+from urllib.parse import urlsplit
 
 from ..connectors.provider_spec import get_registry
 from ..connectors.registry import build_connector
@@ -23,6 +28,7 @@ from ..data.candles import (
     fetch_candles,
     fetch_public_ticker,
 )
+from ..data.news import fetch_news
 
 
 # Mock/paper venues exposed only when runtime authorises mock mode.
@@ -180,6 +186,57 @@ def _public_connector(venue: str, *, config_like=None):
 
 
 def routes():
+    # Public, read-only feed. Cache across dashboard polls and never invent news.
+    news_cache: dict[str, Any] = {}
+    news_lock = Lock()
+
+    def news(_client, _payload):
+        with news_lock:
+            if news_cache and time() - news_cache["fetched_at"] < 300:
+                return dict(news_cache)
+            try:
+                rows = fetch_news(limit=90, allow_mock=False)
+                items = []
+                seen: set[str] = set()
+                for row in rows:
+                    link = str(row.get("link") or "").strip()
+                    try:
+                        url = urlsplit(link)
+                        if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
+                            continue
+                    except ValueError:
+                        continue
+                    if link in seen or not row.get("title") or row.get("_envelope", {}).get("mode") == "mock":
+                        continue
+                    seen.add(link)
+                    published = str(row.get("published_at") or "")
+                    try:
+                        stamp = parsedate_to_datetime(published)
+                    except (TypeError, ValueError):
+                        try:
+                            stamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+                        except ValueError:
+                            stamp = None
+                    if stamp is not None and stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+                    items.append({
+                        "title": str(row["title"]), "link": link,
+                        "source": str(row.get("source") or url.hostname),
+                        "published_at": stamp.isoformat() if stamp else "",
+                        "tickers": [str(t) for t in row.get("tickers", [])][:5],
+                        "_sort_ts": stamp.timestamp() if stamp else 0,
+                    })
+                items.sort(key=lambda item: item["_sort_ts"], reverse=True)
+                for item in items:
+                    item.pop("_sort_ts")
+                if not items:
+                    return {"ok": False, "items": [], "error": "news_sources_unavailable", "fetched_at": time()}
+                news_cache.update(ok=True, items=items[:30], fetched_at=time())
+                return dict(news_cache)
+            except Exception:
+                # No raw provider exception: URLs and upstream messages may contain secrets.
+                return {"ok": False, "items": [], "error": "news_fetch_failed", "fetched_at": time()}
+
     def venues(_client, _payload):
         cfg = getattr(_client, "config", None) if _client is not None else None
         return {"venues": _public_venues(cfg)}
@@ -266,6 +323,7 @@ def routes():
             }
 
     return [
+        ("GET", "/market/news", news),
         ("POST", "/market/candles", candles),
         ("POST", "/market/ticker", ticker),
         ("GET", "/market/venues", venues),

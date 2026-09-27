@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import { useEffect, useId, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
@@ -13,6 +14,10 @@ import { Card, Empty, ErrorBanner, Section } from "../Page";
 import { JsonView } from "../JsonView";
 import { SummaryCards } from "./SummaryCards";
 import { BacktestTables } from "./BacktestTables";
+import { BacktestExecutionEvidence } from "./BacktestExecutionEvidence";
+import { BacktestCoverage } from "./BacktestCoverage";
+import { BacktestMarketExplorer } from "./BacktestMarketExplorer";
+import { replayTime } from "../../lib/backtestMarket";
 import { useChartTheme } from "../../lib/chartTheme";
 
 type BacktestSeries = BacktestPanel["series"][number];
@@ -33,6 +38,7 @@ export function BacktestChart({
   useEffect(() => setView("overview"), [strategyId, ts, proposalId]);
   const [chart, setChart] = useState<BacktestChartData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +51,10 @@ export function BacktestChart({
           setError(res.error || t("chartUnavailable"));
           return;
         }
+        if (res.strategy_id !== strategyId || res.ts !== ts || (res.proposal_id || null) !== (proposalId || null)) {
+          setError(zh ? "报告版本不匹配，已停止显示。请重试。" : "Report identity mismatch. Display was stopped; retry the request.");
+          return;
+        }
         setChart(res.chart);
       })
       .catch((e) => {
@@ -53,10 +63,31 @@ export function BacktestChart({
     return () => {
       cancelled = true;
     };
-  }, [strategyId, ts, proposalId]);
+  }, [strategyId, ts, proposalId, retry]);
 
-  if (error) return <ErrorBanner error={error} />;
+  if (error) return <div className="space-y-3" role="status"><ErrorBanner error={error} /><button type="button" className="btn btn-ghost" onClick={() => setRetry(value => value + 1)}>{zh ? "重新载入报告" : "Reload report"}</button></div>;
   if (!chart) return <Card title={t("chartTitle")}><Empty label={t("chartLoading")} /></Card>;
+  if (chart.meta.performance_evidence === false || chart.meta.evaluation_mode === "observation") {
+    const replay = (chart.meta.replay || {}) as Record<string, unknown>;
+    const reasons = (replay.reason_counts || {}) as Record<string, unknown>;
+    const decisions = (chart.tables || []).filter(table => table.id === "decisions");
+    return <div className="min-w-0 space-y-5" data-testid="backtest-report" data-report-kind="observation">
+      <BacktestCoverage meta={chart.meta}/>
+      <WorkspaceTabs id={id} label={zh ? "观察回放详情" : "Observation replay details"} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "事件与诊断" : "Events & diagnostics" }, { id: "trades", label: zh ? "行情与信号" : "Market & signals" }]}/>
+      <section role="tabpanel" id={`${id}-panel-overview`} aria-labelledby={`${id}-tab-overview`} hidden={view !== "overview"} className={view === "overview" ? "space-y-5" : "hidden"}>
+      <div><h4 className="text-sm font-semibold">{zh ? "历史事件与分支验证" : "Historical event and branch verification"}</h4>
+        <p className="mt-2 text-xs leading-6 text-[color:var(--text-muted)]">{zh ? "已回放脚本入口与输入传递，未执行 Agent 模型。下方是触发记录，不是交易收益或实盘执行记录。" : "Replayed the entrypoint and input collection without executing the Agent model. These are dispatch records, not trading returns or live fills."}</p></div>
+      <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["decisions",zh ? "历史事件" : "Events"],["dispatches",zh ? "触发" : "Dispatches"],["skipped",zh ? "跳过" : "Skipped"],["errors",zh ? "错误" : "Errors"]].map(([key,label]) => <div key={key}><dt className="text-xs text-[color:var(--text-muted)]">{label}</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{typeof replay[key] === "number" ? String(replay[key]) : "—"}</dd></div>)}</dl>
+      {Object.keys(reasons).length > 0 && <section><h5 className="mb-2 text-xs font-medium">{zh ? "分支原因" : "Branch reasons"}</h5><dl className="space-y-2 text-xs">{Object.entries(reasons).map(([reason,count])=><div key={reason} className="flex justify-between gap-4 border-b border-[color:var(--line)] pb-2"><dt className="break-words">{reason}</dt><dd className="tabular-nums">{String(count)}</dd></div>)}</dl></section>}
+      <p className="text-xs text-[color:var(--text-muted)]">{zh ? "最多展示前 500 条；完整事件保存在本次回测的 decisions.csv。" : "Showing up to 500 rows; decisions.csv retains the full replay."}</p>
+      <BacktestTables tables={decisions} compact />
+      </section>
+      <section role="tabpanel" id={`${id}-panel-trades`} aria-labelledby={`${id}-tab-trades`} hidden={view !== "trades"} className={view === "trades" ? "space-y-4" : "hidden"}>
+        <p className="text-xs text-warn">{zh ? "观察回放未执行 Agent 模型，行情图不构成 Agent 交易收益证据。" : "The observation replay did not execute the Agent model. Market charts are not Agent performance evidence."}</p>
+        {view === "trades" && <BacktestMarketExplorer panels={(chart.panels || []).filter(isPricePanel)} tables={[]} meta={chart.meta}/>}
+      </section>
+    </div>;
+  }
 
   const panels = chart.panels ?? [];
   const pricePanels = panels.filter(isPricePanel);
@@ -71,11 +102,13 @@ export function BacktestChart({
 
   return (
     <div className="min-w-0 space-y-4" data-testid="backtest-report">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[color:var(--text-muted)]"><span className="font-medium text-warn">{zh ? "历史回测" : "Historical backtest"}</span><span>{zh ? "不是实盘收益" : "Not live performance"}</span></div>
-      <WorkspaceTabs id={id} label={zh ? "回测报告" : "Backtest report"} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "概览" : "Overview" }, { id: "trades", label: zh ? "成交" : "Trades" }, { id: "diagnostics", label: zh ? "诊断" : "Diagnostics" }]} />
+      <BacktestCoverage meta={chart.meta}/>
+      <BacktestExecutionEvidence replay={(chart.meta.replay || {}) as Record<string, unknown>} legacyBenchmark={chart.meta.engine_version === "backtest_skill_v2_closed_bar" && Array.isArray(chart.meta.markets) && chart.meta.markets.length > 1}/>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[color:var(--text-muted)]"><span className="font-medium text-warn">{i18nCopy(zh, "copy.components_backtest_BacktestChart.001")}</span><span>{i18nCopy(zh, "copy.components_backtest_BacktestChart.002")}</span></div>
+      <WorkspaceTabs id={id} label={i18nCopy(zh, "copy.components_backtest_BacktestChart.003")} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "概览" : "Overview" }, { id: "trades", label: zh ? "行情与成交" : "Market & executions" }, { id: "diagnostics", label: zh ? "诊断" : "Diagnostics" }]} />
       <section role="tabpanel" id={`${id}-panel-overview`} aria-labelledby={`${id}-tab-overview`} hidden={view !== "overview"} className={view === "overview" ? "space-y-5" : "hidden"}>
       <SummaryCards cards={chart.summary_cards ?? []} />
-      {primaryPanel ? (
+      {primaryPanel && view === "overview" ? (
         <Section
           title={t("equityBenchmarkTitle")}
           description={t("equityBenchmarkDescription")}
@@ -91,32 +124,10 @@ export function BacktestChart({
       ) : null}
       </section>
       <section role="tabpanel" id={`${id}-panel-trades`} aria-labelledby={`${id}-tab-trades`} hidden={view !== "trades"} className={view === "trades" ? "space-y-5" : "hidden"}>
-      {!tradeTables.length && !pricePanels.length ? <Empty label={zh ? "本次回测未提供成交明细。" : "No trade details were supplied for this run."} /> : null}
-      {tradeTables.length > 0 ? (
-        <Section
-          title={t("tradeDetailsTitle")}
-          description={t("tradeDetailsDescription")}
-          divider={false}
-        >
-          <BacktestTables tables={tradeTables} compact maxHeightClass="max-h-[560px]" />
-        </Section>
-      ) : null}
-      {pricePanels.length > 0 ? (
-        <Section
-          title={t("instrumentKlineTitle")}
-          description={t("instrumentKlineDescription")}
-          divider={false}
-        >
-          <div className="space-y-3">
-            {pricePanels.map((panel) => (
-              <ChartPanel key={panel.id} panel={panel} height={320} compact />
-            ))}
-          </div>
-        </Section>
-      ) : null}
+      {view === "trades" && <BacktestMarketExplorer panels={pricePanels} tables={tradeTables} meta={chart.meta}/>}
       </section>
       <section role="tabpanel" id={`${id}-panel-diagnostics`} aria-labelledby={`${id}-tab-diagnostics`} hidden={view !== "diagnostics"} className={view === "diagnostics" ? "space-y-5" : "hidden"}>
-      {!diagnosticPanels.length && !diagnosticTables.length ? <Empty label={zh ? "本次回测未提供诊断记录。" : "No diagnostics were supplied for this run."} /> : null}
+      {!diagnosticPanels.length && !diagnosticTables.length ? <Empty label={i18nCopy(zh, "copy.components_backtest_BacktestChart.008")} /> : null}
       {diagnosticPanels.length > 0 || diagnosticTables.length > 0 ? (
         <Section
           title={t("diagnosticsTitle")}
@@ -124,7 +135,7 @@ export function BacktestChart({
           divider={false}
         >
           <div className="space-y-3">
-            {diagnosticPanels.map((panel) => (
+            {view === "diagnostics" && diagnosticPanels.map((panel) => (
               <ChartPanel key={panel.id} panel={panel} height={220} compact />
             ))}
             {diagnosticTables.length > 0 ? (
@@ -161,6 +172,10 @@ function ChartPanel({
     if (!node) return;
     const api = createChart(node, {
       height: resolvedHeight,
+      // Embedded reports must not trap the conversation's vertical scroll.
+      // Drag/axis scaling and pinch remain available for chart exploration.
+      handleScroll: { mouseWheel: false, vertTouchDrag: false },
+      handleScale: { mouseWheel: false },
       layout: {
         background: { color: "transparent" },
         textColor: chartTheme.text,
@@ -204,7 +219,7 @@ function ChartPanel({
     >
       <div
         ref={setNode}
-        className={`w-full ${compact ? "px-2 py-2" : "px-2 py-3"}`}
+        className={`relative isolate w-full overflow-hidden ${compact ? "px-2 py-2" : "px-2 py-3"}`}
         style={{ minHeight: resolvedHeight }}
         data-testid="backtest-chart"
       />
@@ -228,6 +243,10 @@ function renderSeries(api: IChartApi, panel: BacktestPanel) {
   const markers: Array<Record<string, unknown>> = [];
 
   for (const series of panel.series ?? []) {
+    if (series.kind === "markers") {
+      markers.push(...(series.data || []).flatMap(row => { const time = replayTime(row.time); return time === null ? [] : [{ ...row, time }]; }));
+      continue;
+    }
     const data = normalizeSeriesData(series.data ?? []);
     if (!data.length) continue;
     if (series.kind === "candles") {
@@ -256,10 +275,9 @@ function renderSeries(api: IChartApi, panel: BacktestPanel) {
       });
       s.setData(data as never);
       if (!markerHost) markerHost = s as unknown as { setMarkers(markers: never[]): void };
-    } else if (series.kind === "markers") {
-      markers.push(...data);
     }
   }
+  markers.sort((a, b) => Number(a.time) - Number(b.time));
   if (markerHost && markers.length > 0) markerHost.setMarkers(markers as never[]);
   api.timeScale().fitContent();
 }
@@ -274,6 +292,9 @@ function buildEquityBenchmarkPanel(
   const panel = explicit ?? fallback;
   if (!panel) return null;
   if (panel.series.some(isBenchmarkSeries)) return panel;
+  // A multi-market benchmark must be recorded by the engine, not guessed
+  // from whichever instrument happens to be the first price panel.
+  if (pricePanels.length !== 1) return panel;
   const benchmark = deriveBenchmarkSeries(chart, panel, pricePanels[0]);
   if (!benchmark) return panel;
   return {
@@ -352,7 +373,8 @@ function isPricePanel(panel: BacktestPanel): boolean {
 }
 
 function isTradeTable(table: BacktestTable): boolean {
-  return /(trade|fill|order|execution)/i.test(`${table.id} ${table.columns.join(" ")}`);
+  if (["order_events", "rejected_signals"].includes(table.id)) return false;
+  return /(trade|fill|order|execution)/i.test(table.id) && table.columns.includes("side") && table.columns.includes("price");
 }
 
 function hasRenderableSeries(panel: BacktestPanel): boolean {
@@ -383,6 +405,9 @@ function formatSeriesName(series: BacktestSeries): string {
 }
 
 function colorForSeries(panel: BacktestPanel, series: BacktestSeries, index: number): string {
+  const name = String(series.name || "").toLowerCase();
+  if (/benchmark|bench|b&h|buy.*hold/.test(name)) return CHART_FLUID;
+  if (/equity|nav|capital/.test(name)) return CHART_OK;
   const text = `${panel.id} ${panel.title} ${series.name ?? ""} ${series.kind}`.toLowerCase();
   if (/benchmark|bench|b&h|buy.*hold/.test(text)) return CHART_FLUID;
   if (/drawdown|missed/.test(text)) return CHART_DANGER;

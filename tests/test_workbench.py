@@ -107,7 +107,8 @@ def test_pending_interaction_rejects_direct_command_and_history_edit(tmp_path):
 
 
 @pytest.mark.parametrize("mode,tool,payload",[
-    ("execute","request_user_input",{"title":"Select a market","choices":["BTC","ETH"]}),
+    ("execute","request_user_input",{"title":"Select a market","questions":[{"id":"market","question":"Which market?","options":["BTC","ETH"]},{"id":"period","question":"Which period?"}]}),
+    ("execute","request_user_input",{"title":"Strategy inputs","questions":[{"id":"market","question":"Which market?","options":["BTC","ETH"]},{"id":"period","question":"Which period?"}]}),
     ("plan","propose_plan",{"title":"Read and report","steps":["Read the evidence","Write the report"],"deliverables":["Report"]}),
 ])
 def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,tool,payload):
@@ -142,7 +143,7 @@ def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,too
             time.sleep(.03)
         raise AssertionError("command did not settle")
     try:
-        info=http("/runtime/info");assert "plan_mode" in info["capabilities"]
+        info=http("/runtime/info");assert "plan_mode" in info["capabilities"] and "goal_mode" in info["capabilities"]
         assert info["build_id"] and "root" not in info
         http("/agent/commands",{"command_id":"command-workbench","session_id":"session-test","request":{"payload":{"text":"Help with this task"},"work_mode":mode}})
         first=settled("command-workbench")
@@ -151,12 +152,30 @@ def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,too
         assert view["status"]["waiting_for"]=="user"
         item=view["pending_interactions"][0]
         answer={"session_id":"session-test","interaction_id":item["interaction_id"],"expected_revision":item["revision"],"response_id":"response-request-test","selected":["BTC"] if mode=="execute" else [],"text":"Please continue"}
+        if "questions" in payload:
+            answer.update(selected=[], answers={"market":{"selected":["BTC"],"text":""},"period":{"selected":[],"text":"4h"}})
         receipt=http("/agent/interactions/respond",answer)
         final=settled(receipt["command"]["command_id"])
         assert final["state"]=="succeeded", final
         assert (final["turn_id"]==first["turn_id"]) == (mode=="execute")
         assert http("/agent/interactions/respond",answer)["duplicate"]
         assert len(calls)==2
+        if "questions" in payload:
+            resumed=json.dumps(calls[-1])
+            assert "Which period?" in resumed and "4h" in resumed
         assert not http("/agent/sessions/view?session_id=session-test")["pending_interactions"]
     finally:
         server.shutdown();server.server_close();thread.join(3)
+
+
+def test_structured_answer_validation():
+    from nerya.agent.interactions import validate_answers
+    payload=validate_payload("question", {"title":"Inputs", "questions":[
+        {"id":"market","question":"Market?","options":["BTC","ETH"]},
+        {"id":"rules","question":"Rules?","options":["ATR","Trend"],"multiple":True}]})
+    validate_answers(payload, {})
+    validate_answers(payload, {"market":{"text":"SOL"},"rules":{"selected":["ATR","Trend"],"text":"custom"}})
+    for answer in [{"unknown":{"text":"BTC"}}, {"market":{"selected":["bad"]}}, {"market":{"selected":["BTC","ETH"]}}, {"market":{"selected":["BTC"],"text":"ETH"}}]:
+        with pytest.raises(CommandError): validate_answers(payload, answer)
+    with pytest.raises(CommandError):
+        validate_payload("question", {"title":"Inputs","questions":[{"id":"a","question":"A"},{"id":"a","question":"B"}]})

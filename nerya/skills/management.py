@@ -1,8 +1,8 @@
 """Shared operator/agent Skill management, without importing Skill code.
 
-Builtins are immutable package assets: editing one stages a Workspace override.
+Builtins are immutable package assets: editing one writes a Workspace override.
 Agent scope is the actual role's allowed_skills, not an unused parallel store.
-All mutations are content-addressed proposals; the operator reviews/applies them.
+Validated mutations are applied immediately so the operator has one save path.
 """
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ..core import yaml_io
-from ..evolution.patch_proposal import create_proposal
 from ..subagents.registry import describe_role
-from .manifest import SkillManifest
+from .lockfile import remove_lock_entry
+from .manifest import _slugify
+from .registry import SkillRegistry, _enabled_ok, enabled_skill_names, catalog_generation
+from .discovery import catalog_group, catalog_parent, catalog_roots
 
 Scope = Literal["all", "builtin", "workspace", "agent"]
 Action = Literal["create", "update", "delete", "enable", "disable"]
@@ -52,44 +54,21 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
 
 
-def _walk(root: Path):
-    if not root.is_dir() or root.is_symlink():
-        return
-    for current, directories, files in os.walk(root, followlinks=False):
-        base = Path(current)
-        directories[:] = sorted(d for d in directories if not d.startswith(".") and d not in ASSETS | EXCLUDE
-                                and not (base / d).is_symlink())
-        if "SKILL.md" in files and not (base / "SKILL.md").is_symlink():
-            yield base, base / "SKILL.md"
-
-
 def _definitions(config):
-    from .registry import _user_skill_roots
-    roots = [(Path(__file__).parent / "builtin", "builtin")]
-    user = _user_skill_roots(config.paths)
-    # Match the runtime's workspace-over-home precedence.
-    roots += [(p, "user_home") for p in user[1:]]
-    roots += [(config.paths.skills_installed, "workspace_installed"), (config.paths.skills, "workspace")]
+    registry = SkillRegistry.load_builtin(config.paths, config=config, include_disabled=True)
     found = []
-    for root, source in roots:
-        for directory, md in _walk(root):
-            try:
-                _text(md)
-                manifest = SkillManifest.from_skill_md(md)
-                found.append({"id": manifest.id, "description": manifest.description,
-                              "source": source, "root": directory, "entry": "SKILL.md"})
-            except (ValueError, OSError):
-                continue
-        # Existing standalone procedural markdown skills remain readable too.
-        if source != "builtin" and root.is_dir() and not root.is_symlink():
-            for md in sorted(root.glob("*.md")):
-                if md.name == "SKILL.md" or md.is_symlink():
-                    continue
-                from .procedural import load_procedural_skill
-                skill = load_procedural_skill(md)
-                if skill:
-                    found.append({"id": skill.manifest.id, "description": skill.manifest.description,
-                                  "source": source, "root": root, "entry": md.name})
+    for entry in registry.definitions:
+        manifest = entry.manifest
+        try:
+            _text(_safe(manifest.path, manifest.entry_file))
+        except (ValueError, OSError, UnicodeError):
+            continue
+        found.append({"id": manifest.id, "title": manifest.title,
+                      "description": manifest.description, "source": manifest.source,
+                      "root": manifest.path, "entry": manifest.entry_file,
+                      "revision": manifest.revision, "registry_entry": entry,
+                      "catalog_parent": catalog_parent(manifest.metadata),
+                      "catalog_group": catalog_group(manifest.metadata)})
     return found
 
 
@@ -111,14 +90,13 @@ def _role(config, agent_id):
 
 
 def _matches(skill_id, names):
-    return any(skill_id == name or skill_id.startswith(name + ".") for name in names)
+    return _enabled_ok(skill_id, set(names))
 
 
 def _enabled(config, ids):
-    path = _safe(config.paths.root, "skills/enabled.yml")
-    doc = yaml_io.load(path, default={}) or {}
-    names = doc.get("enabled")
-    return set(ids) if names is None else {sid for sid in ids if _matches(sid, names)}
+    _safe(config.paths.root, "skills/enabled.yml")
+    names = enabled_skill_names(config.paths)
+    return {sid for sid in ids if _enabled_ok(sid, names)}
 
 
 def _binding_revision(config, role):
@@ -128,15 +106,19 @@ def _binding_revision(config, role):
 
 
 def catalog(config, scope: Scope = "all", agent_id: str = "", query: str = "",
-            offset: int = 0, limit: int = 100, include_unassigned: bool = False):
+            offset: int = 0, limit: int = 100, include_unassigned: bool = False,
+            view: Literal["core", "professional", "all"] = "all", parent: str = "", hierarchical: bool = False):
     if scope not in {"all", "builtin", "workspace", "agent"} or offset < 0 or not 1 <= limit <= 200:
         raise ValueError("Invalid Skill scope or pagination")
+    if view not in {"core", "professional", "all"}:
+        raise ValueError("Invalid Skill view")
     definitions = _definitions(config)
     effective = _effective(definitions)
     available = _enabled(config, effective)
     role = _role(config, agent_id) if scope == "agent" else None
     candidates = definitions if scope == "builtin" else list(effective.values())
     rows = []
+    scoped = {}
     for row in candidates:
         assigned = _matches(row["id"], role["allowed_skills"]) if role else None
         if scope == "builtin" and row["source"] != "builtin":
@@ -145,23 +127,48 @@ def catalog(config, scope: Scope = "all", agent_id: str = "", query: str = "",
             continue
         if role and not assigned and not include_unassigned:
             continue
-        if query and query.lower() not in (row["id"] + " " + row["description"]).lower():
-            continue
-        rows.append({"id": row["id"], "description": row["description"], "source": row["source"],
+        scoped[row["id"]] = row
+        rows.append({"id": row["id"], "title": row["title"], "description": row["description"], "source": row["source"],
                      "enabled": row["id"] in available, "assigned": assigned,
+                     "effective_source": effective[row["id"]]["source"],
+                     "shadowed": [{"source": other["source"], "path": str(other["root"] / other["entry"])}
+                                  for other in definitions if other["id"] == row["id"]
+                                  and other is not row and effective[row["id"]] is row],
                      "revision": _sha(_safe(row["root"], row["entry"])), "entry": row["entry"],
                      "edit_effect": "workspace_override" if row["source"] in {"builtin", "user_home"} else "workspace_update"})
+    # Group after scope/assignment filtering, before search and pagination. A
+    # leaf-only role must never disappear or acquire its parent's permissions.
+    roots = catalog_roots((sid, row["root"], row.get("catalog_parent", "")) for sid, row in scoped.items())
+    for row in rows:
+        root = roots[row["id"]]
+        row["catalog_parent"] = root if root != row["id"] else ""
+        row["catalog_group"] = scoped[root].get("catalog_group", "core")
+        row["method_count"] = sum(sid != root and owner == root for sid, owner in roots.items()) if row["id"] == root else 0
+    if hierarchical and not parent:
+        matching = {row["catalog_parent"] or row["id"] for row in rows
+                    if not query or query.lower() in (row["id"] + " " + row["description"]).lower()}
+        rows = [row for row in rows if not row["catalog_parent"] and row["id"] in matching
+                and (view == "all" or row["catalog_group"] == view)]
+        query = ""
+    if parent:
+        rows = [row for row in rows if row["catalog_parent"] == parent]
+    elif not query and view != "all":
+        rows = [row for row in rows if not row["catalog_parent"] and row["catalog_group"] == view]
+    if query:
+        rows = [row for row in rows if query.lower() in (row["id"] + " " + row["description"]).lower()]
     rows.sort(key=lambda row: row["id"])
     return {"ok": True, "skills": rows[offset:offset + limit], "total": len(rows),
             "next_offset": offset + limit if offset + limit < len(rows) else None,
             "scope": scope, "agent_id": agent_id,
+            "role_access_mode": ("allowlist" if role["allowed_skills"] else "legacy_unrestricted") if role else None,
+            "catalog_generation": catalog_generation(effective[sid]["registry_entry"] for sid in available),
             "binding_revision": _binding_revision(config, role) if role else "",
             "enabled_revision": _sha(_safe(config.paths.root, "skills/enabled.yml"))}
 
 
 def _resolve(config, skill_id, scope, agent_id=""):
     definitions = _definitions(config)
-    candidates = [row for row in definitions if row["id"] == skill_id and
+    candidates = [row for row in definitions if _slugify(row["id"]) == _slugify(skill_id) and
                   (scope != "builtin" or row["source"] == "builtin")]
     if not candidates:
         raise ValueError("Skill not found; discover the catalog first")
@@ -202,7 +209,7 @@ def read(config, skill_id: str, scope: Scope = "all", agent_id: str = "", file: 
         raise ValueError("Only the playbook and its references/templates/scripts/tests may be read")
     from ..mcp.catalog import public_result
     text = public_result(_text(path))
-    return {"ok": True, "id": skill_id, "source": row["source"], "file": file,
+    return {"ok": True, "id": row["id"], "source": row["source"], "file": file,
             "revision": _sha(path), "text": text[offset:offset + limit], "offset": offset,
             "next_offset": offset + limit if offset + limit < len(text) else None,
             "total_chars": len(text), "files": _files(row), "scope": scope,
@@ -213,11 +220,16 @@ def manage(config, action: Action, skill_id: str, scope: Scope = "workspace", ag
            content: str = "", file: str = "SKILL.md", revision: str = "", summary: str = ""):
     if action not in {"create", "update", "delete", "enable", "disable"} or scope not in {"all", "builtin", "workspace", "agent"}:
         raise ValueError("Invalid Skill operation")
+    if action != "create":
+        skill_id = _resolve(config, skill_id, "all")["id"]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", skill_id):
         raise ValueError("Invalid Skill identifier")
     if len(content.encode()) > MAX_FILE or "\0" in content:
         raise ValueError("Skill content must be UTF-8 text up to 512 KiB")
     extra, target, deleted = {}, "", []
+    whole_skill_delete = False
+    delete_root: Path | None = None
+    delete_source = ""
     if action in {"enable", "disable"}:
         definitions = _effective(_definitions(config))
         if skill_id not in definitions:
@@ -286,14 +298,33 @@ def manage(config, action: Action, skill_id: str, scope: Scope = "workspace", ag
             deleted = [target]
             if file == row["entry"]:
                 deleted = [(dest / p).relative_to(config.paths.root).as_posix() for p in _files(row)]
-            # The existing candidate/approval pipeline consumes metadata.deleted_files.
+                whole_skill_delete = True
+                delete_root = dest
+                delete_source = row["source"]
+                enabled_path = _safe(config.paths.root, "skills/enabled.yml")
+                enabled_doc = yaml_io.load(enabled_path, default={}) or {}
+                if isinstance(enabled_doc, dict) and isinstance(enabled_doc.get("enabled"), list):
+                    definitions = _effective(_definitions(config))
+                    names = _enabled(config, definitions)
+                    names = {
+                        name for name in names
+                        if name != skill_id
+                        and not name.startswith(skill_id + ".")
+                        and not skill_id.startswith(name + ".")
+                    }
+                    enabled_doc["enabled"] = sorted(names)
+                    extra["after/skills/enabled.yml"] = yaml_io.dumps(enabled_doc)
         else:
             if file == row["entry"]:
                 # Validate the actual SKILL.md contract without executing any script.
-                if not content.startswith("---\n") or "\n---" not in content[4:]:
+                frontmatter_text = content
+                marker = "<!-- nerya-skill-frontmatter-start -->\n"
+                if frontmatter_text.startswith(marker):
+                    frontmatter_text = frontmatter_text[len(marker):]
+                if not frontmatter_text.startswith("---\n") or "\n---" not in frontmatter_text[4:]:
                     raise ValueError("SKILL.md requires YAML frontmatter with name and description")
-                front = yaml_io.loads(content.split("---", 2)[1])
-                if not isinstance(front, dict) or front.get("name") != skill_id or not str(front.get("description", "")).strip():
+                front = yaml_io.loads(frontmatter_text.split("---", 2)[1])
+                if not isinstance(front, dict) or _slugify(str(front.get("name") or "")) != _slugify(skill_id) or not str(front.get("description", "")).strip():
                     raise ValueError("Skill frontmatter name must match skill_id and include description")
             if is_override:
                 # A complete override retains all text references; never copy sibling sub-skills.
@@ -301,9 +332,9 @@ def manage(config, action: Action, skill_id: str, scope: Scope = "workspace", ag
                     extra["after/" + (dest / relative).relative_to(config.paths.root).as_posix()] = _text(_safe(row["root"], relative))
             extra["after/" + target] = content
     if sum(len(v.encode()) for v in extra.values()) > 2_097_152:
-        raise ValueError("Proposal exceeds 2 MiB; use a smaller Skill package")
-    # Validation is deliberately static: it does not run proposed Skill scripts.
-    # Existing approval still gates application of the validated candidate bundle.
+        raise ValueError("Skill change exceeds 2 MiB; use a smaller Skill package")
+    # Validate every write before touching disk. Saving a Skill must never execute
+    # its scripts; runtime execution remains a separate explicit action.
     import ast
     checks = []
     for relative, value in extra.items():
@@ -317,14 +348,32 @@ def manage(config, action: Action, skill_id: str, scope: Scope = "workspace", ag
             checks.append({"path": relative, "check": "bounded_utf8_and_scoped_path", "ok": True})
     checks += [{"path": relative, "check": "scoped_deletion", "ok": True} for relative in deleted]
     report = {"ok": True, "checks": checks, "blockers": [],
-              "warnings": ["Static validation only; proposed scripts have not been executed."]}
-    extra["validation_report.json"] = json.dumps(report)
-    proposal = create_proposal(config.paths, kind="skill_proposal", summary=summary or f"{action} Skill {skill_id}",
-        initial_state="pending_review", target=target, extra_files=extra,
-        rationale=f"Scope: {scope}; Agent: {agent_id or 'workspace'}. No live change has been applied.",
-        metadata={"skill_id": skill_id, "scope": scope, "agent_id": agent_id, "source_revision": revision, "deleted_files": deleted},
-        evidence_refs=[f"workspace:{target}#sha256={revision}"],
-        test_plan="Review SKILL.md and script changes; validate the staged candidate before approval.",
-        rollback="Use the proposal's existing rollback snapshot after an approved apply.")
-    return {"ok": True, "proposal": proposal.asdict(), "applied": False,
-            "next_action": "Review and validate the proposal in Action Inbox before applying"}
+              "warnings": ["Static validation only; Skill scripts were not executed during save."]}
+
+    for relative in deleted:
+        _safe(config.paths.root, relative).unlink(missing_ok=True)
+    if whole_skill_delete and delete_root is not None:
+        if delete_source == "workspace_installed":
+            remove_lock_entry(config.paths, skill_id)
+        for child in sorted((p for p in delete_root.rglob("*") if p.is_dir()),
+                            key=lambda p: len(p.parts), reverse=True):
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+        try:
+            delete_root.rmdir()
+        except OSError:
+            pass
+    for staged, value in extra.items():
+        relative = staged.removeprefix("after/")
+        path = _safe(config.paths.root, relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.unlink(missing_ok=True)
+        tmp.write_text(value, encoding="utf-8")
+        os.replace(tmp, path)
+
+    return {"ok": True, "applied": True, "action": action, "skill_id": skill_id,
+            "scope": scope, "agent_id": agent_id, "target": target,
+            "deleted_files": deleted, "validation": report}

@@ -13,7 +13,6 @@ from ..db.repositories import AgentSessionRepository
 from ..db.sqlite import connect
 from .session import SessionStore
 
-MAX_MESSAGE_CHARS = 16_000
 
 
 class HistoryMutationError(ValueError):
@@ -81,8 +80,6 @@ def mutate_message(paths, payload: dict, *, delete: bool = False) -> dict:
         raise HistoryMutationError("invalid_message_id")
     if not delete and (not isinstance(content, str) or not content.strip()):
         raise HistoryMutationError("content_required")
-    if not delete and len(content) > MAX_MESSAGE_CHARS:
-        raise HistoryMutationError("content_too_long")
     with _transaction(paths) as con:
         if is_session_deleted(con, sid):
             raise HistoryMutationError("session_deleted")

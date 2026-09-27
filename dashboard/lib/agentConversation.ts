@@ -1,14 +1,19 @@
+import { copy as i18nCopy } from "./i18n";
+import { toolSemantics, toolResultSummary } from "./toolSemantics";
+import { legacyToolValue } from "./toolOutputPresentation";
 import type { AgentDetail, AgentOperation, AgentWork } from "../components/chat/useAgentWork";
 import type { ChatResult } from "./chatResults";
 
 export const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const string = (value: unknown): string => typeof value === "string" ? value.trim() : "";
-export const working = (state: string) => ["running", "queued", "planned", "pending"].includes(state);
+export const working = (state: string) => ["running", "stopping", "queued", "planned", "pending"].includes(state);
 
 /** Providers may return JSON inside a text content block. Decode it, never display the transport envelope. */
 export function contentValue(value: unknown, depth = 0): unknown {
   if (depth > 6) return value;
   if (typeof value === "string") {
+    const legacy = legacyToolValue(value);
+    if (legacy !== value) return contentValue(legacy, depth + 1);
     const source = value.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/, "$1");
     if (/^[{[]/.test(source)) {
       try { return contentValue(JSON.parse(source), depth + 1); } catch { return value; }
@@ -16,27 +21,21 @@ export function contentValue(value: unknown, depth = 0): unknown {
     return value;
   }
   const obj = record(value);
+  if (obj.structuredContent && typeof obj.structuredContent === "object") return contentValue(obj.structuredContent, depth + 1);
+  if (obj.structured_content && typeof obj.structured_content === "object") return contentValue(obj.structured_content, depth + 1);
   if (obj.data && typeof obj.data === "object" && Object.keys(obj).every((k) => ["data", "ok", "success", "type"].includes(k))) return contentValue(obj.data, depth + 1);
   if (Object.keys(obj).length === 1 && "value" in obj) return contentValue(obj.value, depth + 1);
-  if (Array.isArray(obj.content) && obj.content.length > 0 && obj.content.every((p) => typeof record(p).text === "string")) {
+  // diff/code parts also have text. Flattening them destroys their type and turns
+  // Python comments into Markdown headings. Only plain text envelopes may join.
+  if (Array.isArray(obj.content) && obj.content.length > 0 && obj.content.every((p) => (!record(p).type || record(p).type === "text") && typeof record(p).text === "string")) {
     return contentValue(obj.content.map((p) => string(record(p).text)).join("\n\n"), depth + 1);
   }
   return value;
 }
 
-const labels: Record<string, [string, string]> = {
-  summary: ["结论", "Summary"], findings: ["发现", "Findings"], evidence: ["依据", "Evidence"],
-  sources: ["来源", "Sources"], results: ["结果", "Results"], recommendations: ["建议", "Recommendations"],
-  next_steps: ["下一步", "Next steps"], risks: ["风险", "Risks"], notes: ["补充说明", "Notes"],
-  path: ["文件", "File"], query: ["搜索内容", "Search query"], command: ["命令", "Command"],
-  stdout: ["输出", "Output"], stderr: ["错误输出", "Error output"], exit_code: ["退出状态", "Exit code"],
-  count: ["数量", "Count"], status: ["状态", "Status"], reason: ["原因", "Reason"], error: ["错误", "Error"],
-  title: ["标题", "Title"], description: ["说明", "Description"], name: ["名称", "Name"],
-  content: ["内容", "Content"], text: ["内容", "Text"], snippet: ["摘要", "Excerpt"],
-  url: ["链接", "Link"], link: ["链接", "Link"], files: ["文件", "Files"], items: ["条目", "Items"],
-};
+const labels: Record<string, string> = { summary: "copy.agentFieldLabels.001", findings: "copy.agentFieldLabels.002", evidence: "copy.agentFieldLabels.003", sources: "copy.agentFieldLabels.004", results: "copy.agentFieldLabels.005", recommendations: "copy.agentFieldLabels.006", next_steps: "copy.agentFieldLabels.007", risks: "copy.agentFieldLabels.008", notes: "copy.agentFieldLabels.009", path: "copy.agentFieldLabels.010", query: "copy.agentFieldLabels.011", command: "copy.agentFieldLabels.012", stdout: "copy.agentFieldLabels.013", stderr: "copy.agentFieldLabels.014", exit_code: "copy.agentFieldLabels.015", count: "copy.agentFieldLabels.016", status: "copy.agentFieldLabels.017", reason: "copy.agentFieldLabels.018", error: "copy.agentFieldLabels.019", title: "copy.agentFieldLabels.020", description: "copy.agentFieldLabels.021", name: "copy.agentFieldLabels.022", content: "copy.agentFieldLabels.023", text: "copy.agentFieldLabels.024", snippet: "copy.agentFieldLabels.025", url: "copy.agentFieldLabels.026", link: "copy.agentFieldLabels.027", files: "copy.agentFieldLabels.028", items: "copy.agentFieldLabels.029" };
 export function fieldLabel(key: string, zh: boolean): string {
-  return labels[key]?.[zh ? 0 : 1] || key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
+  return labels[key] ? i18nCopy(zh, labels[key]) : key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 const transportKeys = new Set(["kind", "type", "role", "done", "ok", "success", "attempt", "call_id", "tool_use_id", "tokens", "usage", "model", "provider"]);
 export function safeLink(value: unknown): string {
@@ -49,15 +48,15 @@ export function readableResult(value: unknown, zh: boolean, depth = 0): string {
   value = contentValue(value);
   if (value == null) return "";
   if (typeof value === "string") {
-    return /^(?:\{\s*"|\[\s*\{)/.test(value.trim()) ? (zh ? "返回了结构化数据，可在调试详情中查看原始记录。" : "Structured data returned. The original record is available in debug details.") : value;
+    return /^(?:\{\s*"|\[\s*\{)/.test(value.trim()) ? (i18nCopy(zh, "copy.lib_agentConversation.001")) : value;
   }
   if (typeof value === "number") return String(value);
-  if (typeof value === "boolean") return zh ? (value ? "是" : "否") : (value ? "Yes" : "No");
-  if (depth > 5) return zh ? "更多嵌套内容见调试详情。" : "Further nested data is available in debug details.";
+  if (typeof value === "boolean") return i18nCopy(zh, value ? "copy.lib_agentConversation.booleanTrue" : "copy.lib_agentConversation.booleanFalse");
+  if (depth > 5) return i18nCopy(zh, "copy.lib_agentConversation.002");
   if (Array.isArray(value)) {
     const visible = value.slice(0, 80).map((v) => readableResult(v, zh, depth + 1)).filter(Boolean);
     return visible.map((v) => `- ${v.replace(/\n/g, "\n  ")}`).join("\n")
-      + (value.length > 80 ? `\n\n${zh ? "仅展示前 80 项，完整记录见调试详情。" : "Showing the first 80 items. Full data is available in debug details."}` : "");
+      + (value.length > 80 ? `\n\n${i18nCopy(zh, "copy.lib_agentConversation.003")}` : "");
   }
   const obj = record(value);
   const parts: string[] = [];
@@ -75,7 +74,7 @@ export function readableResult(value: unknown, zh: boolean, depth = 0): string {
     const body = readableResult(item, zh, depth + 1);
     if (body) parts.push(`${depth === 0 ? "### " : "**"}${fieldLabel(key, zh)}${depth === 0 ? "" : "**"}\n\n${body}`);
   }
-  if (entries.length > 60) parts.push(zh ? "更多字段见调试详情。" : "Additional fields are available in debug details.");
+  if (entries.length > 60) parts.push(i18nCopy(zh, "copy.lib_agentConversation.004"));
   return parts.join("\n\n");
 }
 
@@ -105,20 +104,28 @@ export function agentRuns(row: AgentWork, detail: AgentDetail | null): AgentRun[
 }
 
 export type ToolStep = { key: string; event: AgentOperation; result?: AgentOperation; data: Record<string, unknown> };
+export function operationIdentity(data: Record<string, unknown>): string {
+  const call = string(data.call_id || data.tool_use_id || data.tool_call_id);
+  return call ? `${data.attempt || 1}:${call}` : "";
+}
 export function pairOperations(events: AgentOperation[]): ToolStep[] {
   const steps: ToolStep[] = [];
-  const pending = new Map<string, ToolStep>();
+  const calls = new Map<string, ToolStep>();
   for (const e of events) {
-    const call = string(e.data.call_id || e.data.tool_use_id || e.data.tool_call_id);
-    const key = `${e.data.attempt || 1}:${call}`;
-    if (e.kind === "tool_result" && call && pending.has(key)) {
-      const step = pending.get(key)!;
-      step.result = e; step.data = { ...step.data, ...e.data, payload: step.data.payload || e.data.payload };
-      pending.delete(key);
+    const key = ["tool_use", "tool_result"].includes(e.kind) ? operationIdentity(e.data) : "";
+    const previous = key ? calls.get(key) : undefined;
+    if (previous) {
+      if (e.kind === "tool_result") previous.result = e;
+      else previous.event = e;
+      // Result snapshots often omit action/input. Never erase the original request.
+      const start = previous.event.data, result = previous.result?.data || {};
+      previous.data = { ...start, ...result,
+        action: result.action || start.action, skill_id: result.skill_id || start.skill_id,
+        payload: { ...record(result.payload), ...record(start.payload || start.arguments) } };
     } else {
-      const step = { key: `${e.seq}`, event: e, data: e.data, ...(e.kind === "tool_result" ? { result: e } : {}) };
+      const step = { key: key || `${e.seq}`, event: e, data: e.data, ...(e.kind === "tool_result" ? { result: e } : {}) };
       steps.push(step);
-      if (e.kind === "tool_use" && call) pending.set(key, step);
+      if (key) calls.set(key, step);
     }
   }
   return steps;
@@ -127,16 +134,16 @@ export function pairOperations(events: AgentOperation[]): ToolStep[] {
 export function toolPresentation(step: ToolStep, runState: string, zh: boolean) {
   const d = step.data, payload = record(d.payload || d.arguments), result = record(contentValue(d.result));
   const name = string(d.action || d.skill_id || d.name).toLowerCase();
-  const failed = d.ok === false || result.ok === false || result.success === false || Boolean(d.error || result.error) || (typeof result.exit_code === "number" && result.exit_code !== 0);
-  const pending = !step.result && working(runState) && !failed;
-  const state = failed ? (zh ? "失败" : "Failed") : pending ? (zh ? "进行中" : "Running")
-    : step.result ? (d.ok === true ? (zh ? "完成" : "Done") : (zh ? "已返回" : "Returned")) : (zh ? "未收到返回" : "No response recorded");
-  const family = /todo|plan/.test(name) ? "plan" : /message/.test(name) ? "message"
-    : /search|grep|glob/.test(name) ? "search" : /read|fetch|view|list_dir/.test(name) ? "read"
-    : /edit|write|patch|create/.test(name) ? "edit" : /shell|bash|exec|command/.test(name) ? "shell" : "tool";
-  const names: Record<string, [string, string]> = { search: ["搜索", "Search"], read: ["读取", "Read"], edit: ["修改", "Edit"], shell: ["运行命令", "Run command"], message: ["发送协作消息", "Send collaborator message"], plan: ["更新计划", "Update plan"], tool: ["执行操作", "Run operation"] };
-  const subject = string(payload.description || payload.query || payload.search_query || payload.path || payload.file_path || payload.file || payload.url || payload.command || payload.pattern || payload.task) || name.replace(/_/g, " ");
-  return { name, family, subject, title: names[family][zh ? 0 : 1], state, failed, pending, payload, result };
+  const status = string(result.status || result.state || d.status).toLowerCase();
+  const rawResult = record(d.result);
+  const failed = d.ok === false || rawResult.ok === false || rawResult.success === false || rawResult.isError === true || result.isError === true || result.ok === false || result.success === false || Boolean(d.error || rawResult.error || result.error) || ["failed","error","timed_out"].includes(status) || (typeof result.exit_code === "number" && result.exit_code !== 0);
+  const waiting = !failed && (/awaiting_(approval|input)|pending_approval|requires_approval/.test(status) || !step.result && ["awaiting_approval","awaiting_input","blocked"].includes(runState));
+  const pending = !step.result && working(runState) && !failed && !waiting;
+  const preparing = pending && d.phase === "input_streaming";
+  const state = failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : waiting ? (zh ? "等待确认" : "Awaiting confirmation") : preparing ? (zh ? "准备参数" : "Preparing input") : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
+    : step.result ? (d.ok === true ? (i18nCopy(zh, "copy.lib_agentConversation.007")) : (i18nCopy(zh, "copy.lib_agentConversation.008"))) : (i18nCopy(zh, "copy.lib_agentConversation.009"));
+  const semantic = toolSemantics(name, payload, zh);
+  return { name, ...semantic, state, failed, pending, waiting, preparing, payload, result, summary: toolResultSummary(result, zh) };
 }
 
 export function childResult(row: AgentWork, output: unknown, attempt: number, zh: boolean): ChatResult {

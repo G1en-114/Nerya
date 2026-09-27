@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import inspect
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -156,7 +157,9 @@ class MarketOrderExecutor(Executor):
                 plan_id=self.run.plan_id,
                 reservation_id=candidate.reservation_id or None,
                 executor_id=self.run.executor_id,
-                meta={"resized": candidate.resized, "fee_estimate_usd": candidate.estimated_fee_usd},
+                meta={"resized": candidate.resized, "fee_estimate_usd": candidate.estimated_fee_usd,
+                      "order_query": dict(candidate.meta.get("order_query") or {}),
+                      "protects_rule": candidate.meta.get("protects_rule")},
             )
         else:
             order = existing
@@ -194,6 +197,15 @@ class MarketOrderExecutor(Executor):
 
         candidate = self._candidate()
         venue_mode = profile.mode
+        if order.filled_size > 0:
+            self._maybe_attach_protection()
+        if order.state == "cancel_requested" or (
+            not order.is_terminal and "cancel_requested" in (order.meta or {}).get("notes", [])
+        ):
+            self.on_cancel()
+            order = tracker.get(order_id)
+            if not order.is_terminal:
+                return False
 
         # If we've already reached a terminal order state, finalize.
         if order.state == "filled":
@@ -247,117 +259,13 @@ class MarketOrderExecutor(Executor):
         return False
 
     def on_cancel(self) -> None:
-        tracker = self._tracker()
-        try:
-            profile = get_account_profile(self.paths, self.run.account_id)
-        except Exception:
-            profile = None
-        registry = None
-        conn = None
-        # Reservations that must stay ACTIVE after this cancel (R3T1):
-        # when the venue keeps filling (partial fill) or the cancel
-        # outcome is still unknown (R3T2), releasing here orphans the
-        # capital while the order is still live — the poller's
-        # completion path settles the reservation instead.
-        keep_reserved: set[str] = set()
-        # Resolve the connector once for live/canary modes so we can
-        # actually cancel at the venue instead of only flipping local state.
-        if profile is not None and profile.mode in ("live", "canary"):
-            try:
-                from ...connectors import ConnectorRegistry
-                registry = ConnectorRegistry(workspace=self.paths.root)
-                legacy_account = profile.to_connector_account()
-                conn = registry.get(profile.id, legacy_account.connector_cfg())
-            except Exception as exc:  # pragma: no cover - defensive
-                log.warning("cancel: connector unavailable for %s: %s", self.run.account_id, exc)
-                conn = None
-
-        for order_id in list(self.run.order_ids):
-            order = tracker.get(order_id)
-            if order is None or order.is_terminal:
-                continue
-            tracker.request_cancel(order_id)
-            # Paper / shadow: nothing to cancel at a venue.
-            if profile is None or profile.mode in ("paper", "shadow"):
-                tracker.confirm_cancel(order_id)
-                continue
-            # Live / canary: hit the venue's cancel endpoint. If the
-            # exchange already filled or rejected, the cancel fails and
-            # we leave the order state honest (not "canceled").
-            if conn is None:
-                tracker.update_state(order_id, "failed", payload={"reason": "cancel_connector_unavailable"})
-                continue
-            try:
-                conn.cancel_order(
-                    market=order.market,
-                    order_id=order.exchange_order_id or order.order_id,
-                )
-                tracker.confirm_cancel(order_id)
-            except Exception as exc:
-                log.warning("cancel: venue cancel failed for order %s: %s", order_id, exc)
-                # Re-fetch to learn the true state — the order may have
-                # filled between our request and the cancel attempt.
-                try:
-                    ack = conn.get_order(
-                        market=order.market,
-                        order_id=order.exchange_order_id or order.order_id,
-                    )
-                    status = (getattr(ack, "status", "") or "").lower()
-                    if status in ("filled", "closed"):
-                        # R2B1: a cancel raced with a *partial* fill —
-                        # stay non-terminal so the remainder keeps being
-                        # polled instead of going filled prematurely.
-                        ack_filled = float(getattr(ack, "filled", None) or 0.0)
-                        if self._fill_completes_order(order, ack_filled):
-                            tracker.update_state(order_id, "filled")
-                            # R2B6: the fill really happened, so consume
-                            # the reservation instead of letting the
-                            # release below free capital for a position
-                            # that is now open.
-                            store = CapitalReservationStore(self.paths)
-                            for rid in self.run.reservation_ids:
-                                store.consume(rid)
-                        else:
-                            # R3T1: the venue keeps filling the remainder
-                            # after this run goes terminal — do NOT
-                            # release its reservation here. The
-                            # background poller drives the order to
-                            # ``filled`` and consumes the reservation
-                            # (same id: the tracker row carries it).
-                            keep_reserved.update(self.run.reservation_ids)
-                            tracker.update_state(order_id, "partially_filled")
-                    elif status in ("canceled", "cancelled"):
-                        tracker.confirm_cancel(order_id)
-                    elif status in ("rejected", "expired"):
-                        # R3T2: definitive venue outcomes are recorded as
-                        # themselves, not as a local ``failed``.
-                        tracker.update_state(
-                            order_id, status,  # type: ignore[arg-type]
-                            payload={"reason": f"cancel_failed:{exc}"},
-                        )
-                    else:
-                        # R3T2: the cancel failed but the re-fetch shows
-                        # the order still live (open / partial / unknown
-                        # status). ``failed`` is terminal and would stop
-                        # polling while the venue order may still fill —
-                        # stay non-terminal in ``cancel_requested`` and
-                        # let the poller drive a real terminal state.
-                        keep_reserved.update(self.run.reservation_ids)
-                        tracker.annotate(order_id, f"cancel_failed_still_polling:{exc}")
-                except Exception as refetch_exc:
-                    # R3T2: BOTH the cancel and the re-fetch failed
-                    # (transient errors) — the venue outcome is unknown,
-                    # so a terminal ``failed`` here orphans a possibly
-                    # live order + its fill. Stay ``cancel_requested``
-                    # (non-terminal) with a note; the poller keeps
-                    # driving it and settles the reservation when the
-                    # venue reports a real terminal state.
-                    keep_reserved.update(self.run.reservation_ids)
-                    tracker.annotate(
-                        order_id,
-                        f"cancel_failed_still_polling:{exc};refetch:{refetch_exc}",
-                    )
-        self._release_reservations(skip=keep_reserved or None)
+        from ...core.config import load_config
+        from ..cancellation import cancel_tracked_order
+        config = load_config(self.paths.root)
+        for order_id in self.run.order_ids:
+            cancel_tracked_order(config, order_id, strategy_id=self.run.strategy_id, executor_locked=True)
+        # Unfilled requests keep their reservations while cancellation is
+        # pending; the common cancel/poll path settles only venue-confirmed states.
 
     # ------------------------------------------------------------------
     # Helpers
@@ -617,6 +525,22 @@ class MarketOrderExecutor(Executor):
         # bracket ids come back on the ack (``attached_bracket_order_ids``)
         # and are recorded by ``_maybe_attach_protection`` for accounting.
         sl_price, tp_price = self._native_bracket_levels(candidate)
+        protection_kwargs = {}
+        if hasattr(conn, "protection_capabilities"):
+            protection_kwargs = {
+                "protection_mode": str((self.run.config_json.get("protection") or {}).get("mode") or "hybrid"),
+                "protection_kind": candidate.meta.get("protection_kind"),
+                "managed_protection": bool(self.run.config_json.get("protection")),
+            }
+            if sl_price is not None or tp_price is not None:
+                self.run.result_json["protection_routes"] = conn.protection_capabilities(
+                    candidate.market, order_type=candidate.order_type, side=candidate.side,
+                    legs=[k for k,v in (("stop_loss",sl_price),("take_profit",tp_price)) if v is not None],
+                )
+                from .orchestrator import ExecutorOrchestrator
+                from ...core.config import load_config
+                with closing(ExecutorOrchestrator(load_config(self.paths.root))) as orch:
+                    orch._persist(self.run)
 
         try:
             ack = self._place_live_order(
@@ -640,6 +564,7 @@ class MarketOrderExecutor(Executor):
                 # mark the BudgetChecker stashed; connectors that don't
                 # accept the kwarg never see it (signature-filtered).
                 reference_price=_reference_mark(candidate),
+                **protection_kwargs,
             )
         except NotImplementedError as exc:
             tracker.mark_rejected(order_id, reason=f"unsupported:{exc}")
@@ -663,6 +588,9 @@ class MarketOrderExecutor(Executor):
             return
 
         tracker.mark_submitted(order_id, exchange_order_id=getattr(ack, "order_id", None))
+        routes = (getattr(ack, "raw", {}) or {}).get("nerya_protection_routes")
+        if routes:
+            self.run.result_json["protection_routes"] = routes
         # Record any exchange-native bracket order ids so the protection
         # executor / reconciliation can track them. Stored on the run's
         # result_json (persisted) and read by ``_maybe_attach_protection``.
@@ -785,6 +713,7 @@ class MarketOrderExecutor(Executor):
                 ack = conn.get_order(
                     market=order.market,
                     order_id=order.exchange_order_id or order.order_id,
+                    **({"query_params": order.meta["order_query"]} if order.meta.get("order_query") else {}),
                 )
             except NotImplementedError:
                 # Connector cannot poll — assume the ack on submit was final.
@@ -798,7 +727,10 @@ class MarketOrderExecutor(Executor):
                         ack = adopted
                         order = tracker.get(order_id) or order
                     else:
-                        tracker.mark_not_found(order_id)
+                        if order.meta.get("protects_rule"):
+                            tracker.annotate(order_id, "protective_order_query_unresolved")
+                        else:
+                            tracker.mark_not_found(order_id)
                         return None
                 else:
                     # Transport / auth / unknown errors must not push a
@@ -813,6 +745,10 @@ class MarketOrderExecutor(Executor):
         ack_status = (getattr(ack, "status", None) or "").lower()
         if ack_filled > order.filled_size + 1e-12:
             extra = ack_filled - order.filled_size
+            fill_price=float(getattr(ack,'avg_price',None) or order.price or 0)
+            if (getattr(ack,'raw',{}) or {}).get('prediction_market'):
+                cumulative=float(ack.raw['cumulative_notional'])
+                fill_price=(cumulative-float(order.avg_price or 0)*order.filled_size)/extra
             # B2: ``ack.fee_usd`` is the venue's *cumulative* order fee —
             # only the not-yet-recorded increment may be added.
             fee_usd = max(
@@ -821,11 +757,12 @@ class MarketOrderExecutor(Executor):
             )
             fill = tracker.record_fill(
                 order_id=order_id,
-                price=float(getattr(ack, "avg_price", None) or order.price or 0.0),
+                price=fill_price,
                 size_base=extra,
                 fee_usd=fee_usd,
                 source="live" if profile.mode in ("live", "canary") else "shadow",
                 cumulative_filled=ack_filled,
+                meta={'fee_status':(getattr(ack,'raw',{}) or {}).get('fee_status','reported')},
             )
             if fill is not None:
                 # Mirror the incremental fill into PositionBook atomically.
@@ -871,6 +808,7 @@ class MarketOrderExecutor(Executor):
                 order_id=order_id,
                 fill_id=getattr(fill, "fill_id", None),
             )
+            self._maybe_attach_protection()
         except Exception:
             # Must never break the trading path — reconciliation will
             # surface the drift. The tracker already has the fill.
@@ -879,11 +817,9 @@ class MarketOrderExecutor(Executor):
     def _native_bracket_levels(self, candidate: OrderCandidate) -> tuple[float | None, float | None]:
         """Derive absolute SL/TP prices from the plan's protection rule.
 
-        The connector forwards these to the venue as native
-        ``stopLossPrice`` / ``takeProfitPrice`` so the bracket rests on
-        the exchange — surviving a process crash. Only ``price``-type
-        levels translate directly; ``pct`` levels are left to the soft
-        protection executor (the fallback). Returns ``(sl, tp)`` absolutes.
+        The connector uses CCXT's attached stopLoss/takeProfit objects.
+        Price and percentage levels become absolute prices at the entry
+        reference; other rules continue through the local executor.
         """
         plan_protection = (self.run.config_json or {}).get("protection")
         if not isinstance(plan_protection, dict):
@@ -902,6 +838,9 @@ class MarketOrderExecutor(Executor):
                     sl_price = ref * (1.0 - pct) if 0 < pct < 1 else None
                 else:
                     sl_price = ref * (1.0 + pct) if 0 < pct < 1 else None
+            elif str(sl.get("type")) == "atr" and ref > 0:
+                distance = float(sl.get("value") or 0.0)
+                sl_price = ref - distance if candidate.side == "buy" else ref + distance
         tp = plan_protection.get("take_profit")
         if isinstance(tp, dict):
             if str(tp.get("type")) == "price":
@@ -927,10 +866,14 @@ class MarketOrderExecutor(Executor):
 
     def _finalize(self, *, filled: bool, reason: str | None = None) -> bool:
         store = CapitalReservationStore(self.paths)
+        tracker = self._tracker()
+        has_fills = any((order := tracker.get(oid)) is not None and order.filled_size > 0
+                        for oid in self.run.order_ids)
+        if has_fills:
+            self._maybe_attach_protection()
         if filled:
             for rid in self.run.reservation_ids:
                 store.consume(rid)
-            self._maybe_attach_protection()
             self.transition("done", close_type="filled")
         elif reason == "canceled":
             # IOC/FOK and post-only paper orders are valid terminal
@@ -939,12 +882,18 @@ class MarketOrderExecutor(Executor):
             # distinguish "not filled because canceled" from a risk or
             # connector failure, while still releasing any reservation.
             for rid in self.run.reservation_ids:
-                store.release(rid)
+                if has_fills:
+                    store.consume(rid)
+                else:
+                    store.release(rid)
             self.store_result({"reason": "canceled"})
             self.transition("canceled", close_type="order_canceled")
         else:
             for rid in self.run.reservation_ids:
-                store.release(rid)
+                if has_fills:
+                    store.consume(rid)
+                else:
+                    store.release(rid)
             self.store_result({"reason": reason or "not_filled"})
             self.transition("failed", close_type="failed")
         return True
@@ -974,6 +923,8 @@ class MarketOrderExecutor(Executor):
         if not plan_protection:
             return
         candidate = self._candidate()
+        if candidate.reduce_only:
+            return
         book = PositionBook(self.paths)
         position = book.get_open(
             account_id=candidate.account_id,
@@ -981,6 +932,7 @@ class MarketOrderExecutor(Executor):
             market=candidate.market,
         )
         if position is None:
+            book.close()
             return
 
         from ..order_intents import (
@@ -1000,19 +952,15 @@ class MarketOrderExecutor(Executor):
         # crash). Otherwise soft_runtime — the protection executor
         # evaluates locally on each tick.
         exchange_brackets = dict((self.run.result_json or {}).get("exchange_bracket_order_ids") or {})
-        has_native_bracket = bool(exchange_brackets)
         declared_mode = str(plan_protection.get("mode") or "soft_runtime")
-        # Promote soft_runtime to exchange_armed when the venue actually
-        # returned bracket ids; keep explicit hybrid/hard as declared.
-        if has_native_bracket and declared_mode == "soft_runtime":
-            declared_mode = "exchange_armed"
+        share = book.get_share(account_id=candidate.account_id, strategy_id=candidate.strategy_id, market=candidate.market)
         rule = ProtectionRule(
             position_id=position.position_id,
             executor_id=self.run.executor_id,
             strategy_id=candidate.strategy_id,
             account_id=candidate.account_id,
             market=candidate.market,
-            side=position.side,
+            side=share.side,
             mode=declared_mode,  # type: ignore[arg-type]
             stop_loss=StopLossSpec(**sl) if isinstance(sl, dict) else None,
             take_profit=TakeProfitSpec(**tp) if isinstance(tp, dict) else None,
@@ -1022,30 +970,66 @@ class MarketOrderExecutor(Executor):
             trigger_source=str(plan_protection.get("trigger_source") or "mark"),  # type: ignore[arg-type]
             status="armed",
             notes=str(plan_protection.get("notes") or ""),
+            native={
+                "routes": dict(self.run.result_json.get("protection_routes") or {}),
+                "connector_params": self._connector_extra_params() or {},
+                "entry_executor_id": self.run.executor_id,
+            },
         )
+        from .orchestrator import ExecutorOrchestrator
+        from ...core.config import load_config
+        from ..protection_store import activate_protection
+
+        # Repeated partial fills and the poller must reuse this order's rule.
+        rule.protection_id = f"prt_{self.run.executor_id}"
         store = ProtectionStore(self.paths)
-        store.upsert(rule)
-        if has_native_bracket:
-            store.attach_exchange_orders(rule.protection_id, exchange_brackets)
-            rule.status = "exchange_armed"
-        book.attach_protection(position.position_id, rule.protection_id)
-        # Spin up a long-lived protection executor so the orchestrator
-        # can restart-recover it. The executor monitors the position and
-        # handles the soft-fallback path even when the venue has native
-        # brackets (hybrid safety).
-        try:
-            from .orchestrator import ExecutorOrchestrator
-            from ...core.config import load_config
-            orch = ExecutorOrchestrator(load_config(self.paths.root))
-            orch.create_position_protection(rule=rule, position_id=position.position_id)
-            orch.close()
-        except Exception:
-            log.exception("could not persist protection executor for position %s", position.position_id)
+        existing = store.get(rule.protection_id)
+        if existing is not None and existing.status != "pending":
+            # Do not reset trailing/partial-exit progress or revive a rule
+            # replaced explicitly by the operator.
+            if existing.status in ("released", "triggered", "failed"):
+                store.close()
+                book.close()
+                return
+            if exchange_brackets:
+                store.attach_exchange_orders(existing.protection_id, exchange_brackets)
+                existing = store.get(existing.protection_id)
+            if rule.native.get("routes") and not existing.native.get("routes"):
+                existing.native.update(rule.native)
+                store.upsert(existing)
+            with closing(ExecutorOrchestrator(load_config(self.paths.root))) as orch:
+                orch.create_position_protection(rule=existing, position_id=position.position_id)
+            rule = existing
+        else:
+            rule.exchange_order_ids = exchange_brackets
+            rule = activate_protection(load_config(self.paths.root), rule)
+        store.close()
+        book.close()
         self.store_result({
             "protection_id": rule.protection_id,
             "position_id": position.position_id,
             "exchange_bracket_order_ids": exchange_brackets,
         })
+        if "standalone" in (rule.native.get("routes") or {}).values():
+            from .position_protection import PositionProtectionExecutor
+            # Place the first protection generation in the fill turn, without
+            # waiting for the next scheduler interval. The normal executor lock
+            # prevents the background loop from issuing the same generation.
+            with closing(ExecutorOrchestrator(load_config(self.paths.root))) as orch:
+                run = orch.get(rule.executor_id)
+                if run is not None:
+                    orch.step_executor(PositionProtectionExecutor(run, self.paths))
+
+
+def ensure_order_protection(config, order) -> None:
+    """Arm protection on the first fill, including fills observed by the poller."""
+    from .orchestrator import ExecutorOrchestrator
+    if not order.executor_id or order.filled_size <= 0:
+        return
+    with closing(ExecutorOrchestrator(config)) as orch:
+        run = orch.get(order.executor_id)
+        if run is not None and run.kind == "market_order":
+            MarketOrderExecutor(run, config.paths)._maybe_attach_protection()
 
 
 def _candidate_from_payload(payload: dict[str, Any]) -> OrderCandidate:

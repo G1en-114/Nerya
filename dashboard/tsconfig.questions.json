@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.json","compilerOptions":{"tsBuildInfoFile":".next-questions-review/typescript.tsbuildinfo"},"include":["next-env.d.ts","app/**/*.ts","app/**/*.tsx","components/**/*.ts","components/**/*.tsx","lib/**/*.ts","messages/**/*.ts",".next-questions-review/types/**/*.ts"],"exclude":["node_modules","tests"]}

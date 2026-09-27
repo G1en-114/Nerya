@@ -1,4 +1,5 @@
 import { callApi, invalidateReadCache } from "./clientApi";
+import type { StrategyBundle, StrategyExport } from "./strategyTransfer";
 import type { Verification } from "./workflowVerification";
 import type { WorkflowProposalRequest, WorkflowSaveResult, WorkflowSummary, WorkflowTemplate, WorkflowView } from "./workflowTypes";
 
@@ -11,6 +12,19 @@ function checked<T extends { ok: boolean; error?: string }>(value: T): T {
   return value;
 }
 export const workflowApi = {
+  async export(strategyId: string, proposalId?: string | null, revision?: string) {
+    const query = new URLSearchParams({ strategy_id: strategyId });
+    if (proposalId) query.set("proposal_id", proposalId);
+    if (revision) query.set("base_revision", revision);
+    return checked(await callApi<StrategyExport>(`/strategies/runtime/workflow/export?${query}`));
+  },
+  async import(bundle: StrategyBundle, strategyId: string) {
+    const out = checked(await callApi<WorkflowSaveResult>("/strategies/runtime/workflow/import", {
+      method: "POST", body: { bundle, strategy_id: strategyId },
+    }));
+    invalidateReadCache();
+    return out;
+  },
   async list() {
     return checked(await callApi<{ ok: boolean; error?: string; workflows: WorkflowSummary[]; total: number }>("/strategies/runtime/workflows"));
   },

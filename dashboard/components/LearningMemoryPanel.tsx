@@ -7,12 +7,12 @@ import { Empty, ErrorBanner, LoadingState } from "./Page";
 import { ChoiceSelect } from "./ChoiceSelect";
 import { SearchField } from "./ListControls";
 import { ChevronRightIcon, PlusIcon } from "./icons";
-import { callApi, clientApi } from "../lib/clientApi";
+import { callApi } from "../lib/clientApi";
 import { confirm, prompt, toast } from "../lib/dialogs";
 import ui from "./learning.module.css";
 
-type Domain = { scope: "global" | "strategy" | "workflow"; strategy_id: string; workflow_id: string };
-type Memory = Domain & { memory_id: string; stable_key: string; category: string; content: string; source_ref: string; evidence_refs: string[]; updated_at: number };
+type Domain = { scope: "global" | "strategy" | "workflow" | "session"; strategy_id: string; workflow_id: string; session_id?: string };
+type Memory = Domain & { memory_id: string; stable_key: string; category: string; content: string; source_ref: string; evidence_refs: string[]; updated_at: number; source_session_id?: string; source_turn_id?: string };
 type Result = { ok: boolean; error?: string; skip_reason?: string };
 const GLOBAL: Domain = { scope: "global", strategy_id: "", workflow_id: "" };
 
@@ -23,6 +23,7 @@ export function LearningMemoryPanel() {
   const [domain, setDomain] = useState<Domain>(GLOBAL);
   const [query, setQuery] = useState("");
   const [records, setRecords] = useState<Memory[]>([]);
+  const [recent, setRecent] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,12 +51,12 @@ export function LearningMemoryPanel() {
     const request = ++generation.current;
     setLoading(true); setError(null);
     try {
-      const response = await callApi<Result & { records: Memory[] }>("/memory/records", {
+      const response = await callApi<Result & { records: Memory[]; recent_records?: Memory[] }>("/memory/records", {
         method: "POST", body: { ...domain, query: queryRef.current, limit: 100 },
       });
       if (request !== generation.current) return;
       if (!response.ok) throw new Error(response.error || "memory_read_failed");
-      setRecords(response.records);
+      setRecords(response.records); setRecent(response.recent_records || []);
     } catch (e) {
       if (request === generation.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -153,16 +154,18 @@ export function LearningMemoryPanel() {
 
   function domainLabel(item: Domain) {
     if (item.scope === "global") return text("copy.components_LearningMemoryPanel.015");
+    if (item.scope === "session") return (zh ? "会话 · " : "Session · ") + item.session_id;
     if (item.scope === "strategy") return text("copy.components_LearningMemoryPanel.016") + item.strategy_id;
     const workflow = item.workflow_id === "execution" ? text("copy.components_LearningMemoryPanel.017") : item.workflow_id === "evolution" ? text("copy.components_LearningMemoryPanel.018") : item.workflow_id;
     return [item.strategy_id || text("copy.components_LearningMemoryPanel.019"), workflow].join(" / ");
   }
 
   return <div className={ui.root}>
+    <MemoryPolicy />
     <div className={ui.toolbar}>
       <div className={ui.scope}>
         <ChoiceSelect className="w-full justify-between" aria-label={text("copy.components_LearningMemoryPanel.020")} value={JSON.stringify(domain)} disabled={busy || draftOpen || domainsLoading || Boolean(domainError)}
-          onValueChange={(value) => { setRecords([]); setDomain(JSON.parse(value) as Domain); }}>
+          onValueChange={(value) => { setRecords([]); setRecent([]); setDomain(JSON.parse(value) as Domain); }}>
           {domains.map((item) => <option key={JSON.stringify(item)} value={JSON.stringify(item)}>{domainLabel(item)}</option>)}
         </ChoiceSelect>
       </div>
@@ -198,6 +201,12 @@ export function LearningMemoryPanel() {
       </div>
     </form>}
 
+    {!loading && !error && !domainError && !records.length && recent.length > 0 && <details className={ui.source}>
+      <summary>{zh ? "没有词项命中，浏览此范围最近记录" : "No keyword matches — browse recent records in this scope"}</summary>
+      {recent.map((record) => <p key={record.memory_id}>{record.content}</p>)}
+      <button className={ui.textButton} onClick={() => setQuery("")}>{zh ? "查看此范围全部记录" : "View all records in this scope"}</button>
+    </details>}
+    {domain.scope === "session" && domain.session_id && <MemoryUsage key={domain.session_id} sessionId={domain.session_id} />}
     <div className={ui.list} aria-busy={loading || domainsLoading}>
       {loading || domainsLoading ? <LoadingState rows={3} /> : error || domainError ? null : !records.length ? <Empty
         title={query ? text("copy.components_LearningMemoryPanel.035") : text("copy.components_LearningMemoryPanel.036")}
@@ -221,7 +230,7 @@ export function LearningMemoryPanel() {
             <summary>{text("copy.components_LearningMemoryPanel.041")}</summary>
             <p>{record.source_ref || text("copy.components_LearningMemoryPanel.042")}</p>
             {record.evidence_refs.map((ref) => <p key={ref}>{ref}</p>)}
-            {/^session:[A-Za-z0-9_-]+$/.test(record.source_ref)&&<a className="inline-flex min-h-11 items-center underline" href={"/chat/"+encodeURIComponent(record.source_ref.slice(8))}>{zh?"查看来源任务":"View source task"}</a>}
+            {record.source_session_id && <a className="inline-flex min-h-11 items-center underline" href={"/chat/" + encodeURIComponent(record.source_session_id) + (record.source_turn_id ? "#turn-" + encodeURIComponent(record.source_turn_id) : "")}>{zh ? "查看来源回合" : "View source turn"}</a>}
             <p>{zh?"适用范围：":"Applies to: "}{record.scope}{record.strategy_id?" · "+record.strategy_id:""}{record.workflow_id?" · "+record.workflow_id:""}</p>
             <p>{text("copy.components_LearningMemoryPanel.043")}{record.stable_key || record.memory_id}</p>
           </details>
@@ -238,14 +247,18 @@ export function LearningMemoryPanel() {
   </div>;
 }
 
+type NotebookState = { entries: string[]; revision: string; sync_error?: boolean };
+type NotebookResponse = Result & { agent: NotebookState; operator: NotebookState };
+
 function GlobalNotes() {
   const zh = useLocale().startsWith("zh");
-  const [notes, setNotes] = useState<{ agent: string[]; operator: string[] } | null>(null);
+  const [notes, setNotes] = useState<NotebookResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => {
-    const data = await clientApi.memoryNotebookList();
-    setNotes({ agent: data.agent.entries, operator: data.operator.entries });
+    const data = await callApi<NotebookResponse>("/memory/notebook");
+    if (!data.ok) throw new Error(data.error || "notebook_read_failed");
+    setNotes(data); setError(null);
   }, []);
   useEffect(() => { void load().catch((e) => setError(String(e))); }, [load]);
 
@@ -260,28 +273,109 @@ function GlobalNotes() {
     }
     setBusy(true); setError(null);
     try {
-      const result = await clientApi.memoryNotebookMutate({ target, action, content, old_text: entry });
-      if (!result.ok) throw new Error(result.error || result.message || "notebook_update_failed");
+      const result = await callApi<Result>("/memory/notebook", { method: "POST", body: {
+        target, action, content, old_text: entry, expected_revision: notes?.[target].revision,
+      } });
+      if (!result.ok) throw new Error(result.error === "update_conflict"
+        ? (zh ? "记忆已被其他操作更新，请刷新后核对再修改。" : "Memory changed. Refresh and review before editing again.")
+        : result.error || "notebook_update_failed");
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   }
 
   return <>
-    {error && <ErrorBanner error={error} />}
-    <p className={ui.pinnedIntro}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.048")}</p>
+    {error && <ErrorBanner error={error} onRetry={() => void load().catch((e) => setError(String(e)))} />}
+    <p className={ui.pinnedIntro}>{zh ? "固定记忆与记录共用版本校验。改动从下一次上下文快照开始生效，已经生成的回合保留当时版本。" : "Pinned memory shares version checks with records. Changes apply to the next context snapshot; completed turns retain the versions used then."}</p>
     {notes ? <div className={ui.notes}>{(["agent", "operator"] as const).map((target) => <section key={target}>
       <div className={ui.noteHeader}>
         <h3>{target === "agent" ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.049")) : (i18nCopy(zh, "copy.components_LearningMemoryPanel.050"))}</h3>
-        <button className={ui.textButton} disabled={busy} onClick={() => void mutate(target, "add")}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.051")}</button>
+        <button className={ui.textButton} disabled={busy || notes[target].sync_error} onClick={() => void mutate(target, "add")}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.051")}</button>
       </div>
-      {notes[target].length ? notes[target].map((entry, i) => <div key={i} className={ui.note}>
+      {notes[target].sync_error && <ErrorBanner error={zh ? "文件与记录不同步。请先核对外部文件修改，当前写入已暂停。" : "File and records differ. Review external file changes before editing."} />}
+      {notes[target].entries.length ? notes[target].entries.map((entry, i) => <div key={i} className={ui.note}>
         <p>{entry}</p>
         <div className={ui.actions}>
-          <button className={ui.textButton} disabled={busy} onClick={() => void mutate(target, "replace", entry)}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.052")}</button>
-          <button className={ui.textButton} disabled={busy} onClick={() => void mutate(target, "remove", entry)}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.053")}</button>
+          <button className={ui.textButton} disabled={busy || notes[target].sync_error} onClick={() => void mutate(target, "replace", entry)}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.052")}</button>
+          <button className={ui.textButton} disabled={busy || notes[target].sync_error} onClick={() => void mutate(target, "remove", entry)}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.053")}</button>
         </div>
       </div>) : <p className={ui.noteEmpty}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.054")}</p>}
     </section>)}</div> : !error && <LoadingState />}
   </>;
+}
+
+
+type Policy = Result & { use_enabled: boolean; auto_save_enabled: boolean };
+function MemoryPolicy() {
+  const zh = useLocale().startsWith("zh");
+  const [policy, setPolicy] = useState<Policy | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    const result = await callApi<Policy>("/memory/policy");
+    if (!result.ok) throw new Error(result.error || "memory_policy_failed");
+    setPolicy(result); setError(null);
+  }, []);
+  useEffect(() => { void load().catch((e) => setError(String(e))); }, [load]);
+  async function toggle(key: "use_enabled" | "auto_save_enabled") {
+    if (!policy) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await callApi<Policy>("/memory/policy", { method: "POST", body: { [key]: !policy[key] } });
+      if (!result.ok) throw new Error(result.error || "memory_policy_failed");
+      setPolicy(result);
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
+  return <section className={ui.pinned}>
+    {error && <ErrorBanner error={error} onRetry={() => void load().catch((e) => setError(String(e)))} />}
+    {policy && <div className={ui.actions}>
+      <label><input type="checkbox" checked={policy.use_enabled} disabled={busy} onChange={() => void toggle("use_enabled")} /> {zh ? "使用记忆（自动注入与工具召回）" : "Use memory (injection and tool recall)"}</label>
+      <label><input type="checkbox" checked={policy.auto_save_enabled} disabled={busy} onChange={() => void toggle("auto_save_enabled")} /> {zh ? "自动保存回合与会话总结" : "Automatically save turn and session summaries"}</label>
+    </div>}
+    <p className={ui.hint}>{zh ? "下次调用起生效；关闭使用后仍可查看、纠错和删除。已生成的上下文不会被改写。" : "Applies to subsequent calls. Viewing, correction and deletion remain available when use is off. Existing context is retained."}</p>
+  </section>;
+}
+
+type UsageItem = { memory_id?: string; version?: string; category?: string; source_ref?: string; source_turn_id?: string; source_session_id?: string; reason?: string; truncated?: boolean };
+type UsageEvent = { ts: string; extra: { turn_id: string; budget_chars: number; used_chars: number; included: UsageItem[]; omitted: UsageItem[]; reason?: string; policy?: Policy } };
+function MemoryUsage({ sessionId }: { sessionId: string }) {
+  const zh = useLocale().startsWith("zh");
+  const [events, setEvents] = useState<UsageEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await callApi<Result & { events: UsageEvent[] }>("/memory/usage", { method: "POST", body: { session_id: sessionId } });
+      if (!result.ok) throw new Error(result.error || "memory_usage_failed");
+      setEvents(result.events); setError(null);
+    } catch (e) { setError(String(e)); }
+    finally { setLoading(false); }
+  }, [sessionId]);
+  useEffect(() => { void load(); }, [load]);
+  const reasons: Record<string, string> = {
+    budget: zh ? "超出预算" : "Over budget", use_disabled: zh ? "已关闭使用" : "Memory use disabled",
+    notebook_unreadable: zh ? "固定记忆无法读取" : "Notebook unreadable",
+    notebook_sync_conflict: zh ? "文件与记录不同步" : "File/record conflict",
+  };
+  return <details className={ui.source}>
+    <summary>{zh ? "本会话实际记忆使用" : "Actual memory use in this session"}</summary>
+    <button className={ui.textButton} disabled={loading} onClick={() => void load()}>{zh ? "刷新使用记录" : "Refresh usage"}</button>
+    {error && <ErrorBanner error={error} onRetry={() => void load()} />}
+    {loading ? <LoadingState rows={1} /> : !error && !events.length ? <p>{zh ? "暂无已记录的注入事件；这不代表历史回合未使用记忆。" : "No recorded injection events. Historical turns may still have used memory."}</p> : [...events].reverse().map((event, i) => <details key={event.extra.turn_id + i}>
+      <summary>{event.extra.turn_id} · {event.extra.used_chars}/{event.extra.budget_chars} {zh ? "字符" : "characters"}</summary>
+      {event.extra.policy && <p>{zh ? "当时策略：" : "Policy at this turn: "}{event.extra.policy.use_enabled ? (zh ? "使用开启" : "use enabled") : (zh ? "使用关闭" : "use disabled")} · {event.extra.policy.auto_save_enabled ? (zh ? "自动保存开启" : "auto save enabled") : (zh ? "自动保存关闭" : "auto save disabled")}</p>}
+      {event.extra.reason && <p>{reasons[event.extra.reason] || event.extra.reason}</p>}
+      {(["included", "omitted"] as const).map((kind) => <div key={kind}>
+        <h3>{kind === "included" ? (zh ? "实际注入" : "Injected") : (zh ? "省略" : "Omitted")} · {event.extra[kind].length}</h3>
+        {event.extra[kind].map((item, index) => <div key={(item.memory_id || "") + index} className={ui.note}>
+          <p>{item.category} {item.reason ? reasons[item.reason] || item.reason : item.truncated ? (zh ? "仅注入部分内容" : "Partial content") : ""}</p>
+          <p>{zh ? "版本：" : "Version: "}{item.version || item.memory_id}</p>
+          <p>{item.source_ref}</p>
+          {item.source_session_id && <a className="inline-flex min-h-11 items-center underline" href={"/chat/" + encodeURIComponent(item.source_session_id) + (item.source_turn_id ? "#turn-" + encodeURIComponent(item.source_turn_id) : "")}>{zh ? "查看来源回合" : "View source turn"}</a>}
+        </div>)}
+      </div>)}
+    </details>)}
+  </details>;
 }

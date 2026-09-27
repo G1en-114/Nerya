@@ -1,9 +1,8 @@
+import { getWorkspaceIdentity, subscribeWorkspaceIdentity, workspaceStorageKey } from "./workspaceIdentity";
+import { mergeStreamEvents, streamEventKey } from "./streamEvents";
 import type { ArtifactIndex, VerifierOutcome, ExecutionState } from "./workbench";
-// Chat thread model + localStorage persistence.
-//
-// Threads are stored entirely client-side — the backend `/agent/run_turn`
-// endpoint is stateless (every call builds its own context from the workspace
-// journals), so we just keep the rendered transcript locally for now.
+// Runtime commands and history are authoritative. This module stores only a
+// workspace-scoped rendering cache, never execution or ownership evidence.
 
 import type { ExternalCallTrace } from "./externalCalls";
 
@@ -193,7 +192,8 @@ export type LiveEvent = {
   elapsed_ms?: number | null;
   message?: string;
   text?: string;
-  step?: string;
+  // Native turn.step events carry structured thinking details; older traces use a label.
+  step?: string | Record<string, unknown>;
   status?: string;
   detail?: Record<string, unknown>;
   payload?: Record<string, unknown>;
@@ -238,6 +238,7 @@ export type AssistantMessage = {
 export type ChatMessage = UserMessage | AssistantMessage;
 
 export type ReasoningEffort =
+  | "inherit"
   | "off"
   | "minimal"
   | "low"
@@ -253,8 +254,9 @@ export type ChatModelOverride = {
   model_context_window?: ModelContextWindow;
 };
 
+export type WorkMode = "execute" | "plan" | "goal";
 export type ChatRunSettings = {
-  work_mode?: "execute" | "plan";
+  work_mode?: WorkMode;
   reasoning_effort: ReasoningEffort;
   permission_mode: PermissionMode;
   model_context_window: ModelContextWindow;
@@ -284,6 +286,8 @@ type LlmRouteLike = {
   model?: string | string[] | null;
   models?: string[] | null;
   context_window?: number | null;
+  context_length?: number | null;
+  reasoning_effort?: string | null;
 };
 
 type LlmTierLike = LlmRouteLike & {
@@ -325,6 +329,7 @@ function modelIdFromCatalogRow(row: Record<string, unknown>): string {
 function normaliseReasoningEffort(value: unknown): ReasoningEffort | undefined {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) return undefined;
+  if (["inherit", "default", "auto"].includes(raw)) return "inherit";
   if (raw === "none") return "off";
   if (raw === "extra_high" || raw === "extra-high" || raw === "max") return "xhigh";
   if (["off", "minimal", "low", "medium", "high", "xhigh"].includes(raw)) {
@@ -358,6 +363,9 @@ export function buildChatModelOptions({
     const reasoning = normaliseReasoningEffort(reasoningRaw);
     if (!tier || !provider) return;
     for (const model of splitModelValues(modelRaw)) {
+      const catalogRow = (models?.providers?.[provider] ?? []).find(row => modelIdFromCatalogRow(row) === model);
+      const windows = [contextWindowRaw, catalogRow?.context_window, catalogRow?.context_length]
+        .map(saneContextWindow).filter(value => value > 0);
       const exact = `${provider}:${model}:${tier}`;
       if (seenExact.has(exact)) continue;
       seenExact.add(exact);
@@ -370,19 +378,9 @@ export function buildChatModelOptions({
         model,
         source: "tier",
         reasoning_effort: reasoning,
-        model_context_window: saneContextWindow(contextWindowRaw),
+        model_context_window: windows.length ? Math.min(...windows) : undefined,
       });
     }
-  }
-
-  for (const row of tiers?.tiers ?? []) {
-    addTierOption(
-      row.tier,
-      row.provider,
-      row.models?.length ? row.models : row.model,
-      row.reasoning_effort,
-      row.context_window,
-    );
   }
 
   for (const row of config?.tiers ?? []) {
@@ -392,10 +390,15 @@ export function buildChatModelOptions({
         row.tier,
         route.provider,
         route.models?.length ? route.models : route.model,
-        row.reasoning_effort,
-        route.context_window ?? row.context_window,
+        route.reasoning_effort ?? row.reasoning_effort,
+        route.context_window ?? route.context_length ?? row.context_window ?? row.context_length,
       );
     }
+  }
+
+  for (const row of tiers?.tiers ?? []) {
+    addTierOption(row.tier, row.provider, row.models?.length ? row.models : row.model,
+      row.reasoning_effort, row.context_window ?? row.context_length);
   }
 
   for (const [providerRaw, rows] of Object.entries(models?.providers ?? {})) {
@@ -407,13 +410,14 @@ export function buildChatModelOptions({
       const providerModel = `${provider}:${model}`;
       if (seenProviderModel.has(providerModel)) continue;
       seenProviderModel.add(providerModel);
+      const windows = [row.context_window, row.context_length].map(saneContextWindow).filter(value => value > 0);
       options.push({
         key: `catalog:${provider}:${model}`,
         label: `${provider}/${model}`,
         provider,
         model,
         source: "catalog",
-        model_context_window: saneContextWindow(row.context_window),
+        model_context_window: windows.length ? Math.min(...windows) : undefined,
       });
     }
   }
@@ -462,15 +466,15 @@ const DEFAULT_PERMISSION_MODE: PermissionMode =
     : process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE === "default" ? "default" : "auto";
 
 export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
-  reasoning_effort: "off",
+  reasoning_effort: "inherit",
   permission_mode: DEFAULT_PERMISSION_MODE,
-  model_context_window: 1048576,
+  model_context_window: 0,
   model_tier: "",
   model_provider: "",
   model_id: "",
-  max_iterations: 120,
-  max_total_tool_calls: 400,
-  max_wall_seconds: 1800,
+  max_iterations: 0,
+  max_total_tool_calls: 0,
+  max_wall_seconds: 0,
 };
 
 export function uuid(): string {
@@ -481,7 +485,7 @@ export function uuid(): string {
 }
 
 function isBrowser() {
-  return typeof window !== "undefined" && typeof localStorage !== "undefined";
+  return typeof window !== "undefined" && typeof localStorage !== "undefined" && Boolean(getWorkspaceIdentity());
 }
 
 type TranscriptCacheIndexEntry = {
@@ -517,15 +521,17 @@ function compactThreadForHistory(thread: ChatThread): ChatThread {
   };
 }
 
+function scopedStorageKey(prefix: string) { return workspaceStorageKey(prefix + ":workspace:", getWorkspaceIdentity() || ""); }
+
 function transcriptCacheKey(id: string): string {
-  return `${TRANSCRIPT_CACHE_PREFIX}${id}`;
+  return workspaceStorageKey(TRANSCRIPT_CACHE_PREFIX, getWorkspaceIdentity() || "", id);
 }
 
 function loadTranscriptCacheIndex(): TranscriptCacheIndexEntry[] {
   if (!isBrowser()) return [];
   try {
     const parsed = JSON.parse(
-      localStorage.getItem(TRANSCRIPT_CACHE_INDEX_KEY) || "[]",
+      localStorage.getItem(scopedStorageKey(TRANSCRIPT_CACHE_INDEX_KEY)) || "[]",
     );
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((row): row is TranscriptCacheIndexEntry => {
@@ -545,7 +551,7 @@ function saveTranscriptCacheIndex(index: TranscriptCacheIndexEntry[]) {
   if (!isBrowser()) return;
   try {
     localStorage.setItem(
-      TRANSCRIPT_CACHE_INDEX_KEY,
+      scopedStorageKey(TRANSCRIPT_CACHE_INDEX_KEY),
       JSON.stringify(index.slice(0, MAX_TRANSCRIPT_CACHE_ENTRIES)),
     );
   } catch {
@@ -677,7 +683,7 @@ export function loadCachedThreadTranscript(
 export function loadThreads(): ChatThread[] {
   if (!isBrowser()) return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(scopedStorageKey(STORAGE_KEY));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -692,7 +698,7 @@ export function saveThreads(threads: ChatThread[]) {
   if (!isBrowser()) return;
   try {
     localStorage.setItem(
-      STORAGE_KEY,
+      scopedStorageKey(STORAGE_KEY),
       JSON.stringify(threads.filter(thread => !loadDeletedSessionIds().has(thread.id)).map(compactThreadForHistory)),
     );
   } catch {
@@ -723,13 +729,15 @@ export function subscribeThreadsChanged(cb: () => void): () => void {
   const handler = (event?: Event) => {
     if (event && event.type === "storage") {
       const key = (event as StorageEvent).key;
-      if (key && key !== STORAGE_KEY && key !== DELETED_SESSIONS_KEY) return;
+      if (key && key !== scopedStorageKey(STORAGE_KEY) && key !== scopedStorageKey(DELETED_SESSIONS_KEY)) return;
     }
     cb();
   };
+  const unsubscribeIdentity = subscribeWorkspaceIdentity(cb);
   window.addEventListener(THREADS_CHANGED_EVENT, handler as EventListener);
   window.addEventListener("storage", handler as EventListener);
   return () => {
+    unsubscribeIdentity();
     window.removeEventListener(THREADS_CHANGED_EVENT, handler as EventListener);
     window.removeEventListener("storage", handler as EventListener);
   };
@@ -744,7 +752,7 @@ export const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
 export function loadDeletedSessionIds(): Set<string> {
   if (!isBrowser()) return new Set();
   try {
-    const parsed = JSON.parse(localStorage.getItem(DELETED_SESSIONS_KEY) || "[]");
+    const parsed = JSON.parse(localStorage.getItem(scopedStorageKey(DELETED_SESSIONS_KEY)) || "[]");
     return new Set(
       Array.isArray(parsed)
         ? parsed.filter((id): id is string => typeof id === "string" && !!id)
@@ -761,7 +769,7 @@ export function rememberDeletedSession(id: string): Set<string> {
   if (isBrowser()) {
     try {
       localStorage.setItem(
-        DELETED_SESSIONS_KEY,
+        scopedStorageKey(DELETED_SESSIONS_KEY),
         JSON.stringify(Array.from(next).slice(-500)),
       );
     } catch {
@@ -787,13 +795,13 @@ export function deleteThreadLocally(id: string): ChatThread[] {
 
 export function loadActiveId(): string | null {
   if (!isBrowser()) return null;
-  return localStorage.getItem(ACTIVE_KEY);
+  return localStorage.getItem(scopedStorageKey(ACTIVE_KEY));
 }
 
 export function saveActiveId(id: string | null) {
   if (!isBrowser()) return;
-  if (id === null) localStorage.removeItem(ACTIVE_KEY);
-  else localStorage.setItem(ACTIVE_KEY, id);
+  if (id === null) localStorage.removeItem(scopedStorageKey(ACTIVE_KEY));
+  else localStorage.setItem(scopedStorageKey(ACTIVE_KEY), id);
 }
 
 function saneRunLimit(
@@ -819,11 +827,8 @@ function saneContextWindow(value: unknown): ModelContextWindow {
       : typeof value === "string"
         ? Number(value.replace(/_/g, ""))
         : NaN;
-  if (!Number.isFinite(raw)) return DEFAULT_CHAT_RUN_SETTINGS.model_context_window;
-  if (raw === 128000) return 131072;
-  if (raw === 256000) return 262144;
-  if (raw === 1000000) return 1048576;
-  return Math.max(4096, Math.min(16777216, Math.round(raw)));
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.max(1, Math.min(16777216, Math.floor(raw)));
 }
 
 function saneModelOverrides(value: unknown): Record<string, ChatModelOverride> | undefined {
@@ -836,7 +841,7 @@ function saneModelOverrides(value: unknown): Record<string, ChatModelOverride> |
     const override: ChatModelOverride = {};
     if (
       typeof effort === "string" &&
-      ["off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
+      ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
     ) {
       override.reasoning_effort = effort as ReasoningEffort;
     }
@@ -853,17 +858,17 @@ function saneModelOverrides(value: unknown): Record<string, ChatModelOverride> |
 export function loadRunSettings(): ChatRunSettings {
   if (!isBrowser()) return DEFAULT_CHAT_RUN_SETTINGS;
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
+    const raw = localStorage.getItem(scopedStorageKey(SETTINGS_KEY));
     if (!raw) return DEFAULT_CHAT_RUN_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<ChatRunSettings>;
     const effort = parsed.reasoning_effort;
     const mode = parsed.permission_mode;
     return {
       reasoning_effort:
-        effort && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
+        effort && ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
           ? effort
           : DEFAULT_CHAT_RUN_SETTINGS.reasoning_effort,
-      work_mode: parsed.work_mode === "plan" ? "plan" : "execute",
+      work_mode: parsed.work_mode === "plan" || parsed.work_mode === "goal" ? parsed.work_mode : "execute",
       permission_mode: mode === "yolo" || mode === "auto" || mode === "default" ? mode : DEFAULT_PERMISSION_MODE,
       model_context_window: saneContextWindow(parsed.model_context_window),
       model_tier:
@@ -878,20 +883,20 @@ export function loadRunSettings(): ChatRunSettings {
       max_iterations: saneRunLimit(
         parsed.max_iterations,
         DEFAULT_CHAT_RUN_SETTINGS.max_iterations,
-        1,
-        240,
+        0,
+        Number.MAX_SAFE_INTEGER,
       ),
       max_total_tool_calls: saneRunLimit(
         parsed.max_total_tool_calls,
         DEFAULT_CHAT_RUN_SETTINGS.max_total_tool_calls,
-        1,
-        1000,
+        0,
+        Number.MAX_SAFE_INTEGER,
       ),
       max_wall_seconds: saneRunLimit(
         parsed.max_wall_seconds,
         DEFAULT_CHAT_RUN_SETTINGS.max_wall_seconds,
-        10,
-        7200,
+        0,
+        Number.MAX_SAFE_INTEGER,
       ),
       evidence_contract:
         parsed.evidence_contract &&
@@ -908,7 +913,7 @@ export function loadRunSettings(): ChatRunSettings {
 export function saveRunSettings(settings: ChatRunSettings) {
   if (!isBrowser()) return;
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    localStorage.setItem(scopedStorageKey(SETTINGS_KEY), JSON.stringify(settings));
   } catch {
     // ignore quota errors; the in-memory setting still applies.
   }
@@ -976,6 +981,11 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
   const out: NativeBlockEnvelope[] = [];
   let textAccum = "";
   let textIdx: number | null = null;
+  const streamedText = new Map<string, number>();
+  const streamedThinking = new Map<string, number>();
+  const toolUseIndex = new Map<string, number>();
+  const toolResultIndex = new Map<string, number>();
+  const seenEvents = new Set<string>();
 
   function mergeStreamingText(current: string, piece: string): string {
     if (!current) return piece;
@@ -999,6 +1009,21 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
   const approvalIndex = new Map<string, number>();
   const subagentIndex = new Map<string, number>();
   const teamIndex = new Map<string, number>();
+
+  // 晚到图表/审批会插入时间线；所有身份索引必须一起移动，否则下一段文字会覆盖图表。
+  function spliceBlocks(start: number, count: number, ...items: NativeBlockEnvelope[]) {
+    const before = [...out];
+    out.splice(start, count, ...items);
+    const positions = new Map(out.map((env, index) => [env, index]));
+    for (const index of [streamedText, streamedThinking, toolUseIndex, toolResultIndex, approvalIndex, subagentIndex, teamIndex]) {
+      for (const [key, value] of index) {
+        const position = positions.get(before[value]);
+        if (position === undefined) index.delete(key);
+        else index.set(key, position);
+      }
+    }
+    if (textIdx !== null) textIdx = positions.get(before[textIdx]) ?? null;
+  }
 
   function asRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value)
@@ -1372,7 +1397,10 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
     return null;
   }
 
-  for (const ev of events) {
+  for (const ev of mergeStreamEvents(events)) {
+    const eventKey = streamEventKey(ev);
+    if (eventKey && seenEvents.has(eventKey)) continue;
+    if (eventKey) seenEvents.add(eventKey);
     if (ev.kind === "message.delta") {
       const piece =
         typeof ev.text === "string"
@@ -1380,7 +1408,16 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           : typeof ev.message === "string"
           ? ev.message
           : "";
-      if (!piece) continue;
+      if (typeof ev.stream_id === "string" && ev.stream_id) {
+        const index = streamedText.get(ev.stream_id);
+        const prior = index === undefined ? "" : String(out[index].block?.text || "");
+        const content = ev.mode === "replace" ? piece : prior + piece;
+        const block = { kind:"text", text:content, stream_id:ev.stream_id, stream_mode:ev.stream_mode, completed:ev.completed === true, index:index ?? out.length };
+        if (index === undefined) { streamedText.set(ev.stream_id,out.length); out.push({kind:"text",block}); }
+        else out[index] = {kind:"text",block};
+        continue;
+      }
+      if (!piece && ev.mode !== "replace") continue;
       if (textIdx === null) {
         textAccum = piece;
         const env: NativeBlockEnvelope = {
@@ -1390,7 +1427,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         textIdx = out.length;
         out.push(env);
       } else {
-        textAccum = mergeStreamingText(textAccum, piece);
+        textAccum = ev.mode === "replace" ? piece : ev.mode === "append" ? textAccum + piece : mergeStreamingText(textAccum, piece);
         const env = out[textIdx];
         if (env.block) {
           env.block = { ...env.block, text: textAccum };
@@ -1421,33 +1458,89 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           (detail && typeof detail.text === "string" && detail.text) ||
           (detail && typeof detail.reasoning === "string" && detail.reasoning) ||
           "";
-        out.push({
-          block: { kind: "thinking", text: String(text), index: out.length,
+        const streamId = String(ev.stream_id || detail?.stream_id || "");
+        const existing = streamId ? streamedThinking.get(streamId) : undefined;
+        const prior = existing === undefined ? "" : String(out[existing].block?.text || "");
+        const content = ev.mode === "replace" ? String(text) : prior + String(text);
+        const envelope: NativeBlockEnvelope = {
+          block: { kind: "thinking", text: content, index: existing ?? out.length,
+            stream_id: streamId || undefined, completed: ev.completed === true,
+            summary: detail?.summary, elapsed_ms: typeof step.wall_ms === "number" ? step.wall_ms : undefined,
             ...(detail?.retry && typeof detail.retry === "object" ? { retry: detail.retry } : {}),
           },
           kind: "thinking",
-        });
+        };
+        if (existing === undefined) {
+          if (streamId) streamedThinking.set(streamId, out.length);
+          out.push(envelope);
+        } else out[existing] = envelope;
       }
+      continue;
+    }
+
+    if (ev.kind === "model.tool_input_delta") {
+      const callId = String(ev.call_id || "");
+      if (!callId) continue;
+      const callKey = `${ev.attempt || 1}:${callId}`;
+      const index = toolUseIndex.get(callKey);
+      const previous = index === undefined ? undefined : out[index].block;
+      // 参数流只表示模型准备调用；不把它当成已经执行，更不触发任何操作。
+      if (previous && previous.phase !== "input_streaming") continue;
+      const partial = (String(previous?.payload_preview || "") + String(ev.partial_json || "")).slice(-16000);
+      const envelope: NativeBlockEnvelope = {kind:"tool_use",block:{...previous,kind:"tool_use",call_id:callId,
+        action:String(ev.name || previous?.action || ""),skill_id:"native",phase:"input_streaming",payload_preview:partial,payload:{}}};
+      if (index === undefined) {flushText();toolUseIndex.set(callKey,out.length);out.push(envelope);}
+      else out[index]=envelope;
       continue;
     }
 
     if (ev.kind === "tool.start") {
       flushText();
       const callId = String(ev.call_id ?? ev.tool_call_id ?? "");
+      const callKey = `${ev.attempt || 1}:${callId}`;
       const env: NativeBlockEnvelope = {
         block: {
           kind: "tool_use",
           call_id: callId,
           skill_id: ev.skill_id ?? "native",
-          action: ev.action ?? "",
-          payload: (ev.payload as Record<string, unknown>) ?? {},
+          action: String(ev.action ?? ev.tool ?? ev.name ?? ""),
+          payload: (ev.payload ?? ev.arguments ?? {}) as Record<string, unknown>,
+          attempt: ev.attempt,
+          phase: "running",
           index: out.length,
         },
         kind: "tool_use",
       };
-      out.push(env);
+      const previous = callId ? toolUseIndex.get(callKey) : undefined;
+      if (previous === undefined) {
+        if (callId) toolUseIndex.set(callKey, out.length);
+        out.push(env);
+      } else out[previous] = { ...env, block: { ...out[previous].block, ...env.block } };
       if (ev.action === "team_run") {
         ensureTeamTrace(ev);
+      }
+      continue;
+    }
+
+    if (ev.kind === "tool.progress" || ev.kind === "tool.output") {
+      const callId = String(ev.call_id ?? ev.tool_call_id ?? "");
+      const callKey = `${ev.attempt || 1}:${callId}`;
+      const index = toolUseIndex.get(callKey);
+      if (index !== undefined && out[index].block && !toolResultIndex.has(callKey)) {
+        const block = { ...out[index].block };
+        if (ev.progress !== undefined) block.progress = ev.progress;
+        if (typeof ev.message === "string") block.progress_message = ev.message;
+        if (typeof ev.elapsed_ms === "number") block.elapsed_ms = ev.elapsed_ms;
+        for (const channel of ["stdout", "stderr"] as const) {
+          const piece = typeof ev[channel] === "string" ? ev[channel] as string
+            : ev.channel === channel && typeof ev.text === "string" ? ev.text : "";
+          if (piece) {
+            const output = ev.mode === "replace" ? piece : String(block[channel] || "") + piece;
+            block[channel] = output.slice(-32000);
+            if (output.length > 32000) block.output_truncated = true;
+          }
+        }
+        out[index] = { ...out[index], block };
       }
       continue;
     }
@@ -1455,22 +1548,31 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
     if (ev.kind === "tool.complete") {
       flushText();
       const callId = String(ev.call_id ?? ev.tool_call_id ?? "");
-      out.push({
+      const callKey = `${ev.attempt || 1}:${callId}`;
+      const envelope: NativeBlockEnvelope = {
         block: {
           kind: "tool_result",
           call_id: callId,
           skill_id: ev.skill_id ?? "native",
-          action: ev.action ?? "",
+          action: String(ev.action ?? ev.tool ?? ev.name ?? ""),
           payload: (ev.payload as Record<string, unknown>) ?? {},
           ok: ev.ok ?? true,
           error: ev.error ?? null,
           error_kind: ev.error_kind ?? null,
           elapsed_ms: ev.elapsed_ms ?? null,
           result: (ev as Record<string, unknown>).result,
+          display_result: ev.display_result,
+          compaction: ev.compaction,
+          attempt: ev.attempt,
           index: out.length,
         },
         kind: "tool_result",
-      });
+      };
+      const previous = callId ? toolResultIndex.get(callKey) : undefined;
+      if (previous === undefined) {
+        if (callId) toolResultIndex.set(callKey, out.length);
+        out.push(envelope);
+      } else out[previous] = envelope;
       if (ev.action === "team_run") {
         const block = ensureTeamTrace(ev);
         block.status = ev.ok === false || ev.error ? "failed" : "completed";
@@ -1522,7 +1624,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       }
       const env: NativeBlockEnvelope = { block, kind: "chart" };
       if (insertAt >= 0) {
-        out.splice(insertAt, 0, env);
+        spliceBlocks(insertAt, 0, env);
       } else {
         out.push(env);
       }
@@ -1555,16 +1657,16 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         };
         const targetIdx = insertIndexAfterCall(callId);
         if (targetIdx !== null && targetIdx !== existingIdx + 1) {
-          out.splice(existingIdx, 1);
+          spliceBlocks(existingIdx, 1);
           const adjustedTarget = targetIdx > existingIdx ? targetIdx - 1 : targetIdx;
-          out.splice(Math.min(adjustedTarget, out.length), 0, env);
+          spliceBlocks(Math.min(adjustedTarget, out.length), 0, env);
         } else {
           out[existingIdx] = env;
         }
         rebuildApprovalIndex();
       } else {
         const insertAt = insertIndexAfterCall(callId) ?? out.length;
-        out.splice(insertAt, 0, env);
+        spliceBlocks(insertAt, 0, env);
         rebuildApprovalIndex();
       }
       continue;

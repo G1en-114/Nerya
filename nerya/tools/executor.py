@@ -29,7 +29,7 @@ import inspect
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 from .permissions import (
@@ -39,6 +39,7 @@ from .permissions import (
     PermissionRequest,
 )
 from .registry import ToolNotFoundError, ToolRegistry
+from .execution_contracts import dispatch_stop_reason, pair_executed_results, skipped_before_dispatch
 from .tool_approvals import (
     ToolApprovalResolution,
     ToolApprovalResolver,
@@ -317,6 +318,42 @@ def _repair_arguments_before_validation(
         call.arguments = args
 
 
+def _schema_error(call: ToolCall, descriptor: ToolDescriptor) -> ToolResult | None:
+    issues = collect_schema_issues(call.arguments or {}, descriptor.input_schema)
+    if not issues:
+        return None
+    return ToolResult.from_error(
+        tool_use_id=call.id, name=call.name,
+        error=ToolError(
+            kind=ToolErrorKind.SCHEMA_VALIDATION,
+            message=format_schema_validation_error(call.name, issues),
+            detail={"issues": [dict(i) for i in issues], "schema": descriptor.input_schema},
+            retryable=True,
+            recovery_hint={"action": "fix_arguments_and_retry", "tool_name": call.name},
+        ),
+    )
+
+
+def resolve_execution_target(call: ToolCall, registry: ToolRegistry) -> ToolCall | ToolResult:
+    """Resolve a lazy route without executing; share normalization with scheduling."""
+    from ..mcp.lazy import META_CALL_TOOL, resolve_mcp_call
+
+    descriptor = registry.find(call.name)
+    prepared = replace(call, arguments=dict(call.arguments or {}))
+    if descriptor is not None:
+        _repair_arguments_before_validation(prepared, descriptor.input_schema)
+    if call.name == META_CALL_TOOL and descriptor and "lazy_loader" in descriptor.tags:
+        if error := _schema_error(prepared, descriptor):
+            return error
+        prepared = resolve_mcp_call(prepared, registry=registry)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        target = registry.find(prepared.name)
+        if target is not None:
+            _repair_arguments_before_validation(prepared, target.input_schema)
+    return prepared
+
+
 # ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
@@ -389,6 +426,56 @@ class NativeToolExecutor:
         ``asyncio.run`` when needed (caller must not be in an event
         loop). For async-native callers see :meth:`execute_async`."""
 
+        if reason := dispatch_stop_reason(call, now=time.time()):
+            return skipped_before_dispatch(call, reason)
+        target = resolve_execution_target(call, self.registry)
+        if isinstance(target, ToolResult):
+            return target
+        if target.name != call.name:
+            # A deny on the public routing tool must not disappear either. The
+            # route itself only resolves a name; target checks own plan/risk/ASK.
+            route = replace(self.registry.get(call.name), read_only=True)
+            route_call = replace(call, arguments=dict(call.arguments or {}))
+            _repair_arguments_before_validation(route_call, route.input_schema)
+            decision = self.permission_engine.evaluate(
+                PermissionRequest(
+                    descriptor=route, payload=route_call.arguments,
+                    caller=call.caller, turn_id=call.turn_id, iteration=call.iteration,
+                ), self.permission_context,
+            )
+            if decision.is_deny():
+                for hook in self.permission_denied_hooks:
+                    try:
+                        hook(route_call, route, decision)
+                    except Exception:
+                        _LOG.exception("permission-denied hook failed for %s", call.name)
+                return ToolResult.from_error(
+                    tool_use_id=call.id, name=call.name,
+                    error=ToolError(
+                        kind=ToolErrorKind.PERMISSION_DENIED,
+                        message=decision.reason or "permission denied",
+                        detail=decision.asdict(), retryable=False,
+                    ),
+                )
+            # Hooks/approvals see the real target exactly once. Restore the model's
+            # call identity only after target hooks so batch/transcript pairing works.
+            result = pair_executed_results([target], [self._execute_target(target)])[0]
+            return replace(result, name=call.name, metadata={
+                **result.metadata,
+                "via_mcp_call": True,
+                "mcp_namespace": target.metadata["mcp_namespace"],
+                "mcp_underlying_tool": target.name,
+                "mcp_parent_call_id": call.id,
+            })
+        return self._execute_target(call)
+
+    async def execute_async(self, call: ToolCall) -> ToolResult:
+        """Run the same permission pipeline without nesting an event loop."""
+        import asyncio
+
+        return await asyncio.to_thread(self.execute, call)
+
+    def _execute_target(self, call: ToolCall) -> ToolResult:
         started = time.monotonic()
         cancel_token = (call.metadata or {}).get("cancel_token")
         if _cancel_requested(cancel_token):
@@ -416,34 +503,9 @@ class NativeToolExecutor:
             )
 
         _repair_arguments_before_validation(call, descriptor.input_schema)
-        issues = (
-            collect_schema_issues(call.arguments or {}, descriptor.input_schema)
-            if self.options.fail_fast_on_validation
-            else []
-        )
-        if issues:
-            # Render each issue as a one-sentence English explanation so
-            # the model can act on the tool_result without reading a
-            # JSON-schema blob. The raw issues list stays in
-            # ``detail.issues`` for dashboard / telemetry consumers.
-            friendly = format_schema_validation_error(call.name, issues)
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=friendly,
-                    detail={
-                        "issues": [dict(i) for i in issues],
-                        "schema": descriptor.input_schema,
-                    },
-                    retryable=True,
-                    recovery_hint={
-                        "action": "fix_arguments_and_retry",
-                        "tool_name": call.name,
-                    },
-                ),
-            )
+        if self.options.fail_fast_on_validation:
+            if error := _schema_error(call, descriptor):
+                return error
 
         decision = self.permission_engine.evaluate(
             PermissionRequest(
@@ -528,6 +590,11 @@ class NativeToolExecutor:
             except Exception:
                 _LOG.exception("pre-hook failed for %s", call.name)
 
+        # Approval resolution and pre-hooks can take time or request cancellation.
+        # Recheck the inherited deadline/token at the last point before effects.
+        if reason := dispatch_stop_reason(call, now=time.time()):
+            return skipped_before_dispatch(call, reason)
+
         try:
             result = self._invoke_handler(call, descriptor)
         except Exception as exc:
@@ -607,4 +674,5 @@ __all__ = [
     "PostHook",
     "PreHook",
     "coerce_json_number_string",
+    "resolve_execution_target",
 ]

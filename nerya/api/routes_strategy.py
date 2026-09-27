@@ -419,9 +419,17 @@ def routes():
         sid = (payload or {}).get("strategy_id") or ""
         if not sid:
             return _error("strategy_id required")
-        root = _backtests_root(client.config.paths.strategy(str(sid)))
+        try:
+            root = _backtests_root(_strategy_root_for_backtest_payload(client.config.paths, payload or {}))
+        except TradingError as exc:
+            return _error(str(exc))
         runs = []
-        for d in sorted((p for p in root.glob("*") if p.is_dir()), reverse=True):
+        from ..strategies.verification import replay_run_sort_key
+        for d in sorted((p for p in root.glob("*") if p.is_dir()), key=replay_run_sort_key, reverse=True):
+            if d.is_symlink() or (d / "metrics.json").is_symlink():
+                continue
+            if not (d / "metrics.json").is_file():
+                continue
             metrics = _load_json(d / "metrics.json")
             runs.append({
                 "ts": d.name,
@@ -433,7 +441,7 @@ def routes():
                 "start_utc": metrics.get("start_utc"),
                 "end_utc": metrics.get("end_utc"),
             })
-        return {"ok": True, "strategy_id": sid, "backtests": runs}
+        return {"ok": True, "strategy_id": sid, "proposal_id": (payload or {}).get("proposal_id"), "backtests": runs}
 
     def backtest_chart(client, payload):
         body = payload or {}
@@ -448,6 +456,11 @@ def routes():
                 chart = render_chart(run_dir)
             else:
                 chart = _load_json(chart_path)
+            from ..skills.builtin.backtest.scripts.chart_artifacts import hydrate_market_details
+            chart = hydrate_market_details(chart, run_dir)
+            metrics = _load_json(run_dir / "metrics.json")
+            chart = {**chart, "meta": {**chart.get("meta", {}),
+                **{key: metrics[key] for key in ("engine_version", "replay", "flags", "execution_limits") if key in metrics}}}
             return {
                 "ok": True,
                 "strategy_id": sid,
@@ -471,6 +484,11 @@ def routes():
             "trades.csv",
             "analysis_by_reason.csv",
             "rejected_signals.csv",
+            "signals.csv",
+            "order_events.csv",
+            "decisions.csv",
+            "equity.csv",
+            "benchmark.csv",
             "metrics.json",
             "report.md",
             "chart.json",
@@ -882,16 +900,28 @@ def _safe_backtest_dir_for_payload(paths, payload: dict[str, Any]) -> Path:
     proposal_id = str(payload.get("proposal_id") or "").strip()
     if not sid or not ts:
         raise TradingError("strategy_id and ts are required")
-    if proposal_id:
-        proposals_root = paths.proposals.resolve()
-        proposal_root = (proposals_root / proposal_id).resolve()
-        if proposals_root not in proposal_root.parents and proposal_root != proposals_root:
-            raise TradingError("invalid proposal id")
-        strategy_root = (proposal_root / "after" / "strategies" / sid).resolve()
-        if proposal_root not in strategy_root.parents:
-            raise TradingError("invalid proposal strategy path")
-        return _safe_backtest_dir(strategy_root, ts)
-    return _safe_backtest_dir(paths.strategy(sid), ts)
+    return _safe_backtest_dir(_strategy_root_for_backtest_payload(paths, payload), ts)
+
+
+def _strategy_root_for_backtest_payload(paths, payload: dict[str, Any]) -> Path:
+    from ..strategies.workflow_service import _safe_root
+    sid = str(payload.get("strategy_id") or "").strip()
+    proposal_id = str(payload.get("proposal_id") or "").strip()
+    try:
+        if proposal_id:
+            proposal = _safe_root(paths.proposals, proposal_id)
+            after = proposal / "after"
+            parent = after / "strategies"
+            if after.is_symlink() or parent.is_symlink():
+                raise TradingError("invalid proposal strategy path")
+            root = _safe_root(parent, sid)
+        else:
+            root = _safe_root(paths.strategies, sid)
+        if (root / "backtests").is_symlink():
+            raise TradingError("invalid backtest directory")
+        return root
+    except (ValueError, NeryaError) as exc:
+        raise TradingError(str(exc)) from exc
 
 
 def _load_json(path: Path) -> dict[str, Any]:

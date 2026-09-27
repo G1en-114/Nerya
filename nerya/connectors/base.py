@@ -65,9 +65,8 @@ class OrderAck:
     # broker for audit. ``{"BNB": 0.001}`` etc.
     fee_breakdown: dict[str, float] = field(default_factory=dict)
     # Exchange-native stop-loss / take-profit bracket order ids, if the
-    # venue attached them to the position on entry (e.g. Bybit V5
-    # ``stopLossPrice``/``takeProfitPrice`` create resting TP/SL orders
-    # whose ids the connector surfaces here for protection accounting).
+    # venue explicitly returned them on entry. CCXT attached
+    # stopLoss/takeProfit prices alone are not order-id confirmation.
     # Keys are venue-stable names ("stop_loss", "take_profit", …).
     attached_bracket_order_ids: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)

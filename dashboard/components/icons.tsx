@@ -1,649 +1,166 @@
 "use client";
 
 import type { SVGProps } from "react";
+import paths from "./icon-paths.json";
 
-type IconProps = SVGProps<SVGSVGElement> & { size?: number };
+/** Nerya Outline: shared with the public site by tools/sync-icons.mjs.
+ * 24-unit grid, round terminals, open counters and optically balanced bounds.
+ * Small icons receive a slight weight correction, not a filled variant.
+ * Keep decoration hidden from AT; name the enclosing icon-only button.
+ */
+export type IconName = keyof typeof paths;
+export type IconProps = Omit<SVGProps<SVGSVGElement>, "name"> & { size?: number; title?: string };
+export const ICON_NAMES = Object.keys(paths) as IconName[];
 
-function base({ size = 18, ...rest }: IconProps) {
-  return {
-    width: size,
-    height: size,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.6,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    ...rest,
-  };
-}
-
-export function OverviewIcon(props: IconProps) {
+export function Icon({ name, size = 18, title, className, children, ...rest }: IconProps & { name: IconName }) {
+  const labelled = Boolean(title || rest["aria-label"] || rest["aria-labelledby"]);
   return (
-    <svg {...base(props)}>
-      <rect x="3" y="3" width="8" height="8" rx="1.5" />
-      <rect x="13" y="3" width="8" height="5" rx="1.5" />
-      <rect x="13" y="10" width="8" height="11" rx="1.5" />
-      <rect x="3" y="13" width="8" height="8" rx="1.5" />
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={size <= 16 ? 1.75 : 1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      focusable="false"
+      aria-hidden={labelled ? undefined : true}
+      role={labelled ? "img" : undefined}
+      aria-label={title || undefined}
+      data-nerya-icon={name}
+      className={["nerya-icon", className].filter(Boolean).join(" ")}
+      {...rest}
+    >
+      {title ? <title>{title}</title> : null}
+      <path d={paths[name]} />
+      {children}
     </svg>
   );
 }
 
-export function AgentsIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <circle cx="12" cy="8" r="3" />
-      <path d="M5 20c0-3.9 3.1-7 7-7s7 3.1 7 7" />
-      <path d="M12 2v1.5" />
-      <path d="M8.5 3.5l.8 1.3" />
-      <path d="M15.5 3.5l-.8 1.3" />
-    </svg>
-  );
+function glyph(name: IconName) {
+  function NeryaIcon(props: IconProps) { return <Icon name={name} {...props} />; }
+  NeryaIcon.displayName = `NeryaIcon(${name})`;
+  return NeryaIcon;
 }
 
-export function SubagentsIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <circle cx="12" cy="5" r="2" />
-      <circle cx="5" cy="19" r="2" />
-      <circle cx="19" cy="19" r="2" />
-      <path d="M12 7v4M12 11l-5.5 6M12 11l5.5 6" />
-    </svg>
-  );
-}
+// Backwards-compatible exports: existing controls keep their behaviour.
+export const OverviewIcon = glyph("overview");
+export const AgentsIcon = glyph("agents");
+export const SubagentsIcon = glyph("subagents");
+export const SkillsIcon = glyph("skills");
+export const TriggersIcon = glyph("bolt");
+export const ScriptsIcon = glyph("scripts");
+export const PortfolioIcon = glyph("portfolio");
+export const OrdersIcon = glyph("orders");
+export const StrategiesIcon = glyph("strategies");
+export const HistoryIcon = glyph("history");
+export const MessagesIcon = glyph("messages");
+export const MemoryIcon = glyph("memory");
+export const EvolutionIcon = glyph("evolution");
+export const SecurityIcon = glyph("shield");
+export const NeryaMark = glyph("nerya");
+export const ChatIcon = glyph("chat");
+export const SettingsIcon = glyph("settings");
+export const SearchIcon = glyph("search");
+export const BellIcon = glyph("bell");
+export const PowerIcon = glyph("power");
+export const StarIcon = glyph("star");
+export const MoonIcon = glyph("moon");
+export const ChevronLeftIcon = glyph("chevronLeft");
+export const ChevronRightIcon = glyph("chevronRight");
+export const ChevronDownIcon = glyph("chevronDown");
+export const ChevronUpIcon = glyph("chevronUp");
+export const PlusIcon = glyph("plus");
+export const SparkIcon = glyph("spark");
+export const SendIcon = glyph("send");
+export const StopIcon = glyph("stop");
+export const PauseIcon = glyph("pause");
+export const CopyIcon = glyph("copy");
+export const EditIcon = glyph("edit");
+export const TrashIcon = glyph("trash");
+export const CheckIcon = glyph("check");
+export const XIcon = glyph("x");
+export const ShieldCheckIcon = glyph("shield");
+export const ShieldXIcon = glyph("shieldX");
+export const WrenchIcon = glyph("wrench");
+export const RefreshIcon = glyph("refresh");
+export const ScriptRunIcon = glyph("play");
+export const ChartIcon = glyph("chart");
+export const GlobeIcon = glyph("globe");
+export const FolderIcon = glyph("folder");
+export const FileIcon = glyph("file");
+export const DiffIcon = glyph("diff");
+export const ImageIcon = glyph("image");
+export const FilePlusIcon = glyph("filePlus");
+export const FolderPlusIcon = glyph("folderPlus");
+export const SaveIcon = glyph("save");
+export const LanguagesIcon = glyph("languages");
+export const ComposeIcon = glyph("compose");
+export const PuzzleIcon = glyph("puzzle");
+export const CommandIcon = glyph("command");
+export const PanelLeftIcon = glyph("panelLeft");
+export const ClockIcon = glyph("clock");
 
-export function SkillsIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 2l2.5 4.9L20 8l-4 3.8.9 5.4L12 14.8 7.1 17.2 8 11.8 4 8l5.5-1.1L12 2z" />
-    </svg>
-  );
-}
+// Shared utilities replace ad-hoc inline SVGs and font-dependent symbols.
+export const MoreIcon = glyph("ellipsis");
+export const ExternalLinkIcon = glyph("arrowUpRight");
+export const ArrowRightIcon = glyph("arrowRight");
+export const ArrowLeftIcon = glyph("arrowLeft");
+export const ArrowDownIcon = glyph("arrowDown");
+export const DownloadIcon = glyph("download");
+export const UploadIcon = glyph("upload");
+export const SunIcon = glyph("sun");
+export const MenuIcon = glyph("menu");
+export const CircleIcon = glyph("circle");
+export const CircleDotIcon = glyph("circleDot");
+export const CircleCheckIcon = glyph("circleCheck");
+export const InfoIcon = glyph("info");
+export const WarningIcon = glyph("warning");
+export const LockIcon = glyph("lock");
+export const KeyIcon = glyph("key");
+export const AttachmentIcon = glyph("attachment");
+export const PinIcon = glyph("pin");
+export const BranchIcon = glyph("branch");
+export const WorkflowIcon = glyph("workflow");
+export const CodeIcon = glyph("code");
+export const DocumentIcon = glyph("document");
+export const BitcoinIcon = glyph("bitcoin");
+export const PredictionIcon = glyph("prediction");
+export const CandlesIcon = glyph("candles");
+export const BuildingIcon = glyph("building");
+export const CornerDownRightIcon = glyph("cornerDownRight");
+export const LoaderIcon = glyph("loader");
+export const MicrophoneIcon = glyph("microphone");
+export const EyeIcon = glyph("eye");
+export const MonitorIcon = glyph("monitor");
+export const WalletIcon = glyph("wallet");
+export const LinkIcon = glyph("link");
+export const HelpIcon = glyph("help");
 
-export function TriggersIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M13 3L5 13h6l-1 8 8-10h-6l1-8z" />
-    </svg>
-  );
-}
-
-export function ScriptsIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M6 3h10l4 4v14H6z" />
-      <path d="M16 3v4h4" />
-      <path d="M9 12l-2 2 2 2" />
-      <path d="M13 12l2 2-2 2" />
-    </svg>
-  );
-}
-
-export function PortfolioIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <rect x="3" y="6" width="18" height="13" rx="2" />
-      <path d="M9 6V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V6" />
-      <path d="M3 11h18" />
-      <path d="M11 14h2" />
-    </svg>
-  );
-}
-
-export function OrdersIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 17l4-4 3 3 5-6 6 6" />
-      <path d="M3 21h18" />
-      <circle cx="7" cy="13" r="1.2" />
-      <circle cx="10" cy="16" r="1.2" />
-      <circle cx="15" cy="10" r="1.2" />
-      <circle cx="21" cy="16" r="1.2" />
-    </svg>
-  );
-}
-
-export function StrategiesIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M4 19V5" />
-      <path d="M4 19h16" />
-      <path d="M7 15l4-6 3 3 5-8" />
-      <circle cx="18" cy="4" r="1.2" />
-    </svg>
-  );
-}
-
-export function HistoryIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 12a9 9 0 1 0 3-6.7" />
-      <path d="M3 4v5h5" />
-      <path d="M12 7v5l3 2" />
-    </svg>
-  );
-}
-
-export function MessagesIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M21 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3z" />
-      <path d="M8 10h8" />
-      <path d="M8 13h5" />
-    </svg>
-  );
-}
-
-export function MemoryIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 3c4.5 0 8 2.5 8 6 0 1.4-.6 2.6-1.6 3.6.6.8.9 1.7.9 2.7 0 2.6-2.8 4.7-6.3 4.7s-6.3-2.1-6.3-4.7c0-1 .3-1.9.9-2.7A5.3 5.3 0 0 1 4 9c0-3.5 3.5-6 8-6z" />
-      <path d="M9 10h.01M15 10h.01M12 14c1 0 2-.3 2.5-1" />
-    </svg>
-  );
-}
-
-export function EvolutionIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M4 20c6-8 10-8 16 0" />
-      <circle cx="4" cy="20" r="1.6" />
-      <circle cx="20" cy="20" r="1.6" />
-      <path d="M12 14V4" />
-      <path d="M8 8l4-4 4 4" />
-    </svg>
-  );
-}
-
-export function SecurityIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3z" />
-      <path d="M9 12l2 2 4-4" />
-    </svg>
-  );
-}
-
-export function NeryaMark(props: IconProps) {
-  // "Evolutionary Brain N" — the N letterform is built from three
-  // excitable axons that branch into dendrites (the brain) and a
-  // glowing pulsing core node at the synapse (the seat of evolution).
-  // Three small data packets cascade along the diagonal axon to
-  // suggest learning / adaptation in motion.
-  return (
-    <svg {...base(props)} viewBox="0 0 32 32" strokeWidth={0} fill="none">
-      <defs>
-        <linearGradient id="nmg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#b48bff" />
-          <stop offset="55%" stopColor="#8b5cf6" />
-          <stop offset="100%" stopColor="#22d3ee" />
-        </linearGradient>
-        <radialGradient id="nmn" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#ffffff" stopOpacity={0.95} />
-          <stop offset="100%" stopColor="#b48bff" stopOpacity={0.25} />
-        </radialGradient>
-        <radialGradient id="nmcore" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#ffffff" stopOpacity={1} />
-          <stop offset="55%" stopColor="#c9a8ff" stopOpacity={0.85} />
-          <stop offset="100%" stopColor="#22d3ee" stopOpacity={0} />
-        </radialGradient>
-      </defs>
-      {/* primary axons forming the N */}
-      <g stroke="url(#nmg)" strokeWidth={2.4} strokeLinecap="round" fill="none">
-        <path d="M7 25 L7 7" />
-        <path d="M7 7 Q11.5 13 16 16 T25 25" />
-        <path d="M25 7 L25 25" />
-      </g>
-      {/* dendrites — short branches off the verticals to read as a brain */}
-      <g stroke="url(#nmg)" strokeWidth={1} strokeLinecap="round" fill="none" opacity={0.55}>
-        <path d="M7 12 L4 11" />
-        <path d="M7 18 L4 19" />
-        <path d="M25 12 L28 11" />
-        <path d="M25 18 L28 19" />
-        <path d="M16 16 L13 19" />
-        <path d="M16 16 L19 13" />
-      </g>
-      {/* glowing pulsing core at the synapse */}
-      <circle cx="16" cy="16" r="4.2" fill="url(#nmcore)" opacity={0.55}>
-        <animate attributeName="r" values="3.8;4.6;3.8" dur="3.2s" repeatCount="indefinite" />
-        <animate attributeName="opacity" values="0.45;0.7;0.45" dur="3.2s" repeatCount="indefinite" />
-      </circle>
-      {/* terminal + relay nodes */}
-      <g fill="url(#nmn)">
-        <circle cx="7" cy="7" r="1.6" />
-        <circle cx="16" cy="16" r="2" />
-        <circle cx="25" cy="25" r="1.6" />
-        <circle cx="7" cy="25" r="1.1" />
-        <circle cx="25" cy="7" r="1.1" />
-      </g>
-      {/* data packets cascading along the diagonal axon */}
-      <g fill="#22d3ee">
-        <circle cx="11" cy="11" r="0.5" opacity="0.8" />
-        <circle cx="13.5" cy="13.5" r="0.4" opacity="0.65" />
-        <circle cx="19" cy="19" r="0.4" opacity="0.65" />
-        <circle cx="21.5" cy="21.5" r="0.5" opacity="0.8" />
-      </g>
-    </svg>
-  );
-}
-
-export function ChatIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M21 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3z" />
-      <circle cx="9" cy="11" r="1" fill="currentColor" />
-      <circle cx="13" cy="11" r="1" fill="currentColor" />
-      <circle cx="17" cy="11" r="1" fill="currentColor" />
-    </svg>
-  );
-}
-
-export function SettingsIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06A2 2 0 1 1 4.29 16.96l.06-.06A1.65 1.65 0 0 0 4.68 15 1.65 1.65 0 0 0 3.17 14H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  );
-}
-
-export function SearchIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="M21 21l-4.3-4.3" />
-    </svg>
-  );
-}
-
-export function BellIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-      <path d="M10 21a2 2 0 0 0 4 0" />
-    </svg>
-  );
-}
-
-export function PowerIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 3v8" />
-      <path d="M7.2 5.8a8 8 0 1 0 9.6 0" />
-    </svg>
-  );
-}
-
-export function StarIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 2l2.9 6.3 6.9.6-5.2 4.7 1.6 6.8L12 17l-6.2 3.4 1.6-6.8L2.2 8.9l6.9-.6z" />
-    </svg>
-  );
-}
-
-export function MoonIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M21 12.5A9 9 0 1 1 11.5 3a7 7 0 0 0 9.5 9.5z" />
-    </svg>
-  );
-}
-
-export function ChevronLeftIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M15 18l-6-6 6-6" />
-    </svg>
-  );
-}
-
-export function ChevronRightIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M9 6l6 6-6 6" />
-    </svg>
-  );
-}
-
-export function ChevronDownIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M6 9l6 6 6-6" />
-    </svg>
-  );
-}
-
-export function PlusIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
-
-export function SparkIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 3v3M12 18v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M3 12h3M18 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" />
-    </svg>
-  );
-}
-
-export function SendIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M22 2L11 13" />
-      <path d="M22 2l-7 20-4-9-9-4z" />
-    </svg>
-  );
-}
-
-export function StopIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <rect x="6" y="6" width="12" height="12" rx="2" />
-    </svg>
-  );
-}
-
-export function PauseIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M8 5v14" />
-      <path d="M16 5v14" />
-    </svg>
-  );
-}
-
-export function CopyIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <rect x="9" y="9" width="11" height="11" rx="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  );
-}
-
-export function EditIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-    </svg>
-  );
-}
-
-export function TrashIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="M19 6l-1 15H6L5 6" />
-      <path d="M10 11v6M14 11v6" />
-    </svg>
-  );
-}
-
-export function CheckIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M20 6L9 17l-5-5" />
-    </svg>
-  );
-}
-
-export function XIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M18 6L6 18M6 6l12 12" />
-    </svg>
-  );
-}
-
-export function ShieldCheckIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3z" />
-      <path d="M9 12l2 2 4-4" />
-    </svg>
-  );
-}
-
-export function ShieldXIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3z" />
-      <path d="M9.5 10.5l5 5M14.5 10.5l-5 5" />
-    </svg>
-  );
-}
-
-export function WrenchIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.4 2.4-3-3 2.4-2.4z" />
-    </svg>
-  );
-}
-
-export function RefreshIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-      <path d="M3 3v5h5" />
-    </svg>
-  );
-}
-
-export function ScriptRunIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <polygon points="5 3 19 12 5 21 5 3" />
-    </svg>
-  );
-}
-
-export function ChartIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 3v18h18" />
-      <path d="M7 14l3-4 4 3 5-7" />
-    </svg>
-  );
-}
-
-export function GlobeIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18" />
-      <path d="M12 3a14 14 0 0 1 0 18" />
-      <path d="M12 3a14 14 0 0 0 0 18" />
-    </svg>
-  );
-}
-
-export function FolderIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
-    </svg>
-  );
-}
-
-export function FileIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-      <path d="M14 3v6h6" />
-    </svg>
-  );
-}
-
-export function DiffIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M6 3v6" />
-      <path d="M3 6h6" />
-      <path d="M6 13v3a3 3 0 0 0 3 3h3" />
-      <path d="M18 11V8a3 3 0 0 0-3-3h-3" />
-      <path d="M15 18h6" />
-    </svg>
-  );
-}
-
-export function ImageIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <circle cx="8.5" cy="10" r="1.5" />
-      <path d="M21 16l-5.2-5.2a1.4 1.4 0 0 0-2 0L6 18" />
-    </svg>
-  );
-}
-
-export function FilePlusIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-      <path d="M14 3v6h6" />
-      <path d="M12 12v6M9 15h6" />
-    </svg>
-  );
-}
-
-export function FolderPlusIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
-      <path d="M12 11v6M9 14h6" />
-    </svg>
-  );
-}
-
-export function SaveIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-      <path d="M17 21v-8H7v8" />
-      <path d="M7 3v5h8" />
-    </svg>
-  );
-}
-
-export function LanguagesIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M5 4h7" />
-      <path d="M9 3v2" />
-      <path d="M11 5C9.5 11 6.5 13 4 14" />
-      <path d="M5 9c0 3 2.5 6 6 7" />
-      <path d="M13 21l4-9 4 9" />
-      <path d="M14.5 18h5" />
-    </svg>
-  );
-}
-
-export function ComposeIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
-      <path d="M18.4 2.6a2 2 0 0 1 2.8 2.8L12 14.6 8 16l1.4-4z" />
-    </svg>
-  );
-}
-
-export function PuzzleIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <path d="M9 4.5a2 2 0 1 1 4 0V6h2a1.5 1.5 0 0 1 1.5 1.5v2H18a2 2 0 1 1 0 4h-1.5V16A1.5 1.5 0 0 1 15 17.5h-2.2V19a2 2 0 1 1-4 0v-1.5H6.5A1.5 1.5 0 0 1 5 16v-2.3H4a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 6.5 6H9z" />
-    </svg>
-  );
-}
-
-export function CommandIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <rect x="9" y="9" width="6" height="6" rx="1" />
-      <path d="M9 9V7a2 2 0 1 0-2 2h2z" />
-      <path d="M15 9V7a2 2 0 1 1 2 2h-2z" />
-      <path d="M9 15v2a2 2 0 1 1-2-2h2z" />
-      <path d="M15 15v2a2 2 0 1 0 2-2h-2z" />
-    </svg>
-  );
-}
-
-export function PanelLeftIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M9 4v16" />
-    </svg>
-  );
-}
-
-export function ClockIcon(props: IconProps) {
-  return (
-    <svg {...base(props)}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 2" />
-    </svg>
-  );
-}
-
-export const NAV_ICONS: Record<string, (props: IconProps) => JSX.Element> = {
-  "/dashboard": OverviewIcon,
-  "/chat": ChatIcon,
-  "/portfolio": PortfolioIcon,
-  "/accounts": SecurityIcon,
-  "/orders": HistoryIcon,
-  "/incidents": BellIcon,
-  "/strategies": StrategiesIcon,
-  "/agents": AgentsIcon,
-  "/skills": SkillsIcon,
-  "/workflows": TriggersIcon,
-  "/inbox": BellIcon,
-  "/tasks": AgentsIcon,
-  "/self-evolution": EvolutionIcon,
-  "/settings": SettingsIcon,
-  "/gateway": MessagesIcon,
-  "/web-search": SearchIcon,
-  "/browsers": GlobeIcon,
-  "/env-vault": SecurityIcon,
+type IconComponent = (props: IconProps) => JSX.Element;
+export const NAV_ICONS: Record<string, IconComponent> = {
+  "/dashboard": OverviewIcon, "/chat": ChatIcon,
+  "/portfolio": PortfolioIcon, "/accounts": SecurityIcon,
+  "/orders": OrdersIcon, "/incidents": BellIcon,
+  "/strategies": StrategiesIcon, "/agents": AgentsIcon,
+  "/skills": SkillsIcon, "/workflows": WorkflowIcon,
+  "/inbox": BellIcon, "/tasks": AgentsIcon,
+  "/self-evolution": EvolutionIcon, "/settings": SettingsIcon,
+  "/gateway": MessagesIcon, "/web-search": SearchIcon,
+  "/browsers": GlobeIcon, "/env-vault": SecurityIcon,
 };
 
-/**
- * Backend-emitted icon name → React component.
- *
- * ``routes_operator.py`` returns short, semantic icon hints (``home``,
- * ``inbox``, ``portfolio`` …). The Sidebar resolves them through this
- * map so the navigation shape stays driven by the backend without
- * pinning the dashboard to specific Heroicons.
- */
-export const NAV_ICON_BY_NAME: Record<string, (props: IconProps) => JSX.Element> = {
-  home: OverviewIcon,
-  chat: ChatIcon,
-  portfolio: PortfolioIcon,
-  accounts: SecurityIcon,
-  orders: HistoryIcon,
-  incidents: BellIcon,
-  strategy: StrategiesIcon,
-  workflow: TriggersIcon,
-  inbox: BellIcon,
-  settings: SettingsIcon,
-  agents: AgentsIcon,
-  subagents: SubagentsIcon,
-  skills: SkillsIcon,
-  scripts: ScriptsIcon,
-  history: HistoryIcon,
-  messages: MessagesIcon,
-  memory: MemoryIcon,
-  evolution: EvolutionIcon,
-  security: SecurityIcon,
-  globe: GlobeIcon,
-  shield: ShieldCheckIcon,
-  search: SearchIcon,
-  browsers: GlobeIcon,
-  vault: SecurityIcon,
+/** Backend semantic hints stay independent of SVG geometry. */
+export const NAV_ICON_BY_NAME: Record<string, IconComponent> = {
+  home: OverviewIcon, chat: ChatIcon, portfolio: PortfolioIcon,
+  accounts: SecurityIcon, orders: OrdersIcon, incidents: BellIcon,
+  strategy: StrategiesIcon, workflow: WorkflowIcon, inbox: BellIcon,
+  settings: SettingsIcon, agents: AgentsIcon, subagents: SubagentsIcon,
+  skills: SkillsIcon, scripts: ScriptsIcon, history: HistoryIcon,
+  messages: MessagesIcon, memory: MemoryIcon, evolution: EvolutionIcon,
+  security: SecurityIcon, globe: GlobeIcon, shield: ShieldCheckIcon,
+  search: SearchIcon, browsers: GlobeIcon, vault: SecurityIcon,
 };

@@ -48,6 +48,16 @@ from ..tools.types import (
 
 ToolArgumentsForName = Callable[[str], dict[str, Any]]
 _LOG = logging.getLogger(__name__)
+_FRESH_STATUS_TOOLS = frozenset({"task_get", "task_output"})
+
+
+def _is_fresh_status_poll(call: ToolCall, registry: ToolRegistry) -> bool:
+    descriptor = registry.find(call.name)
+    return bool(
+        call.name in _FRESH_STATUS_TOOLS
+        and descriptor and descriptor.namespace == "native"
+        and _tool_name_is_read_only(call.name, registry)
+    )
 
 @dataclass(frozen=True)
 class ToolCallBuildContext:
@@ -381,13 +391,14 @@ def _unadvertised_result(
     call: ToolCall,
     *,
     allowed_tool_names: set[str],
+    registered: bool = True,
 ) -> ToolResult:
     available = sorted(allowed_tool_names)
     return ToolResult.from_error(
         tool_use_id=call.id,
         name=call.name,
         error=ToolError(
-            kind=ToolErrorKind.PERMISSION_DENIED,
+            kind=ToolErrorKind.PERMISSION_DENIED if registered else ToolErrorKind.UNKNOWN_TOOL,
             message=f"tool {call.name!r} is not available in the current runtime view",
             detail={"advertised": False, "available_tools": available},
             retryable=False,
@@ -456,10 +467,18 @@ class ToolBatchPhase:
                 prepared_results[index] = _unadvertised_result(
                     call,
                     allowed_tool_names=policy.allowed_tool_names,
+                    registered=self.registry.has(call.name),
                 )
                 continue
             fingerprint = tool_call_fingerprint(call)
             prior_result = state.tool_result_by_fingerprint.get(fingerprint)
+            if _tool_name_is_read_only(call.name, self.registry) and any(
+                not _tool_name_is_read_only(pending.name, self.registry) for pending in executable_calls
+            ):
+                # A preceding mutation in this batch may change the object
+                # being inspected. Refresh reads rather than reuse old evidence.
+                # Mutation replay/approval guards remain entirely unchanged.
+                prior_result = None
             repeat_count = (
                 state.recent_tool_fingerprints[
                     -max(1, policy.repeated_tool_window):
@@ -467,12 +486,16 @@ class ToolBatchPhase:
                 + 1
             )
             checkpoint_replay_is_unsafe = (
-                fingerprint in state.checkpointed_fingerprints
+                (fingerprint in state.checkpointed_fingerprints
+                 or (prior_result is not None and result_counts_as_success(prior_result)))
                 and not _tool_name_is_read_only(call.name, self.registry)
             )
             if prior_result is not None and (
                 checkpoint_replay_is_unsafe
-                or repeat_count >= max(2, policy.repeated_tool_threshold)
+                or (
+                    not _is_fresh_status_poll(call, self.registry)
+                    and repeat_count >= max(2, policy.repeated_tool_threshold)
+                )
             ):
                 prepared_results[index] = deduped_tool_loop_result(
                     call,
@@ -554,7 +577,7 @@ class ToolBatchPhase:
         semantic_success_names: set[str] = set()
         completed_required_action_names: set[str] = set()
 
-        for call, result in zip(calls, batch.results):
+        for index, (call, result) in enumerate(zip(calls, batch.results)):
             is_deduped = bool(result.error and result.error.kind == ToolErrorKind.DEDUPED)
             if result.name and result.is_error and not is_deduped:
                 state.successful_tool_names.discard(result.name)
@@ -574,6 +597,19 @@ class ToolBatchPhase:
                     state.required_next_tool_names.discard(result.name)
 
             fingerprint = tool_call_fingerprint(call)
+            if _is_fresh_status_poll(call, self.registry) and index in executable_indices:
+                prior = state.tool_result_by_fingerprint.get(fingerprint)
+                # Always observe the live record first. Bound a no-progress loop
+                # using the existing stop policy, never a cached task observation.
+                unchanged = bool(prior and prior.is_error == result.is_error
+                                 and prior.text() == result.text())
+                previous = (prior.metadata.get("poll_unchanged_count", 0) if prior else 0)
+                count = int(previous) + 1 if unchanged else 0
+                result.metadata["poll_unchanged_count"] = count
+                result.metadata["fresh_status_poll"] = not result.is_error
+                if count >= max(2, policy.repeated_tool_threshold) - 1 + max(1, policy.repeated_tool_stop_after):
+                    result.metadata["poll_stop_reason"] = "task_poll_no_progress"
+                    repeated_loop_abort = True
             state.recent_tool_fingerprints.append(fingerprint)
             max_recent = max(1, policy.repeated_tool_window)
             if len(state.recent_tool_fingerprints) > max_recent:
@@ -590,6 +626,24 @@ class ToolBatchPhase:
             for pending_name in list(state.required_next_tool_names):
                 if _tool_name_is_read_only(pending_name, self.registry):
                     state.required_next_tool_names.discard(pending_name)
+
+        state_may_have_changed = any(
+            index in executable_indices and not _tool_name_is_read_only(call.name, self.registry)
+            and (result_counts_as_success(result)
+                 or bool(result.error and result.error.detail.get("execution_state") == "unknown"))
+            for index, (call, result) in enumerate(zip(calls, batch.results))
+        )
+        if state_may_have_changed:
+            # Identical arguments do not identify identical state. A compiler,
+            # validator or file read after an edit is a NEW observation. Clear
+            # only read de-duplication caches; preserve the durable result ledger
+            # and all successful/uncertain mutation fingerprints exactly once.
+            stale = {key for key, result in state.tool_result_by_fingerprint.items()
+                     if _tool_name_is_read_only(result.name, self.registry)}
+            state.recent_tool_fingerprints[:] = [key for key in state.recent_tool_fingerprints if key not in stale]
+            for key in stale:
+                state.tool_result_by_fingerprint.pop(key, None)
+                state.deduped_counts_by_fingerprint.pop(key, None)
 
         return ToolBatchEffects(
             calls=tuple(calls),

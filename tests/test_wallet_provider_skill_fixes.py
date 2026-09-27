@@ -58,7 +58,7 @@ def _make_bitget_py_provider(tmp_path, config: dict | None = None) -> BitgetWall
     script = skill_dir / "scripts" / "bitget-wallet-agent-api.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text("print('{}')\n", encoding="utf-8")
-    return BitgetWalletSkill(skill_path=str(skill_dir), config=dict(config or {}))
+    return BitgetWalletSkill(skill_path=str(skill_dir), config={'backend':'legacy',**dict(config or {})})
 
 
 def _make_bitget_node_provider(tmp_path, config: dict | None = None) -> BitgetWalletSkill:
@@ -169,7 +169,7 @@ def test_bitget_quote_routes_to_python_skill(tmp_path, monkeypatch) -> None:
 
     def fake_run(self, args, *, timeout_s=30.0):
         seen["args"] = list(args)
-        return {"expected_out": 2.0, "price_impact_bps": 15}
+        return {"expected_out": 2.0, "min_out":1.99, "price_impact_bps": 15}
 
     monkeypatch.setattr(BitgetWalletSkill, "_run_python_skill", fake_run)
     monkeypatch.setattr(NodeSkillRef, "invoke", _no_node_invocation)
@@ -195,7 +195,7 @@ def test_bitget_swap_routes_to_python_skill_and_defaults_not_ok(
         {  # skill doc WITHOUT "ok" — must not be reported as success
             "tx_hash": "0xfail", "reason": "swap reverted",
         },
-        {"ok": True, "tx_hash": "0x1", "amount_out": 2.0},
+        {"ok": True, "tx_hash": "0x1", "amount_out": 2.0,'confirmed':True,'amount_out_source':'receipt'},
         {"ok": False, "reason": "insufficient allowance"},
     ])
 
@@ -263,7 +263,7 @@ def test_bitget_python_branch_requires_skill_path(monkeypatch) -> None:
     # entry defaults to the python script but no skill_path configured:
     # dispatch must fall through to the node ref which reports the
     # missing dependency — not silently "run" anything.
-    provider = BitgetWalletSkill()
+    provider = BitgetWalletSkill(config={'backend':'legacy'})
     monkeypatch.setattr(BitgetWalletSkill, "_run_python_skill", _no_python_skill)
 
     with pytest.raises(WalletDependencyError):
@@ -306,7 +306,7 @@ def test_bitget_optional_creds_reach_node_skill_env(tmp_path, monkeypatch) -> No
     seen: dict[str, Any] = {}
 
     def fake_invoke(self, command, payload, *, timeout_s=25.0):
-        seen["token"] = os.environ.get("BITGET_TOKEN")
+        seen["token"] = (self.env_overrides or {}).get("BITGET_TOKEN")
         return {"balance": 1.0}
 
     monkeypatch.setattr(NodeSkillRef, "invoke", fake_invoke)
@@ -378,7 +378,7 @@ def test_bitget_klines_direct_api_emits_seconds(monkeypatch) -> None:
 
 
 def test_binance_swap_defaults_to_not_ok(monkeypatch) -> None:
-    provider = BinanceAgenticWallet()
+    provider = BinanceAgenticWallet(config={'backend':'legacy'})
     docs = iter([{"tx_hash": "0x2"}, {"ok": True, "tx_hash": "0x3"}])
 
     def fake_invoke(self, command, payload, *, timeout_s=25.0):
@@ -394,12 +394,12 @@ def test_binance_swap_defaults_to_not_ok(monkeypatch) -> None:
     res_ok = provider.swap(
         chain="bsc", token_in="A", token_out="B", amount_in=1.0, live=True,
     )
-    assert res_ok.ok is True
+    assert res_ok.ok is False  # submission acknowledgement has no receipt
 
 
 def test_binance_quote_unparseable_raises_quote_error(monkeypatch) -> None:
-    provider = BinanceAgenticWallet()
-    docs = iter([{}, {"expected_out": "not-a-number"}, {"expected_out": 4.0}])
+    provider = BinanceAgenticWallet(config={'backend':'legacy'})
+    docs = iter([{}, {"expected_out": "not-a-number"}, {"expected_out": 4.0,'min_out':3.98}])
 
     def fake_invoke(self, command, payload, *, timeout_s=25.0):
         return next(docs)
@@ -420,7 +420,7 @@ def test_binance_quote_unparseable_raises_quote_error(monkeypatch) -> None:
         amount_in=1.0, slippage_bps=100,
     )
     assert q.expected_out == pytest.approx(4.0)
-    assert q.min_out == pytest.approx(4.0 * (1 - 100 / 10_000))
+    assert q.min_out == pytest.approx(3.98)  # preserve the adapter's enforceable floor
 
 
 def test_binance_repo_is_clean_clone_url() -> None:
@@ -430,11 +430,11 @@ def test_binance_repo_is_clean_clone_url() -> None:
     assert provider.repo.startswith("https://github.com/")
     assert "binance-agentic-wallet" in provider.subdir
 
-    # the not-ready install hint must embed a valid git clone line
+    # The official package entry is a CLI, not an stdin SDK wrapper.
     hint = provider.readiness().install_hint
     assert provider.repo in hint
     assert provider.subdir in hint
-    assert f"git clone {provider.repo}" in hint
+    assert '@binance/agentic-wallet' in hint
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +482,7 @@ def test_slippage_floor_pure_helper() -> None:
     assert _slippage_floor(1.0, 50) == pytest.approx(0.995)
 
 
-def test_coinbase_node_doc_min_out_uses_slippage_formula(
+def test_coinbase_node_doc_requires_explicit_min_out(
     tmp_path, monkeypatch,
 ) -> None:
     skill_dir = _make_coinbase_node_skill(tmp_path)
@@ -497,14 +497,8 @@ def test_coinbase_node_doc_min_out_uses_slippage_formula(
         lambda self, command, payload, *, timeout_s=25.0: {"expected_out": 2.0},
     )
 
-    q = provider.quote(
-        chain="base", token_in="ETH", token_out="USDC",
-        amount_in=2.0, slippage_bps=30,
-    )
-
-    # 30 bps floor is 1.994 — the old hardcoded 1% fallback said 1.98
-    assert q.min_out == pytest.approx(2.0 * (1 - 30 / 10_000))
-    assert q.min_out != pytest.approx(1.98)
+    with pytest.raises(WalletQuoteError,match='min_out'):
+        provider.quote(chain='base',token_in='ETH',token_out='USDC',amount_in=2.0,slippage_bps=30)
 
 
 def test_coinbase_prefers_node_skill_while_python_is_partial(
@@ -533,7 +527,7 @@ def test_coinbase_prefers_node_skill_while_python_is_partial(
 def test_coinbase_full_python_sdk_keeps_python_path(tmp_path, monkeypatch) -> None:
     skill_dir = _make_coinbase_node_skill(tmp_path)
     provider = CoinbaseWallet(
-        api_key_name="kid", api_private_key="priv", skill_path=skill_dir,
+        api_key_name="kid", api_private_key="priv", skill_path=skill_dir,config={'backend':'legacy'},
     )
     monkeypatch.setattr(CoinbaseWallet, "_probe_py", lambda self: "cdp")
 

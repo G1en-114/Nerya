@@ -7,7 +7,7 @@ for(const count of [300,1000])test("production history "+count,async({page},info
   (window as any).__interactions=[];
   new PerformanceObserver(list=>{for(const entry of list.getEntries())if((entry as any).interactionId)(window as any).__interactions.push({duration:entry.duration,id:(entry as any).interactionId});}).observe({type:"event",buffered:true,durationThreshold:16} as any);
  });
- await page.goto("/chat/parity-session");await expect(page.getByTestId("conversation-find")).toBeVisible();
+ await page.goto("/chat/parity-session");await expect(page.getByTestId("conversation-find")).toHaveCount(0);await page.getByRole("button",{name:"Find in conversation",exact:true}).click();await expect(page.getByTestId("conversation-find")).toBeVisible();
  await page.getByRole("searchbox",{name:"Find in conversation"}).fill("historical result 101.");await page.getByRole("button",{name:"Next match"}).click();
  const target=page.getByText("Verified historical result 101.",{exact:false}).first();await expect(target).toBeVisible();
  await expect.poll(()=>page.locator('[data-turn-role="assistant"]').count()).toBeLessThan(35);

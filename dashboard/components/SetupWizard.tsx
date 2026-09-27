@@ -1,524 +1,298 @@
 "use client";
 
-/**
- * Setup wizard mounted at /setup.
- *
- * Walks a fresh-install operator through seven domains — password,
- * LLM model, gateway, memory, browser, account, search — by reusing
- * the existing `SettingsWorkspace` cards via its `forceSection` prop.
- * This component owns only the wizard chrome: the stepper, the
- * per-step header, and the Skip/Back/Next/Finish footer. No
- * SettingsWorkspace logic is duplicated.
- *
- * Step state survives page reloads via `localStorage["nerya.setup.step"]`.
- *
- * Why a separate wizard component (not a flag on SettingsWorkspace)?
- *
- * The Settings page is a power-user surface — every card is visible
- * at once and the user is expected to know what they're looking for.
- * The wizard is a sequential, one-screen-at-a-time guide that's
- * appropriate for first-run / re-onboarding flows. They share the
- * underlying state hooks via `forceSection`, but the chrome is
- * different on purpose.
- */
-
-import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { Card, PageBody, PageHeader, Pill } from "./Page";
-import { SettingsWorkspace, type ForceSectionKey } from "./SettingsWorkspace";
-import { clientApi } from "../lib/clientApi";
-import type { SetupReadinessEnvelope, ReadinessCheck } from "../lib/operatorTypes";
+import { ErrorBanner, PageBody, PageHeader } from "./Page";
+import { SettingsWorkspace } from "./SettingsWorkspace";
+import { AddAccountForm } from "./accounts/AddAccountForm";
+import { clientApi, type AccountSummary, type AuthStatus } from "../lib/clientApi";
+import { setStoredAuthToken } from "../lib/auth";
+import { confirm, toast } from "../lib/dialogs";
 
-type WizardStepKey =
-  | "password"
-  | "llm"
-  | "gateway"
-  | "memory"
-  | "browser"
-  | "account"
-  | "search";
+import type { SetupReadinessEnvelope } from "../lib/operatorTypes";
+import { STEPS, SetupSteps, setupSaved, resolveSetupStep, pendingSetupStep, type Step } from "./setup/SetupSteps";
+// Version the cursor: the old wizard started with password, not model setup.
+const STEP_STORAGE_KEY = "nerya.setup.step.v2";
 
-const STEP_ORDER: readonly WizardStepKey[] = [
-  "password",
-  "llm",
-  "gateway",
-  "memory",
-  "browser",
-  "account",
-  "search",
-] as const;
-
-const STEP_STORAGE_KEY = "nerya.setup.step";
-
-// Map each wizard step to either:
-//   - a `ForceSectionKey` so we mount the matching SettingsWorkspace
-//     panel inline (the cleanest reuse path), or
-//   - `null` when the step renders custom content (currently: account).
-// IMPORTANT: every wizard step maps to either a SettingsWorkspace
-// section (so we reuse those cards) or `null` for a custom step.
-// ``gateway`` USED to map to ``runtime``, which surfaced runtime
-// feature flags + Network proxy + Tunnels — none of which are
-// "Gateway" in the operator's mental model. It now mounts the real
-// per-platform messaging-channel configuration so the wizard's
-// Gateway step actually configures Telegram / Discord / Slack /
-// Feishu / WhatsApp / WeCom / Mattermost / Matrix / Email / SMS /
-// Home Assistant / Webhook / etc.
-const STEP_SECTIONS: Record<WizardStepKey, ForceSectionKey | null> = {
-  password: "access",
-  llm: "models",
-  gateway: "gateway",
-  memory: "memory",
-  browser: "browsers",
-  account: null,
-  search: "search",
+type StepProps = {
+  onComplete: () => void;
+  onBusyChange?: (busy: boolean) => void;
 };
 
-// Setup-readiness check `name` → wizard step. Used to colour the
-// stepper pills from the live readiness envelope so users see at a
-// glance which step still needs work.
-const READINESS_TO_STEP: Record<string, WizardStepKey> = {
-  "LLM provider": "llm",
-  "Trading account": "account",
-  // The remaining readiness checks (Strategy / Risk policy / Wallet)
-  // don't have a 1:1 wizard step. They surface in the readiness panel
-  // at the bottom of the page so the operator still sees them.
-};
-
-
-// ---------------------------------------------------------------------------
-// Stepper
-// ---------------------------------------------------------------------------
-
-type StepStatus = "pending" | "ok" | "warn" | "blocked";
-
-function Stepper({
-  current,
-  statuses,
-  labels,
-  onJump,
-}: {
-  current: WizardStepKey;
-  statuses: Record<WizardStepKey, StepStatus>;
-  labels: Record<WizardStepKey, string>;
-  onJump: (step: WizardStepKey) => void;
-}) {
-  return (
-    <nav aria-label="Setup wizard steps" className="mb-5">
-      <ol className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-7">
-        {STEP_ORDER.map((step, index) => {
-          const status = statuses[step];
-          const selected = step === current;
-          const tone =
-            status === "blocked"
-              ? "border-danger/50 text-danger"
-              : status === "warn"
-                ? "border-warn/50 text-warn"
-                : status === "ok"
-                  ? "border-ok/50 text-ok"
-                  : "border-[color:var(--line)] text-ink-300";
-          return (
-            <li key={step}>
-              <button
-                type="button"
-                aria-current={selected ? "step" : undefined}
-                onClick={() => onJump(step)}
-                className={[
-                  "block w-full rounded-lg border px-3 py-3 text-left transition-colors",
-                  selected
-                    ? "border-brand-400/60 bg-brand-500/10 text-white"
-                    : `${tone} hover:border-brand-500/30 hover:text-ink-100`,
-                ].join(" ")}
-              >
-                <span className="block text-[11px] font-mono text-ink-500">
-                  {String(index + 1).padStart(2, "0")}
-                </span>
-                <span className="mt-0.5 block text-[14px] font-medium">
-                  {labels[step]}
-                </span>
-              </button>
-            </li>
-          );
-        })}
-      </ol>
-    </nav>
-  );
-}
-
-
-// ---------------------------------------------------------------------------
-// Account step (custom — not backed by a forceSection)
-// ---------------------------------------------------------------------------
-
-function AccountStep() {
+function AccountStep({ onComplete, onBusyChange }: StepProps) {
   const t = useTranslations("setupWizard");
-  const [accountsCount, setAccountsCount] = useState<number | null>(null);
+  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    clientApi
-      .accountsList()
-      .then((res) => {
-        if (cancelled) return;
-        setAccountsCount((res?.accounts || []).length);
-      })
-      .catch(() => {
-        if (!cancelled) setAccountsCount(0);
+    let active = true;
+    setLoading(true);
+    setError("");
+    clientApi.accountsList().then((result) => {
+      if (!active) return;
+      if (!Array.isArray(result.accounts)) throw new Error(t("loadFailed"));
+      setAccounts(result.accounts);
+      setAdding(result.accounts.length === 0);
+    }).catch((value: unknown) => {
+      if (active) setError(value instanceof Error ? value.message : String(value));
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+    // A locale change must not reset an account draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt]);
+
+  useEffect(() => {
+    if (!adding) onBusyChange?.(loading);
+  }, [adding, loading, onBusyChange]);
+
+  if (loading) return <p role="status">{t("loading")}</p>;
+  if (error) return <ErrorBanner error={error} onRetry={() => setAttempt(value => value + 1)} />;
+  if (adding) return <AddAccountForm
+    setupMode
+    formId="nerya-setup-account"
+    onBusyChange={onBusyChange}
+    onCancel={accounts.length ? () => setAdding(false) : undefined}
+    onSaved={(account) => {
+      setAccounts(previous => [...previous.filter(row => row.profile.id !== account.profile.id), account]);
+      setAdding(false);
+      onComplete();
+    }}
+  />;
+
+  return <form id="nerya-setup-account" onSubmit={(event) => { event.preventDefault(); onComplete(); }} className="space-y-4">
+    <p role="status" className="text-sm text-[color:var(--text-base)]">{t("account.configured", { count: accounts.length })}</p>
+    <ul className="divide-y divide-[color:var(--line)] rounded-lg border border-[color:var(--line)] px-4">
+      {accounts.map(({ profile }) => <li key={profile.id} className="flex flex-wrap items-center justify-between gap-2 py-3 text-sm">
+        <span className="break-all font-medium">{profile.id}</span>
+        <span className="text-[color:var(--text-muted)]">{profile.venue} · {profile.mode}</span>
+      </li>)}
+    </ul>
+    <p className="text-sm text-[color:var(--text-muted)]">{t("account.keepExisting")}</p>
+    <button type="button" className="btn btn-secondary" onClick={() => setAdding(true)}>{t("account.add")}</button>
+  </form>;
+}
+
+function PasswordStep({ onComplete, onBusyChange }: StepProps) {
+  const t = useTranslations("setupWizard");
+  const tAuth = useTranslations("settings.authCard");
+  const [status, setStatus] = useState<AuthStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [rotate, setRotate] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    clientApi.authStatus().then(value => {
+      if (!value.ok) throw new Error(t("loadFailed"));
+      if (active) setStatus(value);
+    }).catch((value: unknown) => {
+      if (active) setLoadError(value instanceof Error ? value.message : String(value));
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [attempt]);
+  useEffect(() => { onBusyChange?.(loading || saving); }, [loading, saving, onBusyChange]);
+
+  async function submit() {
+    if (loading || saving || !status || loadError) return;
+    setError("");
+    if (status.password_configured && !rotate) { onComplete(); return; }
+    if (password.length < 8) { setError(tAuth("tooShort")); return; }
+    if (password !== confirmation) { setError(tAuth("mismatch")); return; }
+    setSaving(true);
+    try {
+      const result = await clientApi.authSetPassword({
+        new_password: password,
+        ...(status.password_configured ? { current_password: currentPassword } : {}),
       });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return (
-    <Card
-      title={t("steps.account")}
-      description={t("steps.accountDesc")}
-      actions={
-        accountsCount !== null ? (
-          <Pill tone={accountsCount > 0 ? "ok" : "warn"}>
-            {accountsCount} account{accountsCount === 1 ? "" : "s"}
-          </Pill>
-        ) : null
-      }
-    >
-      <div className="space-y-3">
-        <div className="rounded-lg border border-[color:var(--line)] bg-ink-950/40 p-3 text-[13px] text-ink-200">
-          {accountsCount === 0 ? (
-            <span className="text-warn">{t("account.noneConfigured")}</span>
-          ) : (
-            <>
-              <div className="text-ink-400">{t("account.current")}</div>
-              <div className="mt-1 font-mono text-[12px] text-ink-100">
-                {accountsCount} configured
-              </div>
-            </>
-          )}
-        </div>
-        <p className="text-[12px] leading-5 text-ink-500">
-          {t("account.openAccountsHint")}
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Link
-            href="/accounts"
-            className="btn btn-primary"
-          >
-            {t("openAccounts")}
-          </Link>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-
-// ---------------------------------------------------------------------------
-// Readiness summary (bottom of wizard)
-// ---------------------------------------------------------------------------
-
-function ReadinessSummary({ env }: { env: SetupReadinessEnvelope | null }) {
-  const t = useTranslations("setupWizard");
-  if (!env) return null;
-  const checks = env.data.checks || [];
-  if (!checks.length) return null;
-  return (
-    <Card
-      title={t("readinessTitle")}
-      description={env.summary}
-      actions={<Pill tone={env.status === "ok" ? "ok" : env.status === "warn" ? "warn" : "danger"}>{env.status}</Pill>}
-    >
-      <ul className="space-y-2">
-        {checks.map((chk: ReadinessCheck) => (
-          <li
-            key={chk.name}
-            className="flex items-start gap-3 rounded-lg border border-[color:var(--line)] px-3 py-2"
-          >
-            <span
-              className={[
-                "mt-1 inline-block h-2 w-2 rounded-full",
-                chk.status === "ok"
-                  ? "bg-ok"
-                  : chk.status === "warn"
-                    ? "bg-warn"
-                    : "bg-danger",
-              ].join(" ")}
-            />
-            <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-ink-100">{chk.name}</div>
-              <div className="mt-0.5 text-[12px] text-ink-400">{chk.summary}</div>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
-
-
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
-export function SetupWizard() {
-  const t = useTranslations("setupWizard");
-
-  const [stepIndex, setStepIndex] = useState(0);
-  const [readiness, setReadiness] = useState<SetupReadinessEnvelope | null>(null);
-  const [quickMode, setQuickMode] = useState(false);
-
-  // Hydrate persisted step from localStorage on the client only. Also
-  // detect `?mode=quick` to enable the single-step LLM-only view —
-  // the CLI's `nerya setup --quick --web` appends this query string so
-  // both surfaces share a single onboarding ergonomic.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("mode") === "quick") {
-      setQuickMode(true);
-      // Force the LLM step on first paint regardless of any persisted
-      // localStorage cursor.
-      const llmIdx = STEP_ORDER.indexOf("llm");
-      if (llmIdx >= 0) setStepIndex(llmIdx);
-      return;
-    }
-    const raw = window.localStorage.getItem(STEP_STORAGE_KEY);
-    if (!raw) return;
-    const idx = STEP_ORDER.indexOf(raw as WizardStepKey);
-    if (idx >= 0) setStepIndex(idx);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(STEP_STORAGE_KEY, STEP_ORDER[stepIndex]);
-  }, [stepIndex]);
-
-  // Live readiness polling — same 60s cadence as SetupReadinessCard.
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const next = await clientApi.setupReadiness();
-        if (!cancelled) setReadiness(next);
-      } catch {
-        // ignore — readiness is informational
-      }
-    }
-    load();
-    const id = setInterval(load, 60_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
-
-  const labels = useMemo<Record<WizardStepKey, string>>(
-    () => ({
-      password: t("steps.password"),
-      llm: t("steps.llm"),
-      gateway: t("steps.gateway"),
-      memory: t("steps.memory"),
-      browser: t("steps.browser"),
-      account: t("steps.account"),
-      search: t("steps.search"),
-    }),
-    [t]
-  );
-
-  const descriptions = useMemo<Record<WizardStepKey, string>>(
-    () => ({
-      password: t("steps.passwordDesc"),
-      llm: t("steps.llmDesc"),
-      gateway: t("steps.gatewayDesc"),
-      memory: t("steps.memoryDesc"),
-      browser: t("steps.browserDesc"),
-      account: t("steps.accountDesc"),
-      search: t("steps.searchDesc"),
-    }),
-    [t]
-  );
-
-  // Derive per-step status from the live readiness envelope.
-  const stepStatuses = useMemo<Record<WizardStepKey, StepStatus>>(() => {
-    const base: Record<WizardStepKey, StepStatus> = {
-      password: "pending",
-      llm: "pending",
-      gateway: "pending",
-      memory: "pending",
-      browser: "pending",
-      account: "pending",
-      search: "pending",
-    };
-    if (!readiness) return base;
-    for (const chk of readiness.data.checks || []) {
-      const key = READINESS_TO_STEP[chk.name];
-      if (key) {
-        base[key] =
-          chk.status === "ok"
-            ? "ok"
-            : chk.status === "warn"
-              ? "warn"
-              : "blocked";
-      }
-    }
-    return base;
-  }, [readiness]);
-
-  const currentStep = STEP_ORDER[stepIndex];
-  const sectionKey = STEP_SECTIONS[currentStep];
-  const isLast = stepIndex === STEP_ORDER.length - 1;
-  const blocking = readiness?.data.blocking?.length || 0;
-
-  function jumpTo(step: WizardStepKey) {
-    const idx = STEP_ORDER.indexOf(step);
-    if (idx >= 0) setStepIndex(idx);
+      if (!result.ok) throw new Error(result.detail || result.error || t("saveFailed"));
+      setCurrentPassword(""); setPassword(""); setConfirmation("");
+      setStatus(previous => previous ? { ...previous, password_configured: true } : previous);
+      setRotate(false); setVisible(false);
+      // Keep this transaction mounted until completion/readiness resolves. A same-tab
+      // auth refresh here would discard other steps' drafts and rewrite the cursor.
+      if (result.token) setStoredAuthToken(result.token, result.expires_at, { notify: false });
+      onComplete();
+    } catch (value) {
+      setError(value instanceof Error ? value.message : String(value));
+    } finally { setSaving(false); }
   }
 
-  return (
-    <PageBody>
-      <PageHeader
-        eyebrow={t("eyebrow")}
-        title={t("title")}
-        description={t("description")}
-        actions={
-          <Link href="/settings" className="btn btn-ghost">
-            {t("openSettings")}
-          </Link>
-        }
-      />
+  return <form id="nerya-setup-password" onSubmit={(event) => { event.preventDefault(); void submit(); }} className="space-y-4">
+    <ErrorBanner error={loadError} onRetry={() => setAttempt(value => value + 1)} />
+    {loading ? <p role="status">{t("loading")}</p> : null}
+    <fieldset disabled={loading || saving || !!loadError} className="min-w-0 space-y-4">
+      {status?.password_configured ? <div className="space-y-2 rounded-lg border border-[color:var(--line)] p-4">
+        <p role="status" className="text-sm">{t("passwordConfigured")}</p>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={rotate} onChange={event => setRotate(event.target.checked)} />
+          {t("changePassword")}
+        </label>
+      </div> : null}
+      {!status?.password_configured || rotate ? <>
+        {status?.password_configured ? <label className="block space-y-2 text-sm" htmlFor="setup-current-password">
+          <span>{tAuth("currentPassword")}</span>
+          <input id="setup-current-password" className="input-dark w-full" type="password" autoComplete="current-password" required
+            value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} />
+        </label> : null}
+        <label className="block space-y-2 text-sm" htmlFor="setup-password">
+          <span>{tAuth("newPassword")}</span>
+          <input id="setup-password" className="input-dark w-full" type={visible ? "text" : "password"} autoComplete="new-password" required minLength={8}
+            aria-describedby="setup-password-hint" value={password} onChange={event => setPassword(event.target.value)} />
+        </label>
+        <p id="setup-password-hint" className="text-xs text-[color:var(--text-muted)]">{tAuth("minLength")}</p>
+        <label className="block space-y-2 text-sm" htmlFor="setup-confirm-password">
+          <span>{tAuth("confirmPassword")}</span>
+          <input id="setup-confirm-password" className="input-dark w-full" type={visible ? "text" : "password"} autoComplete="new-password" required
+            value={confirmation} onChange={event => setConfirmation(event.target.value)} />
+        </label>
+        <label className="flex items-center gap-2 text-sm text-[color:var(--text-muted)]">
+          <input type="checkbox" checked={visible} onChange={event => setVisible(event.target.checked)} />{t("showPassword")}
+        </label>
+      </> : null}
+    </fieldset>
+    {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
+    <p className="text-sm leading-6 text-[color:var(--text-muted)]">{t("passwordNote")}</p>
+  </form>;
+}
 
-      {quickMode ? null : (
-        <Stepper
-          current={currentStep}
-          statuses={stepStatuses}
-          labels={labels}
-          onJump={jumpTo}
-        />
-      )}
+/** Only configuration is required here; runtime diagnostics never gate onboarding. */
+export function SetupWizard() {
+  const t = useTranslations("setupWizard");
+  const router = useRouter();
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [step, setStep] = useState<Step | null>(null);
+  const [visited, setVisited] = useState<Step[]>([]);
+  const [furthest, setFurthest] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [drafts, setDrafts] = useState<Set<Step>>(new Set());
+  const [readiness, setReadiness] = useState<SetupReadinessEnvelope | null>(null);
+  const [statusError, setStatusError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [confirming, setConfirming] = useState(false);
+  const working = busy || confirming;
 
-      <Card
-        title={labels[currentStep]}
-        description={
-          quickMode ? t("quickModeDescription") : descriptions[currentStep]
-        }
-        actions={
-          quickMode ? (
-            <Pill tone="brand">{t("quickModeBadge")}</Pill>
-          ) : (
-            <span className="font-mono text-[11px] text-ink-500">
-              {t("stepLabel", {
-                current: stepIndex + 1,
-                total: STEP_ORDER.length,
-              })}
-            </span>
-          )
-        }
-      >
-        <div className="mt-2">
-          {sectionKey ? (
-            // Reuse the full Settings panel for this domain. The wizard
-            // does NOT re-implement password / tier / gateway editing —
-            // it just mounts the existing cards inline. In quick mode
-            // we pass `compactLlm` so the tier-assignment matrix stays
-            // hidden — `nerya setup` (full wizard) is the surface for
-            // that, not the one-question quick path.
-            <SettingsWorkspace
-              forceSection={sectionKey}
-              compactLlm={quickMode && sectionKey === "models"}
-              // Layout-only: the wizard step card already carries the
-              // domain title + step counter, so the embedded panel must
-              // not render a second ("Settings" / "Memory"…) header.
-              hideHeader
-            />
-          ) : (
-            <AccountStep />
-          )}
-        </div>
-      </Card>
+  useEffect(() => {
+    let active = true;
+    setStatusError("");
+    clientApi.setupReadiness().then(env => {
+      if (!Array.isArray(env.data?.checks)) throw new Error();
+      if (!active) return;
+      const query = new URLSearchParams(window.location.search);
+      let requested = query.get("mode") === "quick" ? "llm" : query.get("step");
+      if (!requested) {
+        try { requested = window.localStorage.getItem(STEP_STORAGE_KEY); } catch { /* UI preference only. */ }
+      }
+      const initial = resolveSetupStep(env, requested);
+      const missing = pendingSetupStep(env, new Set());
+      setReadiness(env); setStep(initial); setVisited([initial]);
+      setFurthest(missing ? STEPS.indexOf(missing) : STEPS.length - 1);
+    }).catch(() => { if (active) setStatusError(t("loadFailed")); });
+    return () => { active = false; };
+    // Locale changes must not reload/reset in-memory drafts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt]);
 
-      {quickMode ? (
-        <Card
-          title={t("quickFinishTitle")}
-          description={t("quickFinishDescription")}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-[12px] leading-5 text-ink-400">
-              {t("quickFinishHint")}{" "}
-              <span className="font-mono text-ink-200">nerya setup</span>
-            </p>
-            <Link href="/" className="btn btn-primary">
-              {t("finish")} →
-            </Link>
-          </div>
-        </Card>
-      ) : (
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => setStepIndex((idx) => Math.max(0, idx - 1))}
-            disabled={stepIndex === 0}
-          >
-            ← {t("back")}
-          </button>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => setStepIndex((idx) => Math.min(STEP_ORDER.length - 1, idx + 1))}
-              disabled={isLast}
-            >
-              {t("skip")}
-            </button>
-            {!isLast ? (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => setStepIndex((idx) => Math.min(STEP_ORDER.length - 1, idx + 1))}
-              >
-                {t("next")} →
-              </button>
-            ) : (
-              <Link href="/" className="btn btn-primary">
-                {t("finish")} →
-              </Link>
-            )}
-          </div>
-        </div>
-      )}
+  useEffect(() => {
+    if (!step) return;
+    try { window.localStorage.setItem(STEP_STORAGE_KEY, step); } catch { /* UI preference only. */ }
+    heading.current?.focus({ preventScroll: true });
+    heading.current?.closest("main")?.scrollTo({ top: 0 });
+  }, [step]);
 
-      {isLast && !quickMode ? (
-        <Card
-          title={t("finishedTitle")}
-          description={t("finishedDescription")}
-        >
-          <div className="flex flex-wrap gap-2">
-            <Link href="/" className="btn btn-primary">
-              {t("runtimeButton")}
-            </Link>
-            <Link href="/settings" className="btn btn-ghost">
-              {t("settingsButton")}
-            </Link>
-          </div>
-          {blocking ? (
-            <p className="mt-3 text-[12px] text-warn">
-              {t("blockingRemaining", {
-                count: blocking,
-                command: "nerya setup",
-              })}
-            </p>
-          ) : (
-            <p className="mt-3 text-[12px] text-ok">
-              {t("readyToStart")}
-            </p>
-          )}
-        </Card>
-      ) : null}
+  useEffect(() => {
+    if (!drafts.size) return;
+    const protectDrafts = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", protectDrafts);
+    return () => window.removeEventListener("beforeunload", protectDrafts);
+  }, [drafts]);
 
-      <ReadinessSummary env={readiness} />
+  function goTo(next: Step) {
+    setBusy(false);
+    setVisited(previous => previous.includes(next) ? previous : [...previous, next]);
+    setStep(next);
+  }
 
-      <div className="text-center text-[11px] font-mono text-ink-500">
-        {t("rerunHint")} <span className="text-ink-300">nerya setup</span>
-      </div>
-    </PageBody>
-  );
+  async function complete(completed: Step, saved = true) {
+    const remainingDrafts = new Set(drafts);
+    // Retrying a status read must never mark an unsaved form as saved.
+    if (saved) remainingDrafts.delete(completed);
+    setDrafts(remainingDrafts);
+    setConfirming(true); setStatusError("");
+    try {
+      const env = await clientApi.setupReadiness();
+      if (!Array.isArray(env.data?.checks)) throw new Error();
+      setReadiness(env);
+      if (!setupSaved(env, completed) || remainingDrafts.has(completed)) {
+        setStatusError(t("notSaved")); return;
+      }
+      const index = STEPS.indexOf(completed);
+      const missing = pendingSetupStep(env, remainingDrafts);
+      if (missing && STEPS.indexOf(missing) <= index) {
+        goTo(missing); setStatusError(t("notSaved")); return;
+      }
+      if (index === STEPS.length - 1) {
+        try { window.localStorage.removeItem(STEP_STORAGE_KEY); } catch { /* UI preference only. */ }
+        toast({ message: t("finishedDescription"), tone: "ok" });
+        router.replace("/");
+      } else {
+        setFurthest(previous => Math.max(previous, index + 1));
+        goTo(STEPS[index + 1]);
+      }
+    } catch { setStatusError(t("confirmFailed")); }
+    finally { setConfirming(false); }
+  }
+
+  async function openSettings() {
+    if (drafts.size && !(await confirm({ title: t("leaveTitle"), message: t("leaveDescription"), tone: "warning" }))) return;
+    router.push("/settings");
+  }
+
+  if (!step) return <PageBody>
+    {statusError ? <ErrorBanner error={statusError} onRetry={() => setAttempt(value => value + 1)} />
+      : <p role="status" className="py-10">{t("loading")}</p>}
+  </PageBody>;
+  const index = STEPS.indexOf(step);
+  return <PageBody>
+    <div className="mx-auto w-full max-w-3xl space-y-5" data-testid="setup-wizard">
+    <PageHeader eyebrow={t("eyebrow")} title={t("title")} description={t("description")}
+      actions={<button type="button" className="btn btn-ghost" disabled={working} onClick={() => void openSettings()}>{t("openSettings")}</button>} />
+    <SetupSteps current={step} busy={working} furthest={furthest} saved={readiness} drafts={drafts} onChange={goTo} />
+    <ErrorBanner error={statusError} onRetry={working ? undefined : () => void complete(step, false)} />
+    <div className="space-y-2 pt-3">
+      <p className="text-xs text-[color:var(--text-muted)]">{t("stepLabel", { current: index + 1, total: STEPS.length })}</p>
+      <h2 ref={heading} tabIndex={-1} style={{ outline: "none" }} className="text-xl font-semibold">{t(`steps.${step}`)}</h2>
+      <p className="text-sm leading-6 text-[color:var(--text-muted)]">{t(`steps.${step}Desc`)}</p>
+    </div>
+    {/* Keep visited panels mounted so Back never discards an in-memory draft. */}
+    {visited.map(item => <section key={item} hidden={item !== step} aria-label={t(`steps.${item}`)}
+      onChangeCapture={() => { setStatusError(""); setDrafts(previous => new Set(previous).add(item)); }}>
+      <fieldset disabled={confirming} className="min-w-0">
+      {item === "llm" ? <SettingsWorkspace forceSection="models" hideHeader setupMode
+        onSetupComplete={() => complete("llm")} onSetupBusyChange={item === step ? setBusy : undefined} />
+        : item === "account" ? <AccountStep onComplete={() => complete("account")} onBusyChange={item === step ? setBusy : undefined} />
+        : <PasswordStep onComplete={() => complete("password")} onBusyChange={item === step ? setBusy : undefined} />}
+      </fieldset>
+    </section>)}
+    <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-[color:var(--line)] bg-[color:var(--bg)] py-4">
+      <button type="button" className="btn btn-ghost" disabled={working || index === 0} onClick={() => goTo(STEPS[index - 1])}>{t("back")}</button>
+      <button type="submit" form={`nerya-setup-${step}`} className="btn btn-primary" disabled={working}>
+        {working ? t("working") : step === "password" ? t("finish") : t("saveContinue")}
+      </button>
+    </footer>
+    <p className="text-center text-xs leading-5 text-[color:var(--text-muted)]">{t("onlyThreeSteps")}</p>
+    </div>
+  </PageBody>;
 }

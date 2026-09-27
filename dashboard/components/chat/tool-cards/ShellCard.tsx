@@ -1,5 +1,7 @@
 "use client";
+import { Icon as NeryaGlyph } from "../../icons";
 
+import { useLocale } from 'next-intl';
 import type { NativeBlock } from "../../../lib/chat";
 import { CopyButton, Tag, ToolRowCard } from "./atoms";
 import { recordOf } from "./helpers";
@@ -34,13 +36,19 @@ export function ShellCard({
   block,
   variant,
   pending = false,
+  defaultOpen = false,
 }: {
   block: NativeBlock;
   variant: "use" | "result";
   pending?: boolean;
+  defaultOpen?: boolean;
 }) {
+  const zh = useLocale().startsWith('zh');
   const payload = recordOf(block.payload);
-  const command = String(payload.command || "");
+  const script = block.action === 'script_run';
+  const command = script ? `${String(payload.skill_id || block.skill_id || '')}/${String(payload.name || '')}${Array.isArray(payload.args) ? ' ' + payload.args.map(String).join(' ') : ''}` : String(payload.command || "");
+  const structuredScript = script && recordOf(block.result).stdout_json != null;
+  const label = script ? (zh ? '运行脚本' : 'Run script') : 'Ran command';
   const description = String(payload.description || "");
   const cwd = String(payload.cwd || "");
   const isResult = variant === "result";
@@ -48,20 +56,17 @@ export function ShellCard({
   const { stdout, stderr, exit, pid, cwd: rcwd } = shellOutputs(block);
   const ranBackground =
     block.metadata && (block.metadata as Record<string, unknown>).background === true;
-  const title = description || "Ran command";
+  const title = description || label;
   const subtitle = command.length > 120 ? `${command.slice(0, 120)}\u2026` : command;
 
   return (
     <ToolRowCard
       icon={
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="4 17 10 11 4 5" />
-          <line x1="12" y1="19" x2="20" y2="19" />
-        </svg>
+        <NeryaGlyph name={script ? 'scripts' : 'terminal'} size={16} />
       }
       title={
         <span className="inline-flex min-w-0 items-center gap-1.5">
-          <span className="shrink-0">Ran command</span>
+          <span className="shrink-0">{label}</span>
           {pending ? (
             <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
               <span className="typing-dot" />
@@ -72,11 +77,11 @@ export function ShellCard({
       }
       subtitle={
         <span className="font-mono">
-          {title === "Ran command" ? subtitle : `${title} · ${subtitle}`}
+          {title === label ? subtitle : `${title} · ${subtitle}`}
         </span>
       }
       tone={ok ? "neutral" : "err"}
-      defaultOpen={pending}
+      defaultOpen={defaultOpen || pending}
       meta={
         <>
           {ranBackground ? <Tag tone="brand">background</Tag> : null}
@@ -115,7 +120,7 @@ export function ShellCard({
             <span className="text-ink-500 select-none">$ </span>
             <span className="text-ink-100">{command}</span>
           </div>
-          {isResult && stdout ? (
+          {isResult && stdout ? (structuredScript ? <details className="mt-2" data-testid="script-structured-output"><summary className="cursor-pointer py-2 text-[color:var(--text-muted)]">{zh ? '已返回结构化结果 · 展开脚本输出' : 'Structured result returned · expand script output'}</summary><pre className="text-ink-200 whitespace-pre-wrap mt-2">{stdout}</pre></details> :
             <pre className="text-ink-200 whitespace-pre-wrap mt-2">{stdout}</pre>
           ) : null}
           {isResult && stderr ? (

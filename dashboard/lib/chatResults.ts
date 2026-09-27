@@ -1,17 +1,29 @@
 import type { ArtifactIndex, VerifierOutcome, ExecutionState } from "./workbench";
-import { topLevelDecisionText, type AssistantMessage, type ChatThread, type NativeBlock, type NativeBlockEnvelope, type TurnPayload } from "./chat";
+import { type AssistantMessage, type ChatThread, type NativeBlock, type NativeBlockEnvelope, type TurnPayload } from "./chat";
 
 export type ChatResult = { id: string; title: string; text: string; ts: number; turnId?: string; agentId?: string; attempt?: number; evidence?: { artifacts?: ArtifactIndex; verifier?: VerifierOutcome; execution?: ExecutionState } };
 const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
 const normalized = (value: unknown): string => text(value).replace(/\s+/g, " ");
 
-/** Final fields win over legacy reasoning; never publish an in-flight draft. */
+/** Only explicitly public fields can become a result; reasoning is never a fallback. */
 export function finalReplyText(message: AssistantMessage): string {
   // External call/progress rows belong to the conversation, never the final-answer canvas.
   if (message.loading || message.error || !message.turn || message.turn.external_call) return "";
   const turn = message.turn;
-  return text(turn.reply_text) || text(turn.final_text) || text(turn.decision?.text)
-    || topLevelDecisionText(turn);
+  return text(turn.reply_text) || text(turn.final_text) || text(turn.decision?.text);
+}
+
+/** Reuse the event reducer's text blocks; tool outputs and thinking stay in the trace. */
+export function publicReplyText(message: AssistantMessage, blocks: NativeBlockEnvelope[]): string {
+  if (message.turn?.external_call) return "";
+  return finalReplyText(message) || blocks.flatMap(env => {
+    const block = env.block || env as NativeBlock;
+    return (block.kind || env.kind) === "text" && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n\n");
+}
+
+export function withoutPublicText(blocks: NativeBlockEnvelope[]): NativeBlockEnvelope[] {
+  return blocks.filter(env => ((env.block || env as NativeBlock).kind || env.kind) !== "text");
 }
 
 /** Canvas reads the same saved turns as chat, not a second copy or a generated summary. */

@@ -3,6 +3,7 @@
 import {
   cloneElement,
   isValidElement,
+  memo,
   type ReactElement,
   type ReactNode,
 } from "react";
@@ -200,24 +201,26 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
-export function Markdown({
+export const Markdown = memo(function Markdown({
   children,
   className = "",
+  streaming = false,
 }: {
   children: string;
   className?: string;
+  streaming?: boolean;
 }) {
   return (
     <div className={`nerya-markdown min-w-0 break-words ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={streaming ? [] : [rehypeHighlight]}
         components={components}
       >
         {children}
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 export default Markdown;

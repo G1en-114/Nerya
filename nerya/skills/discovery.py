@@ -17,8 +17,8 @@ def catalog_parent(metadata: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def catalog_ids(rows: Iterable[tuple[str, Path | None, str]]) -> set[str]:
-    """Return visible IDs; missing hubs and malformed cycles stay discoverable."""
+def catalog_roots(rows: Iterable[tuple[str, Path | None, str]]) -> dict[str, str]:
+    """Map each entry to its visible workflow, without changing permissions."""
     entries = {name: (path, parent) for name, path, parent in rows}
     parents: dict[str, str] = {}
     for name, (path, declared) in entries.items():
@@ -33,14 +33,25 @@ def catalog_ids(rows: Iterable[tuple[str, Path | None, str]]) -> set[str]:
             ]
             if ancestors:
                 parents[name] = max(ancestors)[1]
-    visible = set(entries) - parents.keys()
+    roots = {name: name for name in entries}
     for name in parents:
         seen = {name}
         current = parents[name]
         while current in parents and current not in seen:
             seen.add(current)
             current = parents[current]
-        if current in seen:
-            # Fail open for catalog mistakes; do not make a cycle disappear.
-            visible.add(name)
-    return visible
+        if current not in seen:
+            roots[name] = current
+        # Fail open for catalog mistakes; do not make a cycle disappear.
+    return roots
+
+
+def catalog_ids(rows: Iterable[tuple[str, Path | None, str]]) -> set[str]:
+    """Return visible IDs; missing hubs and malformed cycles stay discoverable."""
+    return {name for name, root in catalog_roots(rows).items() if name == root}
+
+
+def catalog_group(metadata: Any) -> str:
+    """Optional presentation group; unknown/custom entries stay in core."""
+    nerya = metadata.get("nerya") if isinstance(metadata, dict) else None
+    return "professional" if isinstance(nerya, dict) and nerya.get("catalog_group") == "professional" else "core"

@@ -473,10 +473,34 @@ class StrategyCodeGenerator:
     def _render_main(req: StrategyGenerationRequest) -> str:
         execution_mode = _execution_mode(req)
         if execution_mode == "agent_team":
-            return _agent_team_template(req)
-        if execution_mode == "agent":
-            return _agent_task_template(req)
-        return _MAIN_TEMPLATES[_template_class(req)](req)
+            source = _agent_team_template(req)
+        elif execution_mode == "agent":
+            source = _agent_task_template(req)
+        else:
+            source = _MAIN_TEMPLATES[_template_class(req)](req)
+        logic = (
+            "Collect strategy inputs and dispatch analysis to the configured Agent roles; replay may use the template's script fallback."
+            if execution_mode in {"agent", "agent_team"} else {
+                "scalping": "Combine momentum, RSI and volume for entry; inspect the strategy's position for tactical exits and bracket protection.",
+                "trend": "Compute moving-average signals and features; use the configured subagent recommendation when present, otherwise evaluate crosses and the strategy's position.",
+                "news": "Read new items, classify them and evaluate the configured analysis recommendation; replay uses the template's historical fallback.",
+            }[_template_class(req)]
+        )
+        # Only describe our known scaffold. Caller-supplied files still win.
+        title = " ".join((req.title or req.strategy_id).split())[:200]
+        header = (
+            f"# @nerya.version 1\n# @nerya.title {title}\n"
+            "# @nerya.description Generated baseline template; review and adapt its rules to the intended strategy.\n"
+            f"# @nerya.logic {logic}\n"
+            "# @nerya.rationale Provide an inspectable starting point for validation, not evidence of an effective strategy.\n"
+            "# @nerya.scope main.py: one strategy invocation; scheduling and permissions come from strategy.yml.\n"
+            "# @nerya.input Configured markets, available data and strategy context.\n"
+            "# @nerya.output A strategy result or Agent dispatch, depending on the configured execution mode.\n"
+            "# @nerya.risk Missing data, execution costs and model uncertainty can invalidate the intended signal.\n"
+            "# @nerya.validation Template generation is not a test result; validate the final files and replay before use.\n"
+        )
+        source = source.replace("def run(", f"# @nerya.step evaluate | Evaluate strategy rules | {logic}\ndef run(", 1)
+        return header + source
 
     @staticmethod
     def _render_contract_test(req: StrategyGenerationRequest) -> str:
@@ -578,6 +602,14 @@ def _normalize_inline_manifest(content: str) -> str:
             execution_schedule,
             default_cron="*/5 * * * *",
         )
+
+    if "schedule_enabled" in raw:
+        enabled = raw.pop("schedule_enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("schedule_enabled must be a boolean")
+        schedule = normalize_schedule(raw.get("schedule"), default_cron="*/5 * * * *")
+        schedule["enabled"] = enabled
+        raw["schedule"] = schedule
 
     tuning = raw.get("tuning")
     if isinstance(tuning, dict):
@@ -1163,6 +1195,8 @@ def _looks_like_timeframe_literal(node: ast.AST) -> bool:
 def _default_strategy_market_expr(req: StrategyGenerationRequest) -> str:
     if len(req.markets) == 1:
         return "ctx.config.markets[0]"
+    # Multi-market callbacks must prefer the actual routed event market. A
+    # config list is the universe, not the current callback identity.
     return "(ctx.trigger.get('market') or ctx.config.markets[0])"
 
 
@@ -1544,9 +1578,7 @@ def _agent_session_block(
     req: StrategyGenerationRequest,
     execution_mode: str,
 ) -> dict[str, Any]:
-    policy = "per_strategy_market_timeframe"
-    if execution_mode == "agent_team":
-        policy = "per_signal"
+    policy = "per_strategy"
     return {
         "policy": policy,
         "ttl_seconds": 86400,
@@ -1803,7 +1835,7 @@ def _scalping_template(req: StrategyGenerationRequest) -> str:
         "\n"
         "def run(ctx: StrategyContext) -> StrategyResult:\n"
         '    """Single tick entry point invoked by StrategyRunner."""\n'
-        "    market = ctx.config.markets[0]\n"
+        "    market = ctx.trigger.get('market') or ctx.config.markets[0]\n"
         '    candles = ctx.market.candles(market, timeframe="1m", limit=120)\n'
         "    if len(candles) < 20:\n"
         '        return ctx.result.hold(reason="not enough candles")\n'
@@ -1913,8 +1945,6 @@ def _trend_template(req: StrategyGenerationRequest) -> str:
     else:
         subagent_call = (
             "    signal = _ma_cross_signal(candles)\n"
-            '    if signal["cross"] == "none":\n'
-            '        return ctx.result.hold(reason="no moving-average cross", metadata={"signal": signal, "features": features})\n'
             "    # v6 side-aware exit/entry. ``positions(market)`` returns this\n"
             "    # strategy's own share (NOT the merged total), so ``signed`` is\n"
             "    # the slice this strategy is responsible for.\n"
@@ -1924,6 +1954,22 @@ def _trend_template(req: StrategyGenerationRequest) -> str:
             "        float(position.get('size') or position.get('quantity') or position.get('qty') or 0.0)\n"
             "        if position else 0.0\n"
             "    )\n"
+            "    last = float(candles[-1].get('close') or 0.0)\n"
+            "    entry = float(position.get('avg_price') or position.get('entry_price') or last) if position else 0.0\n"
+            "    side_factor = 1.0 if signed >= 0 else -1.0\n"
+            "    pnl_pct = ((last - entry) / entry) * side_factor if entry and signed else 0.0\n"
+            "    # Historical OHLCV replay cannot run live bracket executors.\n"
+            "    # Check 2%/5% exits on every candle, even without an MA cross.\n"
+            "    # These closed-candle exits are not proof of intra-bar live\n"
+            "    # bracket fill prices or execution timing.\n"
+            "    if abs(signed) > 0 and (pnl_pct <= -0.02 or pnl_pct >= 0.05):\n"
+            "        position_side = 'long' if signed > 0 else 'short'\n"
+            "        return ctx.trading.close_position(\n"
+            "            market=market, side=position_side, confidence=0.68,\n"
+            "            reasoning_ref=f'protective_exit pnl={pnl_pct:.4f}',\n"
+            "        )\n"
+            '    if signal["cross"] == "none":\n'
+            '        return ctx.result.hold(reason="no moving-average cross", metadata={"signal": signal, "features": features})\n'
             "    cross_side = \"long\" if signal[\"cross\"] == \"golden_cross\" else \"short\"\n"
             "    # A cross that aligns with the existing share is a no-op for\n"
             "    # this template — doubling down on a trend without sizing logic\n"
@@ -1968,7 +2014,7 @@ def _trend_template(req: StrategyGenerationRequest) -> str:
         "from nerya.strategies import StrategyContext, StrategyResult\n\n"
         "\n"
         "def run(ctx: StrategyContext) -> StrategyResult:\n"
-        "    market = ctx.config.markets[0]\n"
+        "    market = ctx.trigger.get('market') or ctx.config.markets[0]\n"
         '    timeframe = ctx.trigger.get("timeframe") or ctx.trigger.get("interval") or "15m"\n'
         "    candles = ctx.market.candles(market, timeframe=timeframe, limit=160)\n"
         "    features = ctx.market.features(market, timeframe=timeframe, lookback=160)\n"
@@ -2114,20 +2160,15 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         "    positions = ctx.portfolio.positions(market)\n"
         "    position = positions[0] if positions else None\n"
         "    signed = float(position.get('size') or position.get('quantity') or position.get('qty') or 0.0) if position else 0.0\n"
-        "    # v6 contract: entries ship bracket TP/SL via open_position so the\n"
-        "    # backtest harness exercises the same protection-armed path the\n"
-        "    # live runtime uses. Exits route through close_position so the\n"
-        "    # protection is released atomically and ``SizingPolicy(close_all)``\n"
-        "    # picks up the full slice.\n"
+        "    # Historical replay validates the script branch without invoking\n"
+        "    # live bracket executors. Live/paper Agent execution still requires\n"
+        "    # protection on actual entry intents.\n"
         "    if action == 'buy' and not position and confidence >= max(0.0, ctx.policy.min_confidence):\n"
         "        return ctx.trading.open_position(\n"
         "            market=market,\n"
         "            side='long',\n"
         "            sizing={'method': 'fixed_usd', 'fixed_usd': ctx.policy.default_order_usd},\n"
-        "            protection={\n"
-        "                'stop_loss': {'type': 'pct', 'value': 0.01},\n"
-        "                'take_profit': {'type': 'pct', 'value': 0.02},\n"
-        "            },\n"
+        "            protection={'stop_loss': {'type': 'pct', 'value': 0.01}, 'take_profit': {'type': 'pct', 'value': 0.02}},\n"
         "            confidence=confidence,\n"
         "            reasoning_ref=f\"backtest_script_signal {signal.get('name')}\",\n"
         "        )\n"
@@ -2566,6 +2607,7 @@ def _default_subagent_prompt(
         f"You are the `{name}` subagent. Return a structured trade recommendation;\n"
         "the strategy runner decides whether to execute it.\n\n"
         "## Output schema\n\n"
+        "Before changing a strategy, load Skill(skill=\"strategy_author\", file=\"references/explanations.md\"). Keep its source annotations synchronized with the proposed logic.\n\n"
         "```json\n"
         "{\n"
         '  "recommendation": "buy|sell|hold|reduce|avoid",\n'
@@ -2609,8 +2651,7 @@ def _tuning_subagent_prompt(req: StrategyGenerationRequest) -> str:
         '  "summary": "...",\n'
         '  "evidence": [{ "source": "strategy_runs", "finding": "..." }],\n'
         '  "proposed_changes": [\n'
-        '    {"file": "main.py", "kind": "code_patch", "rationale": "..."},\n'
-        '    {"file": "strategy.yml", "kind": "config_patch", "rationale": "..."}\n'
+        '    {"file": "main.py", "kind": "full_file", "after_content": "<complete source with @nerya comments>", "summary": "<plain-language change>", "before_summary": "<previous behavior>", "after_summary": "<proposed behavior>", "scope": ["<affected rule or branch>"], "rationale": "<reason tied to evidence>"}\n'
         "  ],\n"
         '  "expected_effect": {"return": "neutral_or_better", "drawdown": "lower"},\n'
         '  "validation_plan": ["unit", "fixture_replay", "backtest", "shadow_run"],\n'

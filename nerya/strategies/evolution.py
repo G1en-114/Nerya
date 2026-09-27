@@ -132,6 +132,8 @@ _OPTIMIZER_FEEDBACK_CALIBRATION_WARNING_MULTIPLIERS = {
     "no_proposal_outcome_samples": 0.7,
 }
 _TUNING_MATERIALIZATION_CONTRACT = """Strategy tuning materialization contract:
+- First load Skill(skill="strategy_author", file="references/explanations.md") for source documentation and readable reviews.
+- Explain the conclusion in summary, cite evidence, and include summary, before_summary, after_summary, scope (human-readable string array) and rationale for every proposed change. Preserve and update @nerya.version 1 source comments with each logic change. Planned validation and expected_effect are not achieved results.
 - For any code or prompt mutation you want Nerya to apply, return full replacement file content, not only prose, diff text, or a patch summary.
 - Use proposed_changes entries shaped like {"file":"main.py","kind":"full_file","after_content":"<complete file content>","rationale":"..."} for Python/prompt/text targets.
 - Use {"file":"strategy.yml","kind":"config","config_after":{...},"rationale":"..."} or {"file":"strategy.yml","kind":"config","yaml_after":"<complete YAML mapping>","rationale":"..."} for YAML targets.
@@ -150,6 +152,8 @@ _CANDIDATE_LOCAL_KEYS = {
     "proposed_patches",
     "changes",
     "summary",
+    "rationale",
+    "scope",
     "validation_plan",
     "expected_effect",
     "risk_flags",
@@ -234,9 +238,40 @@ class StrategyEvolutionRunner:
         inspect what *would* have been proposed.
         """
 
+        from .tuning_history import record_tuning_result
+
         run_id = new_id("tune")
         started = now_iso()
         t0 = time.monotonic()
+        request = {"operator": operator, "note": note, "dry_run": dry_run,
+                   "trigger_event_id": trigger_event_id,
+                   "evidence_run_ids": list(evidence_run_ids or ()),
+                   "evidence_session_ids": list(evidence_session_ids or ())}
+
+        def record(value: dict[str, Any]) -> None:
+            try:
+                record_tuning_result(self.paths, {**value, "request": request})
+            except Exception:
+                _LOG.exception("review replay recording failed")
+
+        record({"run_id": run_id, "strategy_id": strategy_id,
+                "started_at": started, "status": "running"})
+        try:
+            result = self._run_once(strategy_id, run_id=run_id, started=started, t0=t0, **request)
+        except Exception as exc:
+            record(self._error(run_id, strategy_id, started, t0,
+                               kind="unexpected", message=f"{type(exc).__name__}: {exc}").asdict())
+            raise
+        record(result.asdict())
+        return result
+
+    def _run_once(
+        self, strategy_id: str, *, run_id: str, started: str, t0: float,
+        operator: Optional[str] = None, note: str = "", dry_run: bool = False,
+        trigger_event_id: Optional[str] = None,
+        evidence_run_ids: Iterable[str] | None = None,
+        evidence_session_ids: Iterable[str] | None = None,
+    ) -> TuningRunResult:
         try:
             pkg = load_package(self.paths, strategy_id)
         except Exception as exc:
@@ -547,6 +582,18 @@ class StrategyEvolutionRunner:
             warnings=list(warnings),
         )
         self._journal(result, pkg=pkg, dry_run=dry_run, operator=operator)
+        if not dry_run and result.status in {"ok", "hold"} and audit_path and output.get("summary"):
+            from ..memory.runtime import MemoryRuntime
+            try:
+                MemoryRuntime(self.config, strategy_id=pkg.strategy_id, workflow_id="evolution").remember(
+                    category="session_summary", key=f"review.{run_id}",
+                    content="Review observation (not a validated improvement): " + str(output["summary"]),
+                    source="strategy_tuning:review", writer_id="strategy_tuner",
+                    evidence_refs=[f"file:{audit_path.relative_to(self.paths.root).as_posix()}"],
+                    confidence=0.5,
+                )
+            except (OSError, ValueError):
+                _LOG.warning("Could not retain tuning review memory", exc_info=True)
         return result
 
     # ------------------------------------------------------------------
@@ -581,7 +628,11 @@ class StrategyEvolutionRunner:
             c for c in selected_assets.get("capsules", [])
             if float(c.get("outcome_score") or 0.0) < 0.0
         ]
+        from ..memory.runtime import MemoryRuntime
+        memory = MemoryRuntime(self.config, strategy_id=pkg.strategy_id, workflow_id="evolution")
+        memory_context = memory.context(" ".join(cfg.objectives), max_chars=2400)
         payload = {
+            "memory_context": memory_context.stable + memory_context.dynamic,
             "__team_instructions": _strategy_tuning_team_instructions(pkg),
             "strategy_id": pkg.strategy_id,
             "strategy_class_hint": pkg.manifest.extras.get("strategy_class"),
@@ -654,6 +705,7 @@ class StrategyEvolutionRunner:
                 "raw_subagent_output": redact_display_dict(envelope.get("raw_output") or {}),
                 "optimizer_report": redact_display_dict(envelope.get("optimizer_report") or {}),
                 "prompt_records": audit.get("prompt_records") or [],
+                "conversation": redact_display_dict(audit.get("conversation") or []),
                 "metrics": redact_display_dict(envelope.get("metrics") or {}),
                 "steps": redact_display_dict(envelope.get("steps") or []),
                 "subagent_output": redact_display_dict(envelope.get("output") or {}),
@@ -3599,11 +3651,8 @@ def _render_review(
     lines.append("## Summary")
     summary = str(output.get("summary") or "—")
     lines.append(summary)
-    lines.append("")
-    lines.append("## Performance snapshot")
-    lines.append("```json")
-    lines.append(_json_dumps(snapshot.asdict()))
-    lines.append("```")
+    if output.get("rationale"):
+        lines.extend(["", "## Why change", str(output["rationale"])])
     lines.append("")
     lines.append("## Accepted changes")
     if not accepted:
@@ -3614,6 +3663,12 @@ def _render_review(
             kind = c.get("kind") or "patch"
             rationale = c.get("rationale") or ""
             lines.append(f"- `{target}` ({kind}): {rationale}")
+            for key, label in (("before_summary", "Before"), ("after_summary", "After")):
+                if c.get(key):
+                    lines.append(f"  - {label}: {c[key]}")
+            scope = c.get("scope")
+            if isinstance(scope, list):
+                lines.append("  - Scope: " + "; ".join(str(item) for item in scope))
     lines.append("")
     lines.append("## Dropped changes")
     if not dropped:
@@ -3629,10 +3684,11 @@ def _render_review(
         for w in warnings:
             lines.append(f"- {w}")
     lines.append("")
-    lines.append("## Subagent output")
+    lines.extend(["<details>", "<summary>Performance snapshot and recorded output</summary>", "", "## Performance snapshot", "```json", _json_dumps(snapshot.asdict()), "```", "", "## Subagent output"])
     lines.append("```json")
     lines.append(_json_dumps(output))
     lines.append("```")
+    lines.append("\n</details>")
     return "\n".join(lines) + "\n"
 
 

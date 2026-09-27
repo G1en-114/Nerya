@@ -37,6 +37,7 @@ import type {
   TriggerSchedule,
 } from "../../lib/clientApi";
 import { useCadenceHint } from "../../lib/useStrategyLifecycle";
+import { ScheduledExecutionReceipt } from "../../components/workflows/ScheduledExecutionReceipt";
 
 type ScheduleKind = "agent" | "script" | "trigger";
 type CadenceKind = "cron" | "interval";
@@ -215,7 +216,7 @@ function buildDraftFromSchedule(schedule: TriggerSchedule): ScheduleDraft {
     everySeconds: String(schedule.every_seconds ?? 3600),
     timezone: schedule.timezone || "Asia/Shanghai",
     sessionKind: kind,
-    sessionMode: schedule.session_mode || "ephemeral",
+    sessionMode: schedule.session_mode || "reuse",
     sessionId: schedule.session_id || "",
     sessionIds: (schedule.session_ids || []).join(", "),
     attachedSkills: (schedule.attached_skills || []).join(", "),
@@ -929,6 +930,7 @@ function ScheduleDetail({
         />
       </div>
 
+      <ScheduledExecutionReceipt receipt={(schedule as TriggerSchedule & { latest_execution?: import("../../components/workflows/ScheduledExecutionReceipt").ScheduledReceipt }).latest_execution}/>
       {kind === "agent" ? (
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <TextBlock label={t("sourceRequest")} value={String(schedule.payload?.source_request || "-")} />
@@ -1234,7 +1236,7 @@ function AgentFields({
 }) {
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <Advanced title={t("advancedTitle")} defaultOpen={draft.sessionMode !== "reuse"}><div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <Field label={t("fieldSessionMode")}>
           <Select<ScheduleDraft["sessionMode"]>
             value={draft.sessionMode}
@@ -1273,7 +1275,7 @@ function AgentFields({
             onChange={(e) => patch({ attachedSkills: e.target.value })}
           />
         </Field>
-      </div>
+      </div></Advanced>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <Field label={t("sourceRequest")}>
           <textarea

@@ -56,15 +56,13 @@ For URL → markdown:
 
 For anti-bot or JS-heavy pages:
 
-- Keep using `scripts/fetch_url.py`; do not hand-roll a separate
-  scraper. The script detects common blocker pages (`captcha`,
-  `verify you are human`, Cloudflare/Akamai-style interstitials,
-  access denied, unusual traffic) and walks:
-  direct fetch + markdown extraction → Jina Reader → configured
-  headless browser engine → Scrapling.
-- **Configured headless browser engine** — use when direct extraction
-  and Jina Reader still return blocker/thin content. It is selected in
-  the dashboard Browsers tab and called automatically by `fetch_url.py`.
+- Keep using `scripts/fetch_url.py` for document retrieval; do not hand-roll
+  a separate scraper. It detects common blocker/thin pages and walks the
+  bounded non-interactive extraction chain: direct fetch + markdown
+  extraction → Jina Reader → optional extraction fallback.
+- When the task actually needs JavaScript interaction, navigation, clicks, or
+  a site verification flow, use the `browser` Skill. Nerya has one managed
+  Chromium work browser; there is no research-browser engine selection.
 
 ## Patterns
 

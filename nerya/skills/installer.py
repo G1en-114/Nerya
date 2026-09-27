@@ -20,14 +20,9 @@ Install is intentionally not a silent network + exec:
 3. We reject legacy definition surfaces such as ``actions.py`` and
    ``skill.yml``. Executable helpers belong under reviewed ``scripts/``.
 4. We write an ``install_report.json`` describing what was installed.
-5. The skill is staged under ``workspace/skills/pending/<id>/`` and a
-   ``skill_install_request`` proposal is emitted. An operator approves
-   via the normal proposal pipeline; promotion moves it to
-   ``workspace/skills/installed/<id>/``.
-
-This means external skills use exactly the same approval-gated,
-journal-backed path as any other mutation — the installer cannot
-silently arm live code.
+5. A validated skill is installed and enabled immediately. The temporary
+   pending directory is only an internal staging area for the atomic move;
+   there is no user-facing proposal or approval step.
 """
 
 from __future__ import annotations
@@ -48,7 +43,6 @@ from ..core.errors import SkillActionError
 from ..core.paths import WorkspacePaths
 from ..core.sandbox import sandbox_exec
 from ..core.time import now_iso
-from ..evolution.patch_proposal import create_proposal
 from .manifest import SkillManifest
 
 
@@ -105,13 +99,12 @@ class InstallReport:
     files: list[str] = field(default_factory=list)
     sha256: str = ""
     static_findings: list[dict[str, Any]] = field(default_factory=list)
-    proposal_id: str | None = None
-    staged_at: Path | None = None
+    installed_at: Path | None = None
 
     def asdict(self) -> dict[str, Any]:
         return {
             **asdict(self),
-            "staged_at": None if self.staged_at is None else str(self.staged_at),
+            "installed_at": None if self.installed_at is None else str(self.installed_at),
         }
 
 
@@ -134,7 +127,7 @@ def install_skill(
         contains more than one skill.
     :param git_ref: optional git ref (branch, tag, or sha).
     :raises SkillActionError: on any validation failure — nothing is
-        written to ``skills/pending`` when this is raised.
+        installed when this is raised.
     """
     source, subdir, git_ref = _normalize_source_hints(
         source,
@@ -172,31 +165,19 @@ def install_skill(
             files=files,
             sha256=digest,
             static_findings=[asdict(f) for f in findings],
-            staged_at=staged,
+            installed_at=paths.skills_installed / manifest.id,
         )
-
-        prop = create_proposal(
-            paths,
-            kind="skill_install_request",
-            summary=f"Install external skill {manifest.id}",
-            rationale=_render_rationale(report),
-            extra_files={
-                "install_report.json": json.dumps(report.asdict(), indent=2),
-                "target.yml":
-                    f"target: skills/installed/{manifest.id}\n",
-            },
-        )
-        report.proposal_id = prop.id
         (staged / "install_report.json").write_text(
             json.dumps(report.asdict(), indent=2), encoding="utf-8"
         )
+        target = promote_installed(paths, manifest.id)
+        report.installed_at = target
         jsonl.append(paths.journal("evolution"), {
-            "kind": "skill_install_request",
+            "kind": "skill_install",
             "skill_id": manifest.id,
             "source_kind": resolved_kind,
             "source": source,
-            "staged": str(staged),
-            "proposal_id": prop.id,
+            "installed_at": str(target),
             "sha256": digest,
             "findings": len(findings),
             "ts": now_iso(),
@@ -205,14 +186,10 @@ def install_skill(
 
 
 def promote_installed(paths: WorkspacePaths, skill_id: str) -> Path:
-    """Move a pending skill into the ``installed`` tree and flip it on
-    in ``skills/enabled.yml`` so the registry will load it on the next
-    boot.
+    """Move a staged skill into ``installed`` and enable it.
 
-    This is what the proposal-promotion step calls once an operator
-    approves a ``skill_install_request``. After promotion we also
-    record an entry in ``skills/skills.lock.yml`` so
-    the kernel can detect tree drift on the next boot.
+    Kept as a compatibility helper for older pending installs. New installs
+    call it immediately after validation, without a proposal/approval step.
     """
     from ..core import yaml_io
     pending = paths.skills_pending / skill_id
@@ -489,9 +466,9 @@ def _reject_legacy_definition_surfaces(skill_dir: Path) -> None:
 def _static_analyze(skill_dir: Path) -> list[StaticFinding]:
     """Scan user-installable skills before staging.
 
-    The scanner is intentionally heuristic. Critical findings block staging;
-    high/medium findings are written into ``install_report.json`` so the
-    operator reviews executable helpers before approving promotion.
+    The scanner is intentionally heuristic. Critical findings block install;
+    non-blocking findings are retained in ``install_report.json``. Executable
+    helpers still go through normal runtime permission checks when invoked.
     """
 
     findings: list[StaticFinding] = []
@@ -561,25 +538,6 @@ def _hash_dir(root: Path) -> str:
             h.update(b"\x00")
             h.update(p.read_bytes())
     return h.hexdigest()
-
-
-def _render_rationale(r: InstallReport) -> str:
-    finding_note = (
-        "Static analysis recorded review findings; inspect "
-        "`install_report.json` and every executable helper before approving."
-        if r.static_findings
-        else "Static analysis found no review findings. Operator review the "
-             "staged layout at `skills/pending/` before approving."
-    )
-    return (
-        f"# Skill install request — {r.skill_id}\n\n"
-        f"- source_kind: `{r.source_kind}`\n"
-        f"- source: `{r.source}`\n"
-        f"- sha256: `{r.sha256}`\n"
-        f"- files: {len(r.files)}\n"
-        f"- static findings: {len(r.static_findings)}\n\n"
-        f"{finding_note}"
-    )
 
 
 __all__ = [

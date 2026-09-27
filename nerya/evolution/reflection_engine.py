@@ -78,6 +78,11 @@ def run_reflection(paths: WorkspacePaths, strategy_ids: Iterable[str] | None = N
             errors.append({"strategy_id": sid, "error": f"{type(exc).__name__}: {exc}"})
     # Do not count this subsystem's own events as new evidence for more evolution.
     journals = {name: jsonl.read_all(paths.journal(name)) for name in ("errors", "trading", "skills")}
+    if strategy_ids is not None:
+        # An isolated review must not receive other strategies or unattributed rows.
+        owners = set(observations) if requested else {""}
+        journals = {name: [row for row in rows if str(row.get("strategy_id") or "") in owners]
+                    for name, rows in journals.items()}
     packet = redact_display_dict({"strategies": observations, "journals": journals})
     encoded = json.dumps(packet, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()

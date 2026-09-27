@@ -31,20 +31,21 @@ Tools provided here:
 from __future__ import annotations
 
 import json
+import hashlib
 import base64
-import re
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 from xml.sax.saxutils import escape as xml_escape
 
 from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
 from ...skills.discovery import catalog_ids, catalog_parent
-from ...skills.registry import _walk_skill_dirs
+from ...skills.registry import SkillRegistry, _enabled_ok, load_entry, discover_entries
+from ...skills.manifest import _slugify
 from ..tool_errors import schema_validation_result
 from ..types import (
     ToolCall,
@@ -60,12 +61,6 @@ from ..types import (
 # ---------------------------------------------------------------------------
 
 
-_FRONTMATTER_RE = re.compile(
-    r"^\s*(?:<!--.*?-->\s*)*---\s*\n(?P<fm>.*?)\n---\s*\n",
-    re.DOTALL,
-)
-
-
 @dataclass
 class SkillRecord:
     """Indexed view of a skill on disk."""
@@ -77,33 +72,22 @@ class SkillRecord:
     has_scripts: bool = False
     scripts: list[str] = field(default_factory=list)
     catalog_parent: str = ""
+    title: str = ""
+    source: str = ""
+    revision: str = ""
 
     def asdict(self) -> dict[str, Any]:
         return {
             "skill_id": self.skill_id,
+            "raw_name": self.title,
+            "source": self.source,
+            "revision": self.revision,
             "description": self.description,
             "path": self.path,
             "body_chars": self.body_chars,
             "has_scripts": self.has_scripts,
             "scripts": list(self.scripts),
         }
-
-
-def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    m = _FRONTMATTER_RE.match(text)
-    if not m:
-        return {}, text
-    body = text[m.end():]
-    fm_text = m.group("fm")
-    # Lazy-import yaml; keep this module light.
-    try:
-        import yaml  # type: ignore[import-untyped]
-        doc = yaml.safe_load(fm_text) or {}
-        if not isinstance(doc, dict):
-            doc = {}
-    except Exception:
-        doc = {}
-    return doc, body
 
 
 def _list_scripts(skill_dir: Path) -> list[str]:
@@ -124,50 +108,100 @@ def index_skills(
 ) -> list[SkillRecord]:
     """Walk ``roots`` and return one record per ``SKILL.md`` discovered.
 
-    When ``skill_files`` is provided it is the source of truth; production
-    passes the active :class:`SkillRegistry` paths so enabled/integration
-    filtering and nested namespaces cannot drift from this index. Root
-    scanning remains as a small compatibility path for standalone callers.
+    Explicit files and root scans remain for standalone callers. Production
+    binds SkillIndex.registry_provider to the live SkillKernel so a reload
+    replaces its directory snapshot instead of rescanning an old file list.
     """
 
-    found: list[SkillRecord] = []
-    seen_ids: set[str] = set()
-    files = (
-        [Path(path) for path in skill_files]
-        if skill_files is not None
-        else [
-            md
-            for root in roots
-            for _child, md in _walk_skill_dirs(root)
-        ]
+    registry = SkillRegistry()
+    entries = ([load_entry(Path(path)) for path in skill_files]
+               if skill_files is not None
+               else [entry for root in roots for entry in discover_entries(Path(root))])
+    # Standalone callers keep their explicit root/file order (first root wins).
+    for entry in entries:
+        if entry is not None and entry.manifest.id not in registry.by_id:
+            registry.register(entry)
+    return _records_from_registry(registry)
+
+
+def _records_from_registry(registry: SkillRegistry) -> list[SkillRecord]:
+    found = []
+    for entry in registry.list():
+        manifest = entry.manifest
+        if manifest.path is None:
+            continue
+        scripts = _list_scripts(manifest.path)
+        found.append(SkillRecord(
+            skill_id=manifest.id, title=manifest.title,
+            description=manifest.description, source=manifest.source,
+            revision=manifest.revision,
+            path=str(manifest.path / manifest.entry_file),
+            body_chars=len(manifest.instructions), has_scripts=bool(scripts), scripts=scripts,
+            catalog_parent=catalog_parent(manifest.metadata),
+        ))
+    return sorted(found, key=lambda record: record.skill_id)
+
+
+def allowed_skill_names(call: ToolCall):
+    """Trusted runtime metadata only; missing/empty lists preserve legacy access.
+
+    A non-empty list is a namespace allow-list, independent of tool permissions.
+    Malformed metadata fails closed; model-supplied arguments cannot widen it.
+    """
+    value = (call.metadata or {}).get("allowed_skills")
+    if value is None or value == [] or value == ():
+        return None
+    if not isinstance(value, (list, tuple)) or any(not isinstance(v, str) for v in value):
+        return {""}
+    return set(value)
+
+
+def skill_allowed(skill_id: str, allowed_skills) -> bool:
+    return _enabled_ok(skill_id, set(allowed_skills) if allowed_skills else None)
+
+
+def skill_access_error(call: ToolCall, skill_id: str) -> ToolResult | None:
+    if skill_allowed(skill_id, allowed_skill_names(call)):
+        return None
+    return ToolResult.from_error(
+        tool_use_id=call.id, name=call.name,
+        error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED,
+                        message=f"Skill is outside this role's allowed_skills: {skill_id!r}"),
     )
-    for md in files:
-        if not md.is_file():
-            continue
-        child = md.parent
-        try:
-            text = md.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        fm, body = _parse_frontmatter(text)
-        sid = str(fm.get("name") or child.name).strip()
-        if not sid or sid in seen_ids:
-            continue
-        seen_ids.add(sid)
-        scripts = _list_scripts(child)
-        found.append(
-            SkillRecord(
-                skill_id=sid,
-                description=str(fm.get("description") or "").strip(),
-                path=str(md),
-                body_chars=len(body),
-                has_scripts=bool(scripts),
-                scripts=scripts,
-                catalog_parent=catalog_parent(fm.get("metadata")),
-            )
-        )
-    found.sort(key=lambda r: r.skill_id)
-    return found
+
+
+def skill_asset_access_error(call: ToolCall, record: SkillRecord, target: Path,
+                             skill_index: SkillIndex) -> ToolResult | None:
+    """A hub path must not bypass a narrower role grant on a nested skill."""
+    root = Path(record.path).parent.resolve()
+    resolved = target.resolve()
+    if not resolved.is_relative_to(root):
+        return schema_validation_result(call, "Skill files must stay inside the skill directory.")
+    if resolved == Path(record.path).resolve():
+        return None
+    # Legacy single-file skills share a root; a sibling playbook is still a
+    # separate skill even though reading it would not escape that directory.
+    if resolved.parent == root:
+        for other in skill_index.records():
+            if resolved.name == Path(other.path).name and resolved == Path(other.path).resolve():
+                denied = skill_access_error(call, other.skill_id)
+                if denied is not None:
+                    return denied
+    directory = resolved.parent
+    while directory != root and directory.is_relative_to(root):
+        entry = load_entry(directory / "SKILL.md")
+        if entry is not None:
+            denied = skill_access_error(call, entry.manifest.id)
+            if denied is not None:
+                return denied
+            if skill_index.get(entry.manifest.id) is None:
+                return ToolResult.from_error(
+                    tool_use_id=call.id, name=call.name,
+                    error=ToolError(kind=ToolErrorKind.NOT_FOUND,
+                                    message="Nested Skill is not in the active catalog."),
+                )
+        directory = directory.parent
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +217,12 @@ class SkillIndex:
         roots: Iterable[Path],
         *,
         skill_files: Optional[Iterable[Path]] = None,
+        registry_provider: Callable[[], SkillRegistry] | None = None,
+        refresh_registry: Callable[[], Any] | None = None,
     ) -> None:
+        self._registry_provider = registry_provider
+        self._refresh_registry = refresh_registry
+        self.catalog_generation = ""
         self._roots = [Path(r) for r in roots]
         self._skill_files = (
             [Path(path) for path in skill_files]
@@ -195,32 +234,54 @@ class SkillIndex:
         self._loaded_at = 0.0
 
     def reload(self) -> None:
-        self._records = index_skills(
-            self._roots,
-            skill_files=self._skill_files,
-        )
-        self._by_id = {r.skill_id: r for r in self._records}
+        if self._registry_provider is not None:
+            if self._refresh_registry is not None:
+                self._refresh_registry()
+            registry = self._registry_provider()
+            records = _records_from_registry(registry)
+            generation = registry.catalog_generation
+        else:
+            records = index_skills(self._roots, skill_files=self._skill_files)
+            generation = hashlib.sha256(json.dumps(
+                [(r.skill_id, r.source, r.path, r.revision) for r in records],
+            ).encode()).hexdigest()
+        self._publish(records, generation)
+
+    def _publish(self, records, generation) -> None:
+        self._records = records
+        self._by_id = {r.skill_id: r for r in records}
+        self.catalog_generation = generation
         self._loaded_at = time.time()
 
-    def records(self, *, refresh: bool = False) -> list[SkillRecord]:
-        if refresh or not self._records:
+    def _ensure_loaded(self, refresh: bool = False) -> None:
+        if refresh or not self._loaded_at:
             self.reload()
-        return list(self._records)
+        elif self._registry_provider is not None:
+            registry = self._registry_provider()
+            generation = registry.catalog_generation
+            if generation != self.catalog_generation:
+                self._publish(_records_from_registry(registry), generation)
+
+    def records(self, *, refresh: bool = False, allowed_skills=None) -> list[SkillRecord]:
+        self._ensure_loaded(refresh)
+        return [r for r in self._records if skill_allowed(r.skill_id, allowed_skills)]
 
     def get(self, skill_id: str, *, refresh: bool = False) -> Optional[SkillRecord]:
-        if refresh or not self._by_id:
-            self.reload()
-        return self._by_id.get(skill_id)
+        self._ensure_loaded(refresh)
+        if skill_id in self._by_id:
+            return self._by_id[skill_id]
+        canonical = _slugify(skill_id)
+        return next((r for r in self._records if _slugify(r.skill_id) == canonical), None)
 
-    def catalog(self, *, refresh: bool = False) -> list[SkillRecord]:
-        """Fold compatible/nested playbooks only when their hub is available."""
-        rows = self.records(refresh=refresh)
+    def catalog(self, *, refresh: bool = False, allowed_skills=None) -> list[SkillRecord]:
+        """Filter role access before folding; a leaf grant never grants its hub."""
+        rows = self.records(refresh=refresh, allowed_skills=allowed_skills)
         visible = catalog_ids(
             (r.skill_id, Path(r.path).parent, r.catalog_parent) for r in rows
         )
         return [r for r in rows if r.skill_id in visible]
 
-    def render_for_prompt(self, *, max_chars: int | None = None) -> str:
+    def render_for_prompt(self, *, max_chars: int | None = None, allowed_skills=None) -> str:
         """Render the standard progressive-disclosure skill catalog.
 
         Only metadata is injected. The markdown body is loaded through the
@@ -228,7 +289,7 @@ class SkillIndex:
         """
         entries: list[str] = []
         used = len("<available_skills>\n</available_skills>")
-        for r in self.catalog():
+        for r in self.catalog(allowed_skills=allowed_skills):
             entry = (
                 "  <skill>\n"
                 f"    <name>{xml_escape(r.skill_id)}</name>\n"
@@ -251,7 +312,7 @@ class SkillIndex:
 def skill_index_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
     args = call.arguments or {}
     refresh = bool(args.get("refresh") or False)
-    rows = skill_index.catalog(refresh=refresh)
+    rows = skill_index.catalog(refresh=refresh, allowed_skills=allowed_skill_names(call))
     text_lines = [f"Discovered {len(rows)} skill(s)."]
     for r in rows:
         line = f"- {r.skill_id}"
@@ -263,7 +324,8 @@ def skill_index_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResul
         name=call.name,
         content=[
             ToolResultPart.text_part("\n".join(text_lines)),
-            ToolResultPart.json_part({"skills": [r.asdict() for r in rows]}),
+            ToolResultPart.json_part({"skills": [r.asdict() for r in rows],
+                                      "catalog_generation": skill_index.catalog_generation}),
         ],
     )
 
@@ -278,7 +340,10 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
     sid = str(args.get("skill_id") or args.get("id") or "").strip()
     if not sid:
         return schema_validation_result(call, "skill_view requires 'skill_id'")
-    record = skill_index.get(sid)
+    denied = skill_access_error(call, sid)
+    if denied is not None:
+        return denied
+    record = skill_index.get(sid, refresh=bool(args.get("refresh")))
     if record is None:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -313,8 +378,11 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
                 ),
             )
         target = candidate
+    denied = skill_asset_access_error(call, record, target, skill_index)
+    if denied is not None:
+        return denied
     try:
-        text = target.read_text(encoding="utf-8")
+        text = target.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -324,6 +392,7 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
                 message=f"failed to read skill file: {exc}",
             ),
         )
+    revision = hashlib.sha256(text.encode("utf-8")).hexdigest()
     page: dict[str, Any] = {}
     if "offset" in args or "limit" in args:
         offset, limit = args.get("offset", 0), args.get("limit", 200)
@@ -341,7 +410,9 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
         content=[
             ToolResultPart.text_part(text),
             ToolResultPart.json_part(
-                {"skill": record.asdict(), "path": str(target), **page}
+                {"skill": record.asdict(), "path": str(target), "revision": revision,
+                 "catalog_generation": skill_index.catalog_generation,
+                 "body_policy": "latest_on_read", **page}
             ),
         ],
     )
@@ -391,6 +462,11 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
         return schema_validation_result(
             call, "script_inspect requires 'skill_id' and 'name'",
         )
+    denied = skill_access_error(call, sid)
+    if denied is not None:
+        return denied
+    if args.get("refresh"):
+        skill_index.reload()
     p = _script_path(skill_index, sid, name)
     if p is None:
         return ToolResult.from_error(
@@ -401,8 +477,12 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
                 message=f"script not found: {sid}/{name}",
             ),
         )
+    denied = skill_asset_access_error(call, skill_index.get(sid), p, skill_index)
+    if denied is not None:
+        return denied
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        raw = p.read_bytes()
+        text = raw.decode("utf-8", errors="replace")
     except OSError as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -420,7 +500,10 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
             ToolResultPart.text_part(head),
             ToolResultPart.json_part(
                 {
-                    "skill_id": sid,
+                    "skill_id": skill_index.get(sid).skill_id,
+                    "catalog_generation": skill_index.catalog_generation,
+                    "revision": hashlib.sha256(raw).hexdigest(),
+                    "body_policy": "latest_on_read",
                     "name": name,
                     "path": str(p),
                     "size": p.stat().st_size,
@@ -450,6 +533,11 @@ def script_run_handler(
         )
     if not isinstance(argv_extra, list):
         return schema_validation_result(call, "'args' must be a list of strings")
+    denied = skill_access_error(call, sid)
+    if denied is not None:
+        return denied
+    if args.get("refresh"):
+        skill_index.reload()
     p = _script_path(skill_index, sid, name)
     if p is None:
         return ToolResult.from_error(
@@ -460,9 +548,21 @@ def script_run_handler(
                 message=f"script not found: {sid}/{name}",
             ),
         )
+    denied = skill_asset_access_error(call, skill_index.get(sid), p, skill_index)
+    if denied is not None:
+        return denied
     timeout = float(args.get("timeout_sec") or args.get("timeout") or timeout_default)
     if p.suffix.lower() == ".py":
         cmd = [sys.executable, str(p), *[str(a) for a in argv_extra]]
+        # Bundled skills are Python packages (and may use relative imports).
+        # Only the installed builtin tree uses -m; workspace overrides remain files.
+        package = Path(__file__).resolve().parents[2]
+        try:
+            relative = p.resolve().relative_to(package / 'skills' / 'builtin').with_suffix('')
+        except ValueError:
+            relative = None
+        if relative is not None and all(part.isidentifier() for part in relative.parts):
+            cmd = [sys.executable, '-m', '.'.join(('nerya', 'skills', 'builtin', *relative.parts)), *[str(a) for a in argv_extra]]
     elif p.suffix.lower() in {".sh", ".bash"}:
         cmd = ["bash", str(p), *[str(a) for a in argv_extra]]
     else:

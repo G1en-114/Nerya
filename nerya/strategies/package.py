@@ -192,6 +192,7 @@ class StrategyPolicy:
     min_confidence: float = 0.0
     allow_direct_order: bool = True
     require_subagent_before_order: bool = False
+    require_protection: bool = False
     default_order_usd: float = 0.0
     max_run_seconds: int = 60
     max_sdk_calls_per_run: int = 64
@@ -203,6 +204,8 @@ class StrategyPolicy:
             return cls()
         if not isinstance(raw, dict):
             raise TradingError(f"{where}: policy must be a mapping, got {type(raw).__name__}")
+        if not isinstance(raw.get("require_protection", False), bool):
+            raise TradingError(f"{where}: require_protection must be a boolean")
         try:
             return cls(
                 max_single_order_usd=float(raw.get("max_single_order_usd", 0.0) or 0.0),
@@ -213,6 +216,7 @@ class StrategyPolicy:
                 require_subagent_before_order=bool(
                     raw.get("require_subagent_before_order", False)
                 ),
+                require_protection=raw.get("require_protection", False),
                 default_order_usd=float(raw.get("default_order_usd", 0.0) or 0.0),
                 max_run_seconds=int(raw.get("max_run_seconds", 60) or 60),
                 max_sdk_calls_per_run=int(raw.get("max_sdk_calls_per_run", 64) or 64),
@@ -229,6 +233,7 @@ class StrategyPolicy:
             "min_confidence": self.min_confidence,
             "allow_direct_order": self.allow_direct_order,
             "require_subagent_before_order": self.require_subagent_before_order,
+            "require_protection": self.require_protection,
             "default_order_usd": self.default_order_usd,
             "max_run_seconds": self.max_run_seconds,
             "max_sdk_calls_per_run": self.max_sdk_calls_per_run,
@@ -288,7 +293,7 @@ class StrategyLLMPolicy:
 class StrategyAgentSessionConfig:
     """Stable Agent session policy for prompt-driven strategy tasks."""
 
-    policy: str = "per_strategy_market_timeframe"
+    policy: str = "per_strategy"
     ttl_seconds: int = 86400
     max_turns: int = 500
     compact_every_turns: int = 20
@@ -306,8 +311,11 @@ class StrategyAgentSessionConfig:
             return cls()
         if not isinstance(raw, dict):
             raise TradingError(f"{where}: agent_session must be a mapping")
+        policy = str(raw.get("policy") or "per_strategy")
+        if policy not in {"per_strategy", "per_signal", "per_strategy_market", "per_strategy_market_timeframe", "custom"}:
+            raise TradingError(f"{where}: unsupported agent_session policy {policy!r}")
         return cls(
-            policy=str(raw.get("policy") or "per_strategy_market_timeframe"),
+            policy=policy,
             ttl_seconds=int(raw.get("ttl_seconds", 86400) or 0),
             max_turns=int(raw.get("max_turns", 500) or 0),
             compact_every_turns=int(raw.get("compact_every_turns", 20) or 0),

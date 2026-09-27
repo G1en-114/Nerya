@@ -116,10 +116,11 @@ class NeryaTools:
     @_safe
     def skills_catalog(self, scope: Literal["all", "builtin", "workspace", "agent"] = "all",
                        agent_id: str = "", query: str = "", offset: int = 0, limit: int = 100,
-                       include_unassigned: bool = False) -> dict[str, Any]:
+                       include_unassigned: bool = False,
+                       view: Literal["core", "professional", "all"] = "all", parent: str = "") -> dict[str, Any]:
         """Discover all Skill definitions, including nested/disabled playbooks and Agent assignments."""
         from ..skills.management import catalog
-        return catalog(self.client.config, scope, agent_id, query, offset, limit, include_unassigned)
+        return catalog(self.client.config, scope, agent_id, query, offset, limit, include_unassigned, view, parent)
 
     @_safe
     def skill_read(self, skill_id: str, scope: Literal["all", "builtin", "workspace", "agent"] = "all",
@@ -133,10 +134,13 @@ class NeryaTools:
                      skill_id: str, scope: Literal["all", "builtin", "workspace", "agent"] = "workspace",
                      agent_id: str = "", content: str = "", file: str = "SKILL.md", revision: str = "",
                      summary: str = "") -> dict[str, Any]:
-        """Stage a reviewed Skill change. Read a file/catalog revision first. Agent scope changes assignments;
-        builtin edits create Workspace overrides. Never auto-apply or execute the Skill."""
+        """Apply a validated Skill change immediately. Read a file/catalog revision first. Agent scope changes
+        assignments; builtin edits create Workspace overrides. Saving never executes the Skill."""
         from ..skills.management import manage
-        return manage(self.client.config, action, skill_id, scope, agent_id, content, file, revision, summary)
+        result = manage(self.client.config, action, skill_id, scope, agent_id, content, file, revision, summary)
+        if result.get("applied"):
+            self.client.skills.reload()
+        return result
 
     # ----------------------------------------------------------- market
     @_safe

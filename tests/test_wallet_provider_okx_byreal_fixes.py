@@ -168,20 +168,12 @@ def test_okx_get_balance_unknown_token_raises(monkeypatch):
 def test_okx_quote_records_assumed_and_explicit_decimals(monkeypatch):
     quote_doc = {"data": [{"toTokenAmount": "2000000"}]}
     provider, calls = _okx_provider(
-        monkeypatch, {"/api/v5/dex/aggregator/quote": quote_doc}
+        monkeypatch, {"/api/v6/dex/aggregator/quote": quote_doc}
     )
 
-    # No kwargs: 18 assumed on both sides, recorded in extra. 6.9 is
-    # float-hostile: int(float(6.9) * 10**18) truncates off the exact
-    # base units, Decimal(str(6.9)) does not (F11 invariant).
-    q1 = provider.quote(
-        chain="ethereum",
-        token_in="0xweth",
-        token_out="0xusdc",
-        amount_in=6.9,
-    )
-    assert q1.expected_out == pytest.approx(2_000_000 / 10 ** 18)
-    assert q1.extra["decimals_assumed"] == 18
+    # Unknown decimals cannot be guessed on a money-moving quote.
+    with pytest.raises(WalletQuoteError, match="decimals"):
+        provider.quote(chain="ethereum",token_in="0xweth",token_out="0xusdc",amount_in=6.9)
 
     # Explicit decimals: honoured (including 0) and not flagged as assumed.
     q2 = provider.quote(
@@ -197,12 +189,12 @@ def test_okx_quote_records_assumed_and_explicit_decimals(monkeypatch):
     amount_param = calls[-1]["params"]["amount"]
     assert amount_param == "2"  # 2.0 * 10**0
 
-    assert calls[0]["params"]["amount"] == "6900000000000000000"
+    assert len(calls)==1
 
 
 def test_okx_quote_without_positive_output_raises_quote_error(monkeypatch):
     provider, _ = _okx_provider(
-        monkeypatch, {"/api/v5/dex/aggregator/quote": {"data": [{}]}}
+        monkeypatch, {"/api/v6/dex/aggregator/quote": {"data": [{}]}}
     )
 
     with pytest.raises(WalletQuoteError):
@@ -216,7 +208,7 @@ def test_okx_quote_without_positive_output_raises_quote_error(monkeypatch):
 
 def test_okx_swap_unsigned_tx_is_not_ok_and_keeps_calldata(monkeypatch):
     provider, calls = _okx_provider(
-        monkeypatch, {"/api/v5/dex/aggregator/swap": _UNSIGNED_SWAP_DOC}
+        monkeypatch, {"/api/v6/dex/aggregator/swap": _UNSIGNED_SWAP_DOC}
     )
 
     res = provider.swap(
@@ -226,6 +218,7 @@ def test_okx_swap_unsigned_tx_is_not_ok_and_keeps_calldata(monkeypatch):
         amount_in=1.0,
         receiver="0xrcpt",
         live=True,
+        decimals_in=18,
         decimals_out=6,
     )
 
@@ -235,14 +228,15 @@ def test_okx_swap_unsigned_tx_is_not_ok_and_keeps_calldata(monkeypatch):
     unsigned = res.extra["unsigned_tx"]
     assert unsigned["data"] == "0xdeadbeef"
     assert unsigned["to"] == "0xrouter"
-    assert res.amount_out == pytest.approx(2.0)
+    assert res.amount_out == 0
+    assert res.extra["expected_out"] == pytest.approx(2.0)
     assert "decimals_assumed" not in res.extra
     assert calls[0]["params"]["userWalletAddress"] == "0xrcpt"
 
 
 def test_okx_swap_records_min_out_accounting(monkeypatch):
     provider, _ = _okx_provider(
-        monkeypatch, {"/api/v5/dex/aggregator/swap": _UNSIGNED_SWAP_DOC}
+        monkeypatch, {"/api/v6/dex/aggregator/swap": _UNSIGNED_SWAP_DOC}
     )
 
     res = provider.swap(
@@ -253,14 +247,15 @@ def test_okx_swap_records_min_out_accounting(monkeypatch):
         slippage_bps=100,
         receiver="0xrcpt",
         live=True,
+        decimals_in=18,
         decimals_out=6,
         min_out=1.98,
     )
 
     # The aggregator API cannot express minOut, so the approved floor is
     # recorded and an honest expected floor is computed from the quote.
-    assert res.extra["min_out_requested"] == pytest.approx(1.98)
-    assert res.extra["amount_out_min"] == pytest.approx(2.0 * 0.99)
+    assert res.ok is False and res.amount_out==0
+    assert res.extra["expected_out"] == pytest.approx(2.0)
 
 
 def test_okx_http_failure_raises_transport_error(monkeypatch):
@@ -389,29 +384,12 @@ def test_byreal_quote_parses_positive_output_and_min_out_fallback(monkeypatch):
     assert q.extra["amount_units"] == "ui"
 
 
-def test_byreal_swap_receiver_ignored_surfaces_in_extra_and_reason(monkeypatch):
-    provider, calls = _byreal_provider(
-        monkeypatch, {"txid": "tx-1", "outAmount": 99.0}
-    )
-
-    res = provider.swap(
-        chain="solana",
-        token_in="SOL",
-        token_out="USDC",
-        amount_in=1.25,
-        receiver="receiver-1",
-        live=True,
-    )
-
-    assert res.ok is True
-    assert res.tx_hash == "tx-1"
-    assert res.extra["receiver_ignored"] == "receiver-1"
-    assert "receiver" in res.reason
-    assert "keypair" in res.reason
-    # No recipient flag may be guessed into the CLI argv.
-    flat = " ".join(calls[0]).lower()
-    assert "receiver" not in flat
-    assert "--to" not in flat
+def test_byreal_swap_receiver_mismatch_refused_before_execution(monkeypatch):
+    provider=ByrealWallet()
+    monkeypatch.setattr(provider,"_signer",lambda:"11"*32)
+    with pytest.raises(WalletPolicyDenied,match="receiver"):
+        provider.swap(chain="solana",token_in="SOL",token_out="USDC",amount_in=1.25,
+                      receiver="receiver-1",live=True)
 
 
 def _byreal_cli_on_disk(tmp_path) -> ByrealWallet:

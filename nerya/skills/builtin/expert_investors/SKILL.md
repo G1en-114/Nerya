@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: expert_investors
+metadata:
+  nerya:
+    catalog_parent: research
 description: "Hub for the distilled investor lenses. Use to pick which expert lens fits a decision (business quality, DCF, cycles, expectations, macro) or to run a multi-lens committee. Load one expert sub-skill (expert_investors.buffett / .damodaran / .marks / .mauboussin / .druckenmiller) instead of all five — each lens lives in its own sub-skill to keep context small."
 version: 0.3.0
 license: MIT

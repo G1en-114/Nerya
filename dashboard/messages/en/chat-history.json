@@ -1,0 +1,31 @@
+{
+  "chatHistory": {
+    "actions": "Conversation actions: {title}",
+    "rename": "Rename conversation",
+    "renameHelp": "Change the title without changing messages or running the Agent.",
+    "title": "Conversation title",
+    "deleteConversation": "Delete conversation",
+    "deleteConversationHelp": "Remove this conversation from chat history. This cannot be undone. Strategies, completed actions and audit logs are not deleted.",
+    "deleteMessage": "Delete message",
+    "deleteMessageHelp": "Delete only this message from the conversation. Existing replies remain. This does not undo any action already executed by the Agent.",
+    "editLabel": "Edit message",
+    "editHelp": "Updates the message text only. Existing replies are not regenerated and the Agent will not run again.",
+    "save": "Save changes",
+    "saving": "Saving…",
+    "delete": "Delete",
+    "deleting": "Deleting…",
+    "cancel": "Cancel",
+    "edited": "Edited",
+    "discardTitle": "Discard message edits?",
+    "discardHelp": "Your unsaved message edits will be lost. The original message will remain unchanged.",
+    "discard": "Discard edits",
+    "keepEditing": "Keep editing",
+    "busy": "This conversation is running or has a pending continuation. Finish or stop the task before changing its history.",
+    "conflict": "This message changed elsewhere. Your draft is preserved; refresh the conversation before saving again.",
+    "missing": "This message or conversation no longer exists. Refresh to see the current history.",
+    "notSynced": "This message has not been confirmed by the server. Refresh or retry the original request before changing it.",
+    "tooLong": "Messages may contain up to 16,000 characters. Nothing has been truncated or saved.",
+    "readOnly": "This record cannot be edited.",
+    "failed": "The change was not confirmed by the server. Your content is unchanged; retry when the connection is available."
+  }
+}

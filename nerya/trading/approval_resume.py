@@ -549,6 +549,7 @@ def _rebuild_protection(raw: dict[str, Any]) -> ProtectionRule:
         trailing_stop=TrailingStopSpec(**trail) if isinstance(trail, dict) else None,
         partial_exits=[PartialExitSpec(**p) for p in partials if isinstance(p, dict)],
         trigger_source=str(raw.get("trigger_source") or "mark"),  # type: ignore[arg-type]
+        native=dict(raw.get("native") or {}),
         status=str(raw.get("status") or "armed"),  # type: ignore[arg-type]
         notes=str(raw.get("notes") or ""),
     )

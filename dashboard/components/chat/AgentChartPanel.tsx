@@ -1,9 +1,12 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import { ChoiceSelect } from "../ChoiceSelect";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslations, useLocale } from "next-intl";
+import { instrumentId } from "../../lib/researchVisuals";
+import { collectBacktestResults } from "../../lib/backtestResults";
 import { FinancialChart } from "../finance/FinancialChart";
 import { cleanSeries } from "../../lib/financialChart";
 import {
@@ -43,7 +46,7 @@ import {
 import { ChartCanvas } from "./ChartCanvas";
 import { ChartPlaceholder } from "./ChartPlaceholder";
 
-type AgentVisual = {
+export type AgentVisual = {
   id: string;
   block: ChartBlockShape;
   seenAt: number;
@@ -206,7 +209,7 @@ export function AgentChartPanel({
   );
 }
 
-function AgentVisualChart({ visual }: { visual: AgentVisual }) {
+export function AgentVisualChart({ visual }: { visual: AgentVisual }) {
   const t = useTranslations("chatChartPanel");
   const resolved = useChartData(visual.block);
 
@@ -265,7 +268,7 @@ function MarketChartWorkbench({ block }: { block: ChartBlockShape }) {
   const agentSeries = useMemo(() => splitAgentSeries(displayBlock, candles), [displayBlock, candles]);
   const rendered = useMemo<ChartBlockShape>(() => {
     const series: ChartSeries[] = [{ type: "candlestick", name: initialTarget.market || block.title, data: candles }];
-    if (indicators.volume) series.push({ type: "histogram", name: zh ? "成交量" : "Volume", price_format: "volume", data: candles.filter((c) => typeof c.volume === "number").map((c) => ({ time: c.time, value: c.volume! })) });
+    if (indicators.volume) series.push({ type: "histogram", name: i18nCopy(zh, "copy.components_chat_AgentChartPanel.001"), price_format: "volume", data: candles.filter((c) => typeof c.volume === "number").map((c) => ({ time: c.time, value: c.volume! })) });
     if (indicators.ma20) series.push({ type: "line", name: "MA20", color: THEME.ma, data: computeSma(candles, 20) });
     if (indicators.ema50) series.push({ type: "line", name: "EMA50", color: THEME.ema, data: computeEma(candles, 50) });
     if (indicators.bb20) { const bands = computeBollinger(candles, 20, 2); series.push({ type: "line", name: "BB upper", data: bands.upper }, { type: "line", name: "BB lower", data: bands.lower }); }
@@ -280,12 +283,12 @@ function MarketChartWorkbench({ block }: { block: ChartBlockShape }) {
     try {
       const res = await clientApi.marketCandles({ venue: initialTarget.venue, market: initialTarget.market, interval: nextInterval, count: nextCount });
       if (request.current !== id) return;
-      if (res.error || !res.candles?.length) throw new Error(res.error || (zh ? "没有返回K线，保留原图。" : "No candles returned. Previous chart retained."));
-      if ((res.market && res.market !== initialTarget.market) || (res.interval && res.interval !== nextInterval)) throw new Error(zh ? "行情范围不匹配，保留原图。" : "Candle scope mismatch. Previous chart retained.");
+      if (res.error || !res.candles?.length) throw new Error(res.error || (i18nCopy(zh, "copy.components_chat_AgentChartPanel.002")));
+      if ((res.market && instrumentId(res.market, initialTarget.venue) !== instrumentId(initialTarget.market, initialTarget.venue)) || (res.interval && res.interval !== nextInterval)) throw new Error(i18nCopy(zh, "copy.components_chat_AgentChartPanel.003"));
       const fresh = blockFromCandles({ base: block, market: initialTarget.market, venue: initialTarget.venue, interval: nextInterval, candles: res.candles });
       const valid = cleanSeries(fresh.series[0]);
-      if (!valid.data?.length) throw new Error(zh ? "K线数据无效，保留原图。" : "Invalid candle data. Previous chart retained.");
-      setOverrideBlock({ ...fresh, series: [valid], default_range: undefined, caption: undefined, overlays: [], insights: [], warnings: block.overlays?.length ? [zh ? "原任务注释属于原始快照，未复制到新行情区间。" : "Original annotations belong to the original snapshot and are not copied to the new window."] : [], source: { skill: "market", action: "candles", as_of: new Date(Number(valid.data[valid.data.length - 1].time) * 1000).toISOString() } });
+      if (!valid.data?.length) throw new Error(i18nCopy(zh, "copy.components_chat_AgentChartPanel.004"));
+      setOverrideBlock({ ...fresh, series: [valid], default_range: undefined, caption: undefined, overlays: [], insights: [], warnings: block.overlays?.length ? [i18nCopy(zh, "copy.components_chat_AgentChartPanel.005")] : [], source: { skill: "market", action: "candles", as_of: new Date(Number(valid.data[valid.data.length - 1].time) * 1000).toISOString() } });
       setIntervalValue(nextInterval); setCount(nextCount);
     } catch (e) { if (request.current === id) setError(e instanceof Error ? e.message : String(e)); }
     finally { if (request.current === id) setBusy(false); }
@@ -294,12 +297,12 @@ function MarketChartWorkbench({ block }: { block: ChartBlockShape }) {
   const macd = useMemo(() => computeMacd(candles), [candles]);
   const controls = <>
     <div className="flex flex-wrap items-center gap-2 border-b border-[color:var(--line)] pb-2">
-      <div className="flex flex-wrap gap-1" role="group" aria-label={zh ? "K线周期" : "Candle interval"}>{INTERVALS.map((value) => <button type="button" key={value} aria-pressed={interval === value} disabled={busy || !initialTarget.market || !initialTarget.venue} onClick={() => void loadCandles({ interval: value })} className={`min-h-8 rounded px-2 text-xs disabled:opacity-40 ${interval === value ? "bg-[color:var(--panel-bg)] text-[color:var(--text-base)]" : "text-[color:var(--text-muted)]"}`}>{value}</button>)}</div>
+      <div className="flex flex-wrap gap-1" role="group" aria-label={i18nCopy(zh, "copy.components_chat_AgentChartPanel.006")}>{INTERVALS.map((value) => <button type="button" key={value} aria-pressed={interval === value} disabled={busy || !initialTarget.market || !initialTarget.venue} onClick={() => void loadCandles({ interval: value })} className={`min-h-8 rounded px-2 text-xs disabled:opacity-40 ${interval === value ? "bg-[color:var(--panel-bg)] text-[color:var(--text-base)]" : "text-[color:var(--text-muted)]"}`}>{value}</button>)}</div>
       <ChoiceSelect aria-label={t("bars")} value={count} disabled={busy || !initialTarget.market || !initialTarget.venue} onValueChange={(value) => void loadCandles({ count: Number(value) })} className="min-h-8 text-xs">{BAR_COUNTS.map((n) => <option key={n} value={n}>{n} {t("bars")}</option>)}</ChoiceSelect>
-      <button type="button" className="ml-auto inline-flex min-h-8 items-center gap-1 px-2 text-xs" disabled={busy || !initialTarget.venue} onClick={() => void loadCandles()}><RefreshIcon size={13} />{busy ? (zh ? "更新中" : "Updating") : t("refresh")}</button>
+      <button type="button" className="ml-auto inline-flex min-h-8 items-center gap-1 px-2 text-xs" disabled={busy || !initialTarget.venue} onClick={() => void loadCandles()}><RefreshIcon size={13} />{busy ? (i18nCopy(zh, "copy.components_chat_AgentChartPanel.007")) : t("refresh")}</button>
     </div>
-    {!initialTarget.market || !initialTarget.venue ? <p role="status" className="text-xs text-[color:var(--text-muted)]">{zh ? "原快照未提供可查询的市场或交易场所，仍可查看图表和数据；周期切换暂不可用。" : "The snapshot has no queryable market or venue. Chart and data remain available; interval refresh is unavailable."}</p> : null}
-    <details data-testid="chart-indicators" className="text-xs text-[color:var(--text-muted)]"><summary className="w-fit cursor-pointer py-2">{zh ? "指标与叠加" : "Indicators and overlays"}</summary><div className="flex flex-wrap gap-2 py-2">{(["volume", "ma20", "ema50", "bb20", "vwap", "rsi", "macd", "agent"] as IndicatorKey[]).map((key) => <button key={key} type="button" aria-pressed={indicators[key]} onClick={() => setIndicators((value) => ({ ...value, [key]: !value[key] }))} className={`min-h-8 rounded border px-2 ${indicators[key] ? "border-[color:var(--line-hi)] bg-[color:var(--panel-bg)] text-[color:var(--text-base)]" : "border-[color:var(--line)]"}`}>{t(key)}</button>)}</div></details>
+    {!initialTarget.market || !initialTarget.venue ? <p role="status" className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_AgentChartPanel.008")}</p> : null}
+    <details data-testid="chart-indicators" className="text-xs text-[color:var(--text-muted)]"><summary className="w-fit cursor-pointer py-2">{i18nCopy(zh, "copy.components_chat_AgentChartPanel.009")}</summary><div className="flex flex-wrap gap-2 py-2">{(["volume", "ma20", "ema50", "bb20", "vwap", "rsi", "macd", "agent"] as IndicatorKey[]).map((key) => <button key={key} type="button" aria-pressed={indicators[key]} onClick={() => setIndicators((value) => ({ ...value, [key]: !value[key] }))} className={`min-h-8 rounded border px-2 ${indicators[key] ? "border-[color:var(--line-hi)] bg-[color:var(--panel-bg)] text-[color:var(--text-base)]" : "border-[color:var(--line)]"}`}>{t(key)}</button>)}</div></details>
     {error ? <p role="alert" className="text-xs text-warn">{error}</p> : null}
   </>;
   return <div className="min-w-0 space-y-3" data-testid="market-chart-workbench">
@@ -628,7 +631,9 @@ function Tag({ children }: { children: ReactNode }) {
 function collectAgentVisualContext(thread: ChatThread | null | undefined): VisualContext {
   if (!thread) return { charts: [], backtests: [] };
   const chartById = new Map<string, AgentVisual>();
-  const backtestById = new Map<string, BacktestRef>();
+  const backtestById = new Map<string, BacktestRef>(collectBacktestResults(thread)
+    .filter(result => result.status === "completed")
+    .map(result => [result.id, result]));
 
   function addChart(block: ChartBlockShape, seenAt: number) {
     const id = block.chart_id || `${block.title}:${seenAt}`;
@@ -636,12 +641,8 @@ function collectAgentVisualContext(thread: ChatThread | null | undefined): Visua
     const source = [block.source?.skill, block.source?.action].filter(Boolean).join(".");
     chartById.set(id, { id, block, seenAt, source: source || block.chart_kind });
     const ref = backtestRefFromChart(block, seenAt);
-    if (ref) backtestById.set(ref.id, ref);
-  }
-
-  function addBacktest(ref: BacktestRef | null) {
-    if (!ref || backtestById.has(ref.id)) return;
-    backtestById.set(ref.id, ref);
+    // A title-only legacy chart must not shadow an exact proposal-scoped run.
+    if (ref && ![...backtestById.values()].some(item => item.strategyId === ref.strategyId && item.ts === ref.ts)) backtestById.set(ref.id, ref);
   }
 
   for (const message of thread.messages) {
@@ -655,15 +656,12 @@ function collectAgentVisualContext(thread: ChatThread | null | undefined): Visua
       const block = unwrapNativeBlock(env);
       if (isChartBlockShape(block)) addChart(block, seenAt);
       for (const chart of extractChartBlocks(block)) addChart(chart, seenAt);
-      for (const ref of extractBacktestRefs(block, seenAt)) addBacktest(ref);
     }
     for (const tool of message.turn?.tool_trace ?? []) {
       for (const chart of extractChartBlocks(tool.result)) addChart(chart, seenAt);
-      for (const ref of extractBacktestRefs(tool.result, seenAt)) addBacktest(ref);
     }
     for (const action of message.turn?.actions ?? []) {
       for (const chart of extractChartBlocks(action.result)) addChart(chart, seenAt);
-      for (const ref of extractBacktestRefs(action.result, seenAt)) addBacktest(ref);
     }
   }
 
@@ -709,72 +707,6 @@ function extractChartBlocks(value: unknown): ChartBlockShape[] {
   return out;
 }
 
-function extractBacktestRefs(value: unknown, seenAt: number): BacktestRef[] {
-  const out: BacktestRef[] = [];
-  const seen = new Set<unknown>();
-  function add(strategyId: string, ts: string, title?: string, proposalId?: string | null) {
-    if (!strategyId || !ts) return;
-    const cleanProposalId = proposalId?.trim() || "";
-    const id = cleanProposalId ? `${cleanProposalId}:${strategyId}:${ts}` : `${strategyId}:${ts}`;
-    out.push({
-      id,
-      strategyId,
-      proposalId: cleanProposalId || null,
-      ts,
-      title: title || `${cleanProposalId ? `${cleanProposalId} · ` : ""}${strategyId} · ${ts}`,
-      seenAt,
-    });
-  }
-  function visit(cur: unknown, depth: number) {
-    if (!cur || depth > 4 || seen.has(cur)) return;
-    if (typeof cur === "string") {
-      const parsedJson = parseJsonObject(cur);
-      if (parsedJson) {
-        visit(parsedJson, depth + 1);
-      }
-      const parsed = parseBacktestPath(cur);
-      if (parsed) add(parsed.strategyId, parsed.ts, undefined, parsed.proposalId);
-      return;
-    }
-    if (typeof cur !== "object") return;
-    seen.add(cur);
-    const rec = cur as Record<string, unknown>;
-    const sid = stringValue(rec.strategy_id ?? rec.strategyId);
-    const proposalId = stringValue(rec.proposal_id ?? rec.proposalId);
-    const ts = stringValue(rec.backtest_ts ?? rec.backtestTs);
-    if (sid && ts) add(sid, ts, undefined, proposalId);
-    const outDir = stringValue(rec.out_dir ?? rec.backtest_dir ?? rec.path);
-    if (outDir) {
-      const parsed = parseBacktestPath(outDir);
-      if (parsed) add(parsed.strategyId, parsed.ts, undefined, parsed.proposalId || proposalId);
-    }
-    for (const key of [
-      "result",
-      "payload",
-      "output",
-      "data",
-      "chart",
-      "metrics",
-      "raw_metrics_file",
-      "metrics_path",
-      "report_path",
-      "chart_path",
-      "out_dir",
-      "backtest_dir",
-      "equity_path",
-      "trades_path",
-      "result_path",
-    ]) {
-      visit(rec[key], depth + 1);
-    }
-    if (Array.isArray(cur)) {
-      for (const item of cur.slice(0, 24)) visit(item, depth + 1);
-    }
-  }
-  visit(value, 0);
-  return dedupeBacktests(out);
-}
-
 function backtestRefFromChart(block: ChartBlockShape, seenAt: number): BacktestRef | null {
   if (block.source?.skill !== "backtest") return null;
   const parts = block.title.split("·").map((p) => p.trim()).filter(Boolean);
@@ -792,44 +724,8 @@ function backtestRefFromChart(block: ChartBlockShape, seenAt: number): BacktestR
   };
 }
 
-function parseBacktestPath(raw: string): { strategyId: string; ts: string; proposalId?: string | null } | null {
-  const parts = raw.replace(/\\/g, "/").split("/").filter(Boolean);
-  const idx = parts.lastIndexOf("backtests");
-  if (idx <= 0 || idx + 1 >= parts.length) return null;
-  const strategyId = parts[idx - 1];
-  const ts = parts[idx + 1];
-  if (!strategyId || !looksLikeBacktestTs(ts)) return null;
-  const proposalIdx = parts.lastIndexOf("proposals");
-  const proposalId =
-    proposalIdx >= 0 && proposalIdx + 1 < parts.length
-      ? parts[proposalIdx + 1]
-      : null;
-  return { strategyId, ts, proposalId };
-}
-
-function parseJsonObject(raw: string): Record<string, unknown> | unknown[] | null {
-  const trimmed = raw.trim();
-  if (!trimmed || !/^[{\[]/.test(trimmed)) return null;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, unknown> | unknown[])
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 function looksLikeBacktestTs(value: string): boolean {
   return /^(?:[A-Za-z][A-Za-z0-9-]*_)?\d{8}_\d{6}$/.test(value.trim());
-}
-
-function dedupeBacktests(rows: BacktestRef[]): BacktestRef[] {
-  const out = new Map<string, BacktestRef>();
-  for (const row of rows) {
-    if (!out.has(row.id)) out.set(row.id, row);
-  }
-  return Array.from(out.values());
 }
 
 function isCandlestickBlock(block: ChartBlockShape): boolean {
@@ -920,6 +816,7 @@ function blockFromCandles({
   }));
   return {
     ...base,
+    market, venue, interval,
     chart_id: `${base.chart_id}.${interval}.${data.length}.${data.at(-1)?.time ?? "0"}`,
     title: `${market} · ${interval} · ${data.length} bars`,
     subtitle: `venue: ${venue}`,

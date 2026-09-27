@@ -23,10 +23,10 @@ rationale, exact tool sequences, and worked examples.
 | News feeds | target `news_feeds.yml` | proposal |
 | Message channels (secrets as `*_ref`) | target `messages/channels.yml` | proposal |
 | Trigger routes (non-protected keys) | target `triggers/routes.yml` | proposal |
-| Skill allow-list | target `skills/enabled.yml` | proposal (capability change) |
+| Skill enable/disable/delete | `skill_manage` | direct validated Skill mutation |
 | Workspace prompts (`agents/*.md`, `subagents/*.agent.md`) | draft under proposal + `prompt_patch` | proposal, auto-apply-eligible |
 | Strategy params / strategy prompts | `strategy_tuning_generate` | `strategy_tuning_proposal` |
-| New behaviour / workflow | `evolve_skill_proposal` | `skill_proposal` |
+| New behaviour / workflow | `skill_manage` | direct Workspace Skill save |
 | Protected scope | — | `advisory reject: protected_scope` |
 
 Protected (both proposal-creation and apply reject): strategy
@@ -52,12 +52,11 @@ shell command, or strategy package file.
 
 ## Worked example: enable a skill
 
-1. Read `skills/enabled.yml` (whitelist; absent file = all builtins).
-2. Propose the updated list via `evolve_core_config_patch` with
-   `target="skills/enabled.yml"`. Hub ids inherit: enabling
+1. Inspect the Skill catalog and identify the exact Skill id.
+2. Call `skill_manage` with action `enable`. Hub ids inherit: enabling
    `expert_investors` also enables every `expert_investors.*` leaf.
-3. Never edit the file live — it is a capability surface and
-   `write_file` redirects it to the proposal tool.
+3. Use `skill_manage` again for disable/delete; never edit
+   `skills/enabled.yml` manually.
 
 ## Worked example: adjust the review cadence
 

@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import { useWorkflowText } from "./WorkflowCanvas";
 import styles from "./WorkflowCodeEditor.module.css";
 
 /** Native textarea editing with a non-interactive syntax layer. The original
@@ -10,6 +11,7 @@ import styles from "./WorkflowCodeEditor.module.css";
 export function WorkflowCodeEditor({ value, onChange, readOnly, label }: {
   value: string; onChange: (value: string) => void; readOnly?: boolean; label: string;
 }) {
+  const t = useWorkflowText();
   const text = useRef<HTMLTextAreaElement>(null);
   const syntax = useRef<HTMLDivElement>(null);
   const lines = useRef<HTMLDivElement>(null);
@@ -37,6 +39,6 @@ export function WorkflowCodeEditor({ value, onChange, readOnly, label }: {
         <textarea ref={text} aria-label={label} value={value} readOnly={readOnly} onChange={(event) => onChange(event.target.value)} onScroll={sync} onSelect={cursor} spellCheck={false} autoComplete="off" autoCapitalize="off" autoCorrect="off" wrap="off" />
       </div>
     </div>
-    <footer><span>Python</span><span>Ln {position.line}, Col {position.column}</span><span>{readOnly ? "只读 / Read-only" : "⌘ / Ctrl S"}</span></footer>
+    <footer><span>{t("copy.workflowCodeEditor.language")}</span><span>{t("copy.workflowCodeEditor.position", { line: position.line, column: position.column })}</span><span>{readOnly ? t("copy.workflowCodeEditor.readOnly") : t("copy.workflowCodeEditor.saveShortcut")}</span></footer>
   </div>;
 }

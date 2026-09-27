@@ -24,21 +24,12 @@ evaluation: {mode: observation}
 policy: {allow_direct_order: false, require_subagent_before_order: false}
 llm_policy: {default_tier: medium, allowed_tiers: [medium]}
 # llm_policy limits Python ctx.llm only; Agent budgets inherit the main Agent.
-data_sources:
-  - id: bars
-    title: 观察K线
-    provider: runtime.market
-    capability: candles
-    timeframe: 15m
-    limit: 160
-    consumers: [main.py]
-    parameters: {sma_window: 20, fast: 12, slow: 26, signal: 9}
 subagents: []
 news_sources: []
 tuning: {enabled: false}
 ```
 
-Only include relevant indicator parameters. `data_sources` is a TOP-LEVEL manifest key, accessed through `ctx.config.extras`; do not nest it in another `extras:` block. The source card exposes those values and the code MUST consume them. The strategy root card edits title/description, not an invented parameters node. `provider` selects a documented SDK capability; changing it to something unsupported must report an error, not silently keep using the old source.
+Put reader settings and indicator parameters in the script that consumes them. Data fetching, processing and signal generation are ordinary script nodes. Do not create data_sources for new strategies. Existing declarations remain readable for compatibility; when migrating one, update its consuming scripts together.
 
 For Agent modes add a nonempty, editable profile, for example:
 
@@ -49,7 +40,7 @@ agent_profile:
   allowed_tools: [market_data]
   attached_skills: [markets]
   order_rules: [只观察，不创建订单或修改账户。]
-agent_session: {include_prior_messages: false, refresh_profile_on_change: true}
+agent_session: {policy: per_strategy, include_prior_messages: true, refresh_profile_on_change: true}
 ```
 
 The runtime injects `agent_profile.role`. Keep Python task text focused on the event/data rather than hard-coding a competing role. `ctx.config.extras` does NOT contain the typed agent_profile. `ctx.prompt` formats CSV/JSON/tables/artifacts; it has no read/render method. Extra role cards are optional: add subagents/<name>.agent.md and list the name only when the logic actually calls/delegates that role.
@@ -73,7 +64,6 @@ agent_execution:
     roles: [market_analyst, risk_critic]   # declared role files, not invented IDs
     max_parallel: 2
 agent_context:
-  sources: [bars]
   include_script_outputs: true
   include_trigger: true
   on_error: stop
@@ -85,7 +75,7 @@ Create/edit the actual `subagents/<role>.agent.md` instructions and declare name
 ```python
 # In a helper called by the entrypoint; values are actual computation output.
 def prepare(ctx):
-    bars = ctx.inputs.source("bars")  # uses the configured source, cached this run
+    bars = ctx.market.candles(ctx.config.markets[0], timeframe="15m", limit=160)
     result = {"latest_close": bars[-1]["close"], "rows": len(bars)}
     ctx.inputs.publish("prepared_market", result, source="prepare.py")
     return result
@@ -93,29 +83,19 @@ def prepare(ctx):
 
 The dispatch may add `context={"signal": actual_signal}`. Published values and selected sources reach all configured team members and the coordinator. Zero, false and empty values are preserved. Inputs are evidence, not trusted instructions. Oversized context is explicitly marked as a preview with a full artifact path; do not infer omitted values. A skip/error branch never auto-fetches selected Agent data or starts a team. Tests must prove the same snapshot reaches members and coordinator, parallel work overlaps, and more than one decision/tool round is possible.
 
-## One source, multiple instruments and timeframes
+## One script, multiple instruments and timeframes
 
-For a new multi-series source, keep its reader and connection in one data_sources entry. `markets` and `timeframes` form a cross-product; each pair is fetched separately with the same configured `limit`. This is data scope, not a grant of trading/account permission. Do not substitute unsupported markets, periods or providers.
+Read each requested market/timeframe in a script, then publish its grouped
+observations with ctx.inputs.publish("observations", result). Keep markets,
+periods and row limits explicit in that script. Downstream scripts can read
+ctx.inputs.read("observations"). Pass published outputs to Agents with
+StrategyAgentTask.dispatch(outputs=["observations"], prompt=...).
 
-```yaml
-data_sources:
-  - id: bars
-    title: Market candles
-    provider: runtime.market
-    capability: candles
-    markets: [BINANCE:BTCUSDT, BINANCE:ETHUSDT]
-    timeframes: [15m, 1h, 4h]
-    limit: 120
-    consumers: [prepare.py]
-agent_context:
-  sources: [bars]
-```
-
-`ctx.inputs.source("bars")` returns `{format: "market_series/v1", source_id: "bars", series: [...]}` when either plural field exists. Each series has `market`, `timeframe`, `capability`, `status` and the actual `value` (or an explicit `error`). The shape stays grouped when a plural list is reduced to one item. To compute on a specific series, call `ctx.inputs.source("bars", market=actual_market, timeframe=actual_timeframe)`; selectors must match exactly one configured series, never silently take the first. Iterating all series is useful for per-market rules. Do not combine different periods into one candle sequence. Read configured dimensions from ctx.config.extras rather than hard-coding the example markets.
-
-Scalar `market` / `timeframe` sources retain the old return shape: a single-market list/value or a dictionary by market. Do not write conflicting scalar and plural fields. Changing a scalar source to plural requires adapting/testing consuming scripts in the same candidate. Keep distinct presets when row counts, parameters or consumers differ; the UI can fold presets under one reader node without changing their IDs. Do not delete old source IDs merely to simplify the graph.
-
-Input capture is cached for the current run. With partial series failures, `agent_context.on_error: stop` blocks dispatch; `continue` supplies successful series plus their explicit errors. Never fill missing data or mark a failed combination successful. Custom providers still publish their real integration output; naming a provider does not implement it. A ticker has no candle timeframe, and runtime.news uses its subscription sources. Test 2×3 collection, stable grouped output, cache reuse, parameter changes, partial failure and downstream Agent context.
+Do not combine different periods into one candle sequence, invent missing
+values, or turn an unsupported provider name into a claimed integration.
+Use the documented ctx.market and ctx.news capabilities. Fail explicitly on
+missing data or publish clearly labelled partial errors when requested.
+Test collection, parameter changes, missing data and downstream context.
 
 ## Schedule: time and interval are different
 
@@ -145,10 +125,9 @@ def _positive_int(value):
 
 
 def _source(ctx):
-    preset = next(p for p in ctx.config.extras.get("data_sources", []) if p["id"] == "bars")
-    if preset["provider"] != "runtime.market" or preset["capability"] != "candles":
-        raise ValueError("unsupported source; configure its SDK adapter explicitly")
-    return preset
+    # These editable script parameters are examples, not market defaults.
+    return {"provider": "runtime.market", "capability": "candles", "timeframe": "15m",
+            "limit": 160, "parameters": {"sma_window": 20, "fast": 12, "slow": 26, "signal": 9}}
 
 
 def _closed(ctx, preset):
@@ -253,9 +232,11 @@ def run(ctx: StrategyContext) -> StrategyAgentTask:
 
 ### Scheduled Agent: no indicator gate
 
-This existing engine still needs a tiny Python adapter; it does NOT filter the market, prefetch data or perform the analysis. Use the short adapter below as the starting point, not the older Agent trading scaffold. Do not call ctx.market.candles here and never invent ctx.market.summarize_market; market reads belong to the Agent's supported market_data tool. Use an Agent-mode manifest with the local-time cron above. The source settings are passed to the Agent, whose native market_data calls must use the configured market/timeframe/count. Set the user's requested analysis in agent_profile.role; don't add unused role Agents. Keep the top-level data_sources preset even for this path (for example timeframe:1d, limit:30), pass it to the Agent in task metadata/prompt, and require the Agent to use those values. Otherwise the user cannot change data inputs through source cards.
-
-For this path, use the following COMPLETE manifest shape rather than copying the interval example and forgetting fields. Preserve the identity/account actually returned by the scaffold. All four schedule lines (type, cron, timezone, enabled) belong together. The adapter below consumes this manifest's data_sources and the runtime injects its Agent profile.
+The entry script supplies requested data-reading parameters to the Agent;
+it can also fetch and publish data when shared observations are needed.
+Set the requested analysis in agent_profile.role. Keep the script and role
+consistent. There is no separate data-source card. Preserve the actual
+identity/account and use the complete cron configuration below.
 
 ```yaml
 version: 1
@@ -276,21 +257,13 @@ schedule:
 evaluation: {mode: observation}
 policy: {allow_direct_order: false, require_subagent_before_order: false}
 llm_policy: {default_tier: medium, allowed_tiers: [medium], max_calls_per_run: 2}
-data_sources:
-  - id: bars
-    title: 观察K线
-    provider: runtime.market
-    capability: candles
-    timeframe: 1d
-    limit: 30
-    consumers: [main.py]
 agent_profile:
   title: 观察分析师
   role: 按本次任务给出的markets和sources周期及条数读取真实行情，简短用中文总结机会与风险。数据缺失就说明，只分析，不下单。
   allowed_tools: [market_data]
   attached_skills: [markets]
   order_rules: [只观察，不创建订单或修改账户。]
-agent_session: {include_prior_messages: false, refresh_profile_on_change: true}
+agent_session: {policy: per_strategy, include_prior_messages: true, refresh_profile_on_change: true}
 subagents: []
 news_sources: []
 tuning: {enabled: false}
@@ -302,7 +275,7 @@ from nerya.strategies import StrategyContext, StrategyAgentTask
 
 
 def run(ctx: StrategyContext) -> StrategyAgentTask:
-    info = {"markets": list(ctx.config.markets), "sources": ctx.config.extras.get("data_sources", []), "as_of": ctx.clock.now_iso()}
+    info = {"markets": list(ctx.config.markets), "sources": [{"timeframe": "1d", "limit": 30}], "as_of": ctx.clock.now_iso()}
     return StrategyAgentTask.dispatch(
         prompt="按观察分析师的配置完成本次定时观察。用所列数据源、周期和条数读取真实行情，缺失就说明；不下单。\n" + ctx.prompt.json_block(info),
         session_key={"market": ctx.config.markets[0]}, metadata=info, reason="scheduled_observation")
@@ -310,9 +283,9 @@ def run(ctx: StrategyContext) -> StrategyAgentTask:
 
 ## Cards, customization, and evolution
 
-The manifest yields source:<markets or data_sources>/<id>, scheduler:trading, agent:runtime, risk:policy and account:<id>. Python files yield script:<path>. No dedicated executable "condition" node exists: label the actual gate script clearly. Multi-script strategies can extract data, indicators and decisions to separate modules with real imports/calls. consumers declarations are configuration edges; static imports/SDK calls are not evidence of an observed run.
+The strategy canvas displays only script:<path> and agent:<id> nodes. Schedule, market scope, risk and account configuration live beside the canvas. No dedicated executable "condition" node exists: label the actual gate script clearly. Multi-script strategies can extract data, indicators and decisions to separate modules with real imports/calls. Legacy consumers declarations are compatibility configuration; static imports/SDK calls are not evidence of an observed run.
 
-workflow.json format is `{"version":1,"nodes":{},"edges":[]}`. Override only existing node IDs (title, description, finite x/y); extra edges have relation:annotation, unique IDs and existing endpoints. Do not invent scheduler/Agent resource types or fake an execution edge. User-visible docs should state what to change in the schedule, source period/count/parameters, Agent role, and account binding, and that saving produces a new reviewable candidate.
+workflow.json format is `{"version":1,"nodes":{},"edges":[]}`. Override only existing node IDs (title, description, finite x/y); extra edges have relation:annotation, unique IDs and existing endpoints. Do not invent scheduler/Agent resource types or fake an execution edge. User-visible docs should state what to change in the schedule, script reader parameters, Agent role, and account binding, and that saving produces a new reviewable candidate.
 
 Review uses tuning.enabled, tuning.schedule, tuning.lookback, tuning.subagent with actual prompt_file, tuning.objectives, tuning.proposal_policy, tuning.guardrails and tuning.tuning_prompt. Respect current schema and the scaffold's supported values. Approval stays mandatory. Do not fabricate performance, auto-apply changes, or add AI tuning to a no-AI strategy. A disabled/unexecuted review workflow is a configuration, not a completed evolution run.
 
@@ -323,3 +296,23 @@ For these no-order observers keep `evaluation: {mode: observation}` alongside th
 In tests, inspect `task.status == "dispatch"`, NOT `task.kind == "dispatch"` (`kind` identifies the envelope type). Import the actual candidate module instead of rewriting its algorithm in the test. Writing tests is not proof they ran. Creation-only flow uses the existing strategy_validate lane, then submission; it does not invoke shell or circumvent an execution approval. A pending test-execution approval must remain pending, not be automatically granted or worked around.
 
 Validate the latest files and submit only after blockers are fixed. Include runnable tests that import the actual main.py and exercise: qualifying/nonqualifying indicator values; still-open candle ignored; repeated bar after state reload; insufficient/failed/stale data; zero order calls; zero model/dispatch calls on skip/error. Changing a card's parameter must change the exercised behavior. Verify both execution flags and compiled scheduler target, and local-time cron conversion. Scheduled mode should dispatch without first inspecting MACD/SMA. Use fixture bars and spy Agents only as explicitly labelled branch tests, never as a real-market backtest or proof the real model ran. Keep real Prompt-generation tests separate and preserve the user's original words.
+
+
+### Strategy canvas and context contract
+
+Author only script and Agent nodes. Fetch and transform market/news data in
+Python scripts with ctx.market / ctx.news; do not introduce data_sources for
+new strategies. Compose scripts through normal Python imports and calls.
+Use ctx.inputs.publish(name, value) and ctx.inputs.read(name) to exchange
+run-local outputs. read raises KeyError for missing outputs, returns a copy,
+and preserves false, zero and empty values. Pass results to Agents with
+StrategyAgentTask.dispatch(context=..., outputs=[...]). Canvas links reflect
+code; drawing annotations never wires execution.
+
+Default agent_session.policy is per_strategy with include_prior_messages true,
+including Agent teams. Use per_signal only when the operator explicitly wants
+a fresh context for every run. Workflows likewise default to session_mode reuse;
+ephemeral is an advanced opt-in. Preserve explicit existing choices when editing.
+When a chat references a proposal_id, read and edit that candidate, save a new
+review proposal, and return strategy_id and proposal_id so chat can display
+its canvas. Never overwrite the running package or bypass promotion gates.

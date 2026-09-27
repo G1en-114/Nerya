@@ -114,7 +114,7 @@ def test_activity_search_never_persists_a_plaintext_secret(tmp_path):
     from nerya.memory.activity import MemoryActivityEvent, MemoryActivityLog
 
     log = MemoryActivityLog(_config(tmp_path))
-    secret = "api_key=sk-direct-activity-secret-value-1234567890"
+    secret = "api_key=sk-test00000000000000000000000000000000000"
 
     log.append(
         MemoryActivityEvent.search(
@@ -159,7 +159,7 @@ def test_markdown_projection_excludes_private_session_records(tmp_path):
     store.remember(
         **common,
         scope="session",
-        scope_id="session-1",
+        scope_id='["","","session-1"]',
         session_id="session-1",
         content="session private fact",
         stable_key="session.fact",

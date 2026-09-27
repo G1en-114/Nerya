@@ -157,6 +157,11 @@ class StrategyResult:
 
         env = envelope or {}
         status_str = str(env.get("status") or "submitted").strip().lower()
+        if not reason:
+            reason = str(env.get("reason") or "")
+            risk = env.get("risk_decision")
+            if not reason and isinstance(risk, dict) and isinstance(risk.get("reasons"), list):
+                reason = "; ".join(str(value) for value in risk["reasons"])
         try:
             status = StrategyResultStatus(status_str)
         except ValueError:

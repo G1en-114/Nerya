@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import {
   EditIcon,
@@ -97,7 +97,7 @@ function finiteNumber(value: number | undefined): number | undefined {
 export default function StrategiesPage() {
   const [legacy, setLegacy] = useState(false);
   const text = useWorkflowText();
-  return legacy ? <><button className="btn btn-ghost mb-4" onClick={() => setLegacy(false)}>← {text("返回策略工作流", "Back to strategy workflows")}</button><LegacyStrategiesPage /></> : <StrategyWorkflowHub onLegacyView={() => setLegacy(true)} />;
+  return legacy ? <><button className="btn btn-ghost mb-4" onClick={() => setLegacy(false)}>← {text("copy.app_strategies_page.001")}</button><LegacyStrategiesPage /></> : <Suspense fallback={<p role="status">{text("copy.app_strategies_page.002")}</p>}><StrategyWorkflowHub onLegacyView={() => setLegacy(true)} /></Suspense>;
 }
 
 function LegacyStrategiesPage() {

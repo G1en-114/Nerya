@@ -1,4 +1,5 @@
 "use client";
+import { Icon as NeryaGlyph } from "../icons";
 
 /**
  * Per-strategy performance dashboard.
@@ -321,7 +322,7 @@ function PositionRow({
             className="text-[11px] px-1.5 py-0.5 rounded border border-brand-500/20 hover:border-brand-500/40"
             aria-label={expanded ? t("collapse") : t("expand")}
           >
-            {expanded ? "▾" : "▸"}
+            <NeryaGlyph name={expanded ? 'chevronDown' : 'chevronRight'} size={14} />
           </button>
         </div>
       </div>

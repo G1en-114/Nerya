@@ -1,0 +1,214 @@
+name: Desktop
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHONUTF8: '1'
+  NEXT_TELEMETRY_DISABLED: '1'
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  quality:
+    name: Release contracts and regression
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.11.18'
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            desktop/requirements.lock
+      - name: Validate release versions and tag
+        run: python scripts/release_version.py
+      - name: Install locked runtime and test tooling
+        run: uv pip install --system --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
+      - name: Frontend contracts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck --workspace @nerya/dashboard
+          npm run check:i18n --workspace @nerya/dashboard
+          npm run lint --workspace @nerya/dashboard
+          npm run build:sdk
+      - name: Python source distributions include their resources
+        run: |
+          python -m build
+          python scripts/verify_distribution.py dist
+      - name: Desktop security and release contract tests
+        run: python -m unittest discover -s desktop/tests -v
+      - name: Runtime regression (do not silently select only smoke tests)
+        run: python -m pytest -m '' tests -q
+
+  build:
+    name: ${{ matrix.label }} native installer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows-x64
+            runner: windows-2022
+            arch: x64
+            bundles: nsis,msi
+          - label: macOS-arm64
+            runner: macos-15
+            arch: arm64
+            bundles: app,dmg
+          - label: macOS-x64
+            runner: macos-15-intel
+            arch: x64
+            bundles: app,dmg
+          - label: Linux-x64
+            runner: ubuntu-22.04
+            arch: x64
+            bundles: deb,appimage
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+          architecture: ${{ matrix.arch }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          architecture: ${{ matrix.arch }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.11.18'
+          enable-cache: true
+          cache-dependency-glob: desktop/requirements.lock
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ${{ matrix.label }}
+          cache-on-failure: true
+      - name: Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl libssl-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 xdg-utils
+      - name: Locked native dependencies
+        run: |
+          python scripts/release_version.py
+          npm ci --no-audit --no-fund
+          npm --prefix desktop ci --no-audit --no-fund
+          uv pip install --system --constraint desktop/requirements.lock -e '.[dev,browser]'
+      - name: Linux bundled-browser libraries
+        if: runner.os == 'Linux'
+        run: python -m playwright install-deps chromium
+      - name: Native host security tests
+        run: python -m unittest discover -s desktop/tests -v
+      - name: Build real native installers and portable runtime
+        run: npm --prefix desktop run build -- --ci --bundles '${{ matrix.bundles }}' -- --locked
+      - name: Rust host tests
+        run: cargo test --release --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: macOS package installer
+        if: runner.os == 'macOS'
+        run: node desktop/scripts/installer.mjs
+      - name: Packaged runtime architecture, versions and imports
+        run: python desktop/scripts/verify_runtime.py
+      - name: Extracted installer payload and isolated startup smoke
+        run: python desktop/scripts/verify_bundle.py
+      - name: Collect installers and SHA-256 manifests
+        run: python desktop/scripts/collect_artifacts.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: release-artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish verified release
+    needs: [quality, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: desktop-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Verify all four platforms and checksums before publication
+        run: |
+          python scripts/release_version.py
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root = Path('release-artifacts')
+          reports = [json.loads(p.read_text()) for p in root.glob('build-info-*.json')]
+          assert {(r['platform'], r['arch']) for r in reports} == {('windows','x64'),('linux','x64'),('macos','x64'),('macos','arm64')}
+          lines = []
+          for report in reports:
+              assert report['version'] == Path('VERSION').read_text().strip()
+              for item in report['files']:
+                  path = root / item['name']
+                  assert path.is_file() and path.stat().st_size == item['bytes']
+                  value = hashlib.sha256()
+                  with path.open('rb') as stream:
+                      for block in iter(lambda: stream.read(1024 * 1024), b''):
+                          value.update(block)
+                  assert value.hexdigest() == item['sha256'], path
+                  lines.append(f"{item['sha256']}  {path.name}\n")
+          assert len(lines) == 8, 'All eight expected installers are required'
+          (root / 'SHA256SUMS.txt').write_text(''.join(sorted(lines)))
+          PY
+      - name: Publish release only after every platform passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          options=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then options+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --verify-tag "${options[@]}" \
+            --title "Nerya ${RELEASE_TAG#v}" --notes-file RELEASE_NOTES.md release-artifacts/*

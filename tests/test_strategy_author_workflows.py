@@ -52,9 +52,12 @@ def manifest(kind):
     return raw
 
 
-def load_run(kind):
+def load_run(kind, *, edits=None):
     scope = {}
-    exec(compile(source(kind), str(GUIDE) + ":" + kind, "exec"), scope)
+    text = source(kind)
+    for before, after in (edits or {}).items():
+        text = text.replace(before, after)
+    exec(compile(text, str(GUIDE) + ":" + kind, "exec"), scope)
     return scope["run"]
 
 
@@ -73,7 +76,7 @@ def context(tmp_path, values, *, extra_open=None):
             forbidden.append(name)
             raise AssertionError("Unexpected model/trade invocation: " + name)
     return SimpleNamespace(
-        config=SimpleNamespace(markets=("BINANCE:BTCUSDT",), extras={"data_sources": deepcopy(manifest("script")["data_sources"])}),
+        config=SimpleNamespace(markets=("BINANCE:BTCUSDT",), extras={}),
         market=SimpleNamespace(candles=candles),
         clock=SimpleNamespace(now_ms=lambda: now * 1000, now_iso=lambda: datetime.fromtimestamp(now, timezone.utc).isoformat()),
         state=StrategyState(StateStore(tmp_path / "state.json")),
@@ -94,7 +97,7 @@ def test_skill_code_validates_and_projects_real_cards(kind, tmp_path):
     assert report.ok, report.asdict()
     graph = build_workflows(files)["strategy"]
     ids = {n["id"] for n in graph["nodes"]}
-    assert {"script:main.py", "source:data_sources/bars", "scheduler:trading"} <= ids
+    assert {"script:main.py", "scheduler:trading"} <= ids
     assert ("agent:runtime" in ids) is (kind != "script")
     assert all(e["source"] in ids and e["target"] in ids for e in graph["edges"])
     compiled = compile_trading_schedule(load_package(WorkspacePaths(tmp_path), manifest(kind)["strategy_id"]))
@@ -114,12 +117,11 @@ def test_script_closed_bar_dedupe_and_no_ai(tmp_path):
     assert ctx.calls[0] == ("BINANCE:BTCUSDT", "15m", 160)
 
 
-def test_source_card_parameter_edit_changes_actual_logic(tmp_path):
+def test_script_parameter_edit_changes_actual_logic(tmp_path):
     run = load_run("script")
     ctx = context(tmp_path, [100] * 18 + [50, 90])
     assert run(ctx).reason == "below_sma"
-    ctx.config.extras["data_sources"][0]["parameters"]["sma_window"] = 2
-    ctx.config.extras["data_sources"][0]["limit"] = 80
+    run = load_run("script", edits={'"sma_window": 20': '"sma_window": 2', '"limit": 160': '"limit": 80'})
     assert run(ctx).reason == "观察提醒：收盘价高于均线"
     assert ctx.calls[-1][-1] == 80
     assert not ctx.forbidden
@@ -148,6 +150,7 @@ def test_macd_closed_signal_dispatches_once_across_state_reload(tmp_path):
 @pytest.mark.parametrize("fault", ["empty", "short", "stale", "gap", "nan", "provider", "parameters", "exception"])
 def test_bad_inputs_never_call_model_or_trade(kind, fault, tmp_path):
     ctx = context(tmp_path, [100] * 120 + [110])
+    edits = {}
     if fault == "empty":
         ctx.rows.clear()
     elif fault == "short":
@@ -160,14 +163,16 @@ def test_bad_inputs_never_call_model_or_trade(kind, fault, tmp_path):
     elif fault == "nan":
         ctx.rows[-1]["close"] = float("nan")
     elif fault == "provider":
-        ctx.config.extras["data_sources"][0]["provider"] = "unknown"
+        def unsupported(*args, **kwargs):
+            raise ValueError("Unsupported provider")
+        ctx.market.candles = unsupported
     elif fault == "parameters":
-        ctx.config.extras["data_sources"][0]["parameters"] = {"sma_window": -1, "fast": 26, "slow": 12, "signal": 9}
+        edits = {'"sma_window": 20': '"sma_window": -1', '"fast": 12': '"fast": 26', '"slow": 26': '"slow": 12'}
     else:
         def fail(*args, **kwargs):
             raise RuntimeError("source offline")
         ctx.market.candles = fail
-    result = load_run(kind)(ctx)
+    result = load_run(kind, edits=edits)(ctx)
     assert result.status != "dispatch"
     assert result.reason != "观察提醒：收盘价高于均线"
     assert not ctx.forbidden
@@ -177,7 +182,7 @@ def test_scheduled_adapter_does_not_prefilter(tmp_path):
     ctx = context(tmp_path, [])
     result = load_run("scheduled_agent")(ctx)
     assert result.status == "dispatch"
-    assert result.metadata["sources"] == ctx.config.extras["data_sources"]
+    assert result.metadata["sources"] == [{"timeframe": "1d", "limit": 30}]
     assert not ctx.calls and not ctx.forbidden
 
 
@@ -247,5 +252,5 @@ def test_authoring_loop_keeps_workspace_identity_without_changing_budgets(tmp_pa
     cfg = Config(paths=WorkspacePaths(tmp_path), data=deepcopy(DEFAULT_CONFIG))
     loop = _loop_config_from_config(cfg)
     assert loop.workspace_root == str(tmp_path)
-    assert loop.max_total_tool_calls == cfg.get("agent.native.max_total_tool_calls")
-    assert loop.max_wall_seconds == cfg.get("agent.native.max_wall_seconds")
+    assert loop.max_total_tool_calls == (cfg.get("agent.native.max_total_tool_calls") or None)
+    assert loop.max_wall_seconds == (cfg.get("agent.native.max_wall_seconds") or None)

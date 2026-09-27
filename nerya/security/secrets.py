@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets as py_secrets
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,13 +19,63 @@ from . import encryption
 
 log = logging.getLogger(__name__)
 
-# Published-in-source fallback used only so dev/test workspaces without a
-# configured passphrase keep working. Live trading paths independently
-# refuse to run without NERYA_VAULT_PASSPHRASE (see trading/submit.py),
-# so this default only ever protects at-rest credential storage — which
-# is why falling back to it is loud, never silent.
+# Legacy fallback used only to read vaults created by older development
+# builds. New local workspaces receive a random per-workspace key in
+# ``vault/keyring.ref`` instead of ever writing credentials under this
+# source-published value. Live trading still independently requires
+# NERYA_VAULT_PASSPHRASE (see trading/submit.py).
 _DEFAULT_PASSPHRASE = "nerya-default-passphrase"
+_LOCAL_KEY_NAME = "keyring.ref"
 _default_pp_warned = False
+
+
+def _local_key_path(vault_file: Path) -> Path:
+    return Path(vault_file).with_name(_LOCAL_KEY_NAME)
+
+
+def _read_or_create_local_passphrase(vault_file: Path) -> str:
+    """Return a private, persistent key for non-desktop local launches.
+
+    Packaged desktop launches inject a Keychain-backed passphrase through the
+    environment before SecretVault is opened, so they never reach this path.
+    Direct CLI/dev launches have no such parent process; for those we create a
+    workspace-local random key with owner-only permissions. Workspace sync and
+    git both exclude the vault directory, so the key never leaves the machine.
+    """
+    key_path = _local_key_path(vault_file)
+    key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not key_path.exists():
+        key = py_secrets.token_urlsafe(48)
+        try:
+            fd = os.open(
+                key_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                0o600,
+            )
+        except FileExistsError:  # another local process won the race
+            pass
+        else:
+            with os.fdopen(fd, "w", encoding="ascii") as stream:
+                stream.write(key)
+                stream.flush()
+                os.fsync(stream.fileno())
+
+    fd = os.open(key_path, os.O_RDONLY | nofollow)
+    with os.fdopen(fd, "r", encoding="ascii") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise SecretAccessDenied(f"vault key path is not a regular file: {key_path}")
+        if os.name != "nt" and (
+            info.st_mode & 0o077 or info.st_uid != os.getuid()
+        ):
+            raise SecretAccessDenied(
+                f"vault key permissions are unsafe: {key_path}; require owner-only access"
+            )
+        key = stream.read(129).strip()
+    if not 32 <= len(key) <= 128 or key == _DEFAULT_PASSPHRASE:
+        raise SecretAccessDenied(f"vault key is invalid: {key_path}")
+    return key
 
 
 @dataclass
@@ -61,19 +113,52 @@ class SecretVault:
     @classmethod
     def open(cls, workspace_vault_file: Path, passphrase: str | None = None) -> "SecretVault":
         global _default_pp_warned
+        path = Path(workspace_vault_file)
         pp = passphrase or os.environ.get("NERYA_VAULT_PASSPHRASE") or ""
-        if not pp:
-            pp = _DEFAULT_PASSPHRASE
-            if not _default_pp_warned:
-                _default_pp_warned = True
-                log.warning(
-                    "SecretVault: NERYA_VAULT_PASSPHRASE is not set — falling "
-                    "back to the built-in default passphrase. At-rest "
-                    "encryption is NOT protection until you set a real "
-                    "passphrase (live trading is blocked without one)."
-                )
-        v = cls(path=Path(workspace_vault_file), passphrase=pp)
+        if pp:
+            v = cls(path=path, passphrase=pp)
+            v._load()
+            return v
+
+        key_path = _local_key_path(path)
+        has_vault = path.exists() and path.stat().st_size > 0
+        if not key_path.exists() and has_vault:
+            # Do not invent a key for an existing custom-encrypted vault: that
+            # would make the missing-passphrase problem harder to diagnose.
+            # Older development builds may have written a vault with the
+            # published fallback; load it read-only and migrate on the next
+            # successful write by switching the in-memory passphrase to the
+            # newly generated local key.
+            legacy = cls(path=path, passphrase=_DEFAULT_PASSPHRASE)
+            legacy._load()
+            if legacy.load_error:
+                if not _default_pp_warned:
+                    _default_pp_warned = True
+                    log.warning(
+                        "SecretVault: an existing vault has no local key and "
+                        "cannot be opened with the legacy development key. "
+                        "Set NERYA_VAULT_PASSPHRASE to recover it."
+                    )
+                return legacy
+            legacy.passphrase = _read_or_create_local_passphrase(path)
+            log.warning(
+                "SecretVault: loaded a legacy development vault; the next "
+                "write will migrate it to a random per-workspace key."
+            )
+            return legacy
+
+        pp = _read_or_create_local_passphrase(path)
+        v = cls(path=path, passphrase=pp)
         v._load()
+        if v.load_error and has_vault:
+            # A previous read may already have created keyring.ref for a legacy
+            # default-key vault without rewriting secrets.enc yet. Keep reads
+            # working and let the next write perform the atomic re-encryption.
+            legacy = cls(path=path, passphrase=_DEFAULT_PASSPHRASE)
+            legacy._load()
+            if not legacy.load_error:
+                legacy.passphrase = pp
+                return legacy
         return v
 
     def _load(self) -> None:
@@ -131,28 +216,24 @@ class SecretVault:
         atomic_write_bytes(self.path, json.dumps(env.to_dict()).encode("utf-8"))
 
     # ---------- public API ----------
-    def put(self, *, name: str, value: str, kind: str, scope: list[str],
-            owner: str = "runtime") -> SecretMeta:
-        if self.passphrase == _DEFAULT_PASSPHRASE:
-            # At-rest encryption under a source-published constant is not
-            # protection: anyone with the vault file gets every credential
-            # in it. Reading back what a previous version stored stays
-            # possible, but storing NEW secrets requires a real passphrase.
-            raise SecretAccessDenied(
-                "refusing to store secrets under the built-in default vault "
-                "passphrase. Set NERYA_VAULT_PASSPHRASE (or pass "
-                "passphrase= to SecretVault.open) before storing secrets."
-            )
+    def _assert_writable(self) -> None:
         if self.load_error and self.path.exists():
-            # The on-disk vault exists but could not be decrypted. _flush()
-            # rewrites the file from the in-memory cache only, so storing
-            # anything now would silently DESTROY every credential already
-            # in the vault. Fail loudly instead.
+            # _flush() rewrites from the in-memory cache only, so a failed
+            # decrypt must never be allowed to turn into data loss.
             raise SecretAccessDenied(
                 f"vault at {self.path} is unreadable ({self.load_error}); "
                 "refusing to overwrite it. Fix NERYA_VAULT_PASSPHRASE or "
                 "restore/resolve the file before storing new secrets."
             )
+        if self.passphrase == _DEFAULT_PASSPHRASE:
+            raise SecretAccessDenied(
+                "refusing to store secrets under the legacy default vault "
+                "passphrase. Set NERYA_VAULT_PASSPHRASE to recover this vault."
+            )
+
+    def put(self, *, name: str, value: str, kind: str, scope: list[str],
+            owner: str = "runtime") -> SecretMeta:
+        self._assert_writable()
         self._cache[name] = value
         meta = SecretMeta(
             name=name, kind=kind, scope=scope, owner=owner,
@@ -183,6 +264,7 @@ class SecretVault:
         return self.meta(name).as_public()
 
     def delete(self, name: str) -> None:
+        self._assert_writable()
         self._cache.pop(name, None)
         self._meta.pop(name, None)
         self._flush()

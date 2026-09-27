@@ -450,6 +450,11 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         """
 
         def _build(cfg, *, workspace=None, vault_passphrase=None):
+            # The account editor stores public connection options in this map.
+            # Keep root-level legacy overrides authoritative.
+            public_config = cfg.get("provider_config")
+            if isinstance(public_config, dict):
+                cfg = {**public_config, **cfg}
             raw = cfg.get("ccxt_id") or cfg.get("exchange_id")
             if not raw:
                 venue_raw = str(cfg.get("venue") or "")
@@ -496,12 +501,16 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         return YahooFinanceConnector(timeout=timeout)
 
     def _polymarket(cfg, *, workspace=None, vault_passphrase=None):
-        creds = _resolve_cex_creds(cfg, workspace, vault_passphrase)
+        creds = _resolve_cex_creds(cfg, workspace, vault_passphrase,with_passphrase=True)
+        options={**cfg,**dict(cfg.get('provider_config') or {})}
         return PolymarketConnector(
             credentials=creds, live=bool(cfg.get("live", False)),
-            clob_url=cfg.get("clob_url") or "https://clob.polymarket.com",
-            gamma_url=cfg.get("gamma_url") or "https://gamma-api.polymarket.com",
-            data_url=cfg.get("data_url") or cfg.get("clob_url") or "https://clob.polymarket.com",
+            clob_url=options.get("clob_url") or "https://clob.polymarket.com",
+            gamma_url=options.get("gamma_url") or "https://gamma-api.polymarket.com",
+            data_url=options.get("data_url") or "https://data-api.polymarket.com",
+            workspace=workspace,account_id=str(cfg.get('id') or ''),
+            signature_type=int(options.get('signature_type') or 0),funder=str(options.get('funder') or options.get('wallet_address') or ''),
+            max_slippage_bps=int(options.get('max_slippage_bps',50)),
         )
 
     def _bsc(cfg, *, workspace=None, vault_passphrase=None):
@@ -664,33 +673,34 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         id="polymarket", label="Polymarket (CLOB v2)",
         kind="prediction_market", runtime="python",
         aliases=("polymarket_v2", "pm"), factory=_polymarket,
-        install_hint="pip install py-clob-client  # optional, for EIP-712 signing",
-        install_command="pip install py-clob-client",
+        install_hint="pip install 'py-clob-client-v2>=1.1.0,<2'",
+        install_command="pip install 'py-clob-client-v2>=1.1.0,<2'",
         docs_url="https://docs.polymarket.com/developers/CLOB/overview",
         links={"docs": "https://docs.polymarket.com/",
                "api": "https://docs.polymarket.com/developers/CLOB/overview"},
-        description="Prediction-market orderbook on Polygon. Reads via "
-                    "CLOB+Gamma+Data APIs; writes need EIP-712 signing.",
-        # F9: place_order currently requires the operator to hand us a
-        # pre-signed order via credentials.extras['signed_order'] —
-        # nothing produces that payload yet, so advertising write
-        # support forced live orders into a guaranteed failure. Flip
-        # back to True once a real EIP-712 signing path exists.
+        description="Prediction outcome shares on Polygon, collateral pUSD. "
+                    "Explicit token or slug#outcome; signed market/limit orders, cancel and confirmed-fill polling.",
+        instrument_types=('prediction_outcome',),
         supports={"ticker": True, "klines": True, "order_book": True,
-                  "balances": True, "place_order": False},
+                  "balances": True, "place_order": True,'cancel_order':True,'get_order':True,
+                  'market_order':True,'limit_order':True,'native_tp_sl':False},
         credential_fields=(
             CredentialField(
-                name="api_key", label="Polygon Address", kind="public",
-                sensitive=False, required=False,
-                description="0x address that holds the USDC + Polymarket positions.",
+                name="api_key", label="CLOB API Key", kind="secret",
+                sensitive=True, required=True,
+                description="CLOB L2 API key, not a wallet address.",
                 vault_scope="exchange",
             ),
             CredentialField(
-                name="api_secret", label="Polygon Private Key",
-                kind="secret", required=False,
-                description="Hex private key used for EIP-712 order signing.",
+                name="api_secret", label="CLOB API Secret",
+                kind="secret", required=True,
+                description="CLOB L2 HMAC secret, separate from private_key.",
                 vault_scope="exchange",
             ),
+            CredentialField(name='api_passphrase',label='CLOB API Passphrase',kind='secret',required=True,vault_scope='exchange'),
+            CredentialField(name='private_key',label='Polygon signer private key',kind='secret',required=True,vault_scope='exchange'),
+            CredentialField(name='funder',label='Funder / proxy wallet',kind='public',sensitive=False,required=False),
+            CredentialField(name='signature_type',label='Signature type (0/1/2/3)',kind='public',sensitive=False,required=False),
         ),
     ))
     reg.register(ExchangeProviderSpec(

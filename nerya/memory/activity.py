@@ -213,6 +213,8 @@ class MemoryActivityLog:
         actor_id: str,
         key: str = "",
         hashes: Iterable[str] | None = None,
+        scope: str | None = None,
+        scope_id: str = "",
     ) -> int:
         """Remove matching events from the live log and every rotation.
 
@@ -247,6 +249,8 @@ class MemoryActivityLog:
                             actor_id=actor,
                             key=wanted_key,
                             hashes=wanted_hashes,
+                            scope=scope,
+                            scope_id=scope_id,
                         ):
                             removed += 1
                             changed = True
@@ -278,6 +282,8 @@ class MemoryActivityLog:
         actor_id: str,
         key: str,
         hashes: set[str],
+        scope: str | None = None,
+        scope_id: str = "",
     ) -> bool:
         try:
             obj = json.loads(line.decode("utf-8"))
@@ -286,6 +292,11 @@ class MemoryActivityLog:
         if not isinstance(obj, dict) or str(obj.get("actor_id") or "") != actor_id:
             return False
         extra = obj.get("extra") if isinstance(obj.get("extra"), dict) else {}
+        if scope is not None:
+            event_scope = str(extra.get("scope") or "global")
+            event_scope_id = str(extra.get("scope_id") or (extra.get("strategy_id") if event_scope == "strategy" else extra.get("session_id") if event_scope == "session" else "") or "")
+            if event_scope != scope or event_scope_id != scope_id:
+                return False
         event_key = str(obj.get("key") or extra.get("key") or "").strip()
         event_hash = str(obj.get("hash") or "").strip()
         return bool((key and event_key == key) or (event_hash and event_hash in hashes))

@@ -1,4 +1,5 @@
 "use client";
+import { Icon as NeryaGlyph } from "../icons";
 
 import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
@@ -12,14 +13,28 @@ type ControlProps = {
   settings: ChatRunSettings;
   onSettingsChange: (settings: ChatRunSettings) => void;
   disabled?: boolean;
+  compact?:boolean;
   size?: "hero" | "docked";
 };
-const REASONING_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const REASONING_LEVELS: ReasoningEffort[] = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh"];
 const CONTEXT_WINDOWS: { value: ModelContextWindow; label: string }[] = [
   { value: 131072, label: "128k" }, { value: 262144, label: "256k" }, { value: 1048576, label: "1M" },
 ];
 const reasoningKey = (level: ReasoningEffort) => `thinkLevel${level.charAt(0).toUpperCase()}${level.slice(1)}`;
-const contextLabel = (value?: ModelContextWindow) => CONTEXT_WINDOWS.find((item) => item.value === value)?.label || "256k";
+const contextLabel = (value?: ModelContextWindow) => {
+  const preset = CONTEXT_WINDOWS.find((item) => item.value === value)?.label;
+  if (preset) return preset;
+  if (!value || !Number.isFinite(value)) return "Auto";
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(2))}M`;
+  return `${Math.round(value / 1_000)}k`;
+};
+const contextOptions = (value: ModelContextWindow | undefined, automaticLabel: string) => {
+  const options = [{ value: "0", label: automaticLabel }, ...CONTEXT_WINDOWS.map((item) => ({ value: String(item.value), label: item.label }))];
+  if (value && !CONTEXT_WINDOWS.some((item) => item.value === value)) {
+    options.unshift({ value: String(value), label: contextLabel(value) });
+  }
+  return options;
+};
 const controlClass = "inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-[color:var(--text-base)] transition-colors hover:bg-brand-500/10 disabled:cursor-not-allowed disabled:opacity-45";
 
 function selectedModelKey(settings: ChatRunSettings, options: ChatModelOption[]): string {
@@ -29,16 +44,16 @@ function selectedModelKey(settings: ChatRunSettings, options: ChatModelOption[])
     || (settings.model_provider || settings.model_id || settings.model_tier ? "__custom" : "__default");
 }
 
-export function ComposerPermissionMenu({ settings, onSettingsChange, disabled }: ControlProps) {
+export function ComposerPermissionMenu({ settings, onSettingsChange, disabled,compact }: ControlProps) {
   const t = useTranslations("chat");
   const permissionLabel = (mode: PermissionMode) => t(mode === "yolo" ? "fullAccess" : mode === "auto" ? "autonomousMode" : "approveActions");
   const label = permissionLabel(settings.permission_mode);
   return (
     <Menu.Root>
       <Menu.Trigger asChild>
-        <button type="button" disabled={disabled} className={controlClass} aria-label={label}>
+        <button type="button" disabled={disabled} className={controlClass} aria-label={label} title={label} data-composer-permission>
           <ShieldCheckIcon size={15} className={settings.permission_mode === "yolo" ? "text-[color:var(--warn)]" : ""} />
-          <span className="truncate">{label}</span><ChevronDownIcon size={12} />
+          {!compact&&<span className="truncate">{label}</span>}<ChevronDownIcon size={12} />
         </button>
       </Menu.Trigger>
       <Menu.Portal>
@@ -77,8 +92,8 @@ export function ComposerModelMenu({ settings, onSettingsChange, modelOptions, di
     const override = settings.model_overrides?.[key] ?? {};
     const option = modelOptions.find((item) => item.key === key);
     return {
-      reasoning_effort: override.reasoning_effort ?? (key === activeKey ? settings.reasoning_effort : option?.reasoning_effort) ?? "off",
-      model_context_window: override.model_context_window ?? (key === activeKey ? settings.model_context_window : undefined) ?? 262144,
+      reasoning_effort: override.reasoning_effort ?? (key === activeKey ? settings.reasoning_effort : option?.reasoning_effort) ?? "inherit",
+      model_context_window: override.model_context_window ?? option?.model_context_window ?? (key === activeKey ? settings.model_context_window : undefined) ?? 0,
     };
   }
   function applyModel(key: string) {
@@ -104,7 +119,7 @@ export function ComposerModelMenu({ settings, onSettingsChange, modelOptions, di
   return (
     <Popover.Root open={open} onOpenChange={(next) => { setOpen(next); if (!next) { setQuery(""); setEditKey(null); } }}>
       <Popover.Trigger asChild>
-        <button type="button" disabled={disabled} className={`${controlClass} max-w-[240px]`} aria-label={tUi("modelOptions")}
+        <button type="button" disabled={disabled} className={`${controlClass} max-w-[240px]`} data-composer-model-trigger aria-label={tUi("modelOptions")}
           title={`${modelLabel} · ${contextLabel(settings.model_context_window)} · ${t(reasoningKey(settings.reasoning_effort))}`}>
           <SparkIcon size={14} className="shrink-0" /><span className="truncate">{modelLabel}</span><ChevronDownIcon size={12} className="shrink-0" />
         </button>
@@ -140,12 +155,12 @@ export function ComposerModelMenu({ settings, onSettingsChange, modelOptions, di
             </label>
             <label className="block space-y-1 text-xs"><span>{t("contextLength")}</span>
               <Select value={String(optionsFor(editKey).model_context_window)} onChange={(value) => patchOptions(editKey, { model_context_window: Number(value) as ModelContextWindow })}
-                ariaLabel={t("contextLength")} options={CONTEXT_WINDOWS.map((item) => ({ value: String(item.value), label: item.label }))} />
+                ariaLabel={t("contextLength")} options={contextOptions(optionsFor(editKey).model_context_window, t("contextAutomatic"))} />
             </label>
           </section> : null}
           <div className="mt-2 border-t border-[color:var(--line)] px-1 pt-1">
             <a href="/settings#models" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm text-[color:var(--text-muted)] hover:bg-brand-500/5">
-              <SparkIcon size={15} />{t("addCustomProvider")}<span aria-hidden className="ml-auto">↗</span>
+              <SparkIcon size={15} />{t("addCustomProvider")}<NeryaGlyph name="arrowUpRight" size={16} className="ml-auto" />
             </a>
           </div>
         </Popover.Content>

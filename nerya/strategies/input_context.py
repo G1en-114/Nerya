@@ -2,6 +2,7 @@
 from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hashlib
 import json
 import threading
@@ -36,17 +37,38 @@ class StrategyInputContext:
     news: Any
     markets: tuple[str, ...]
     run_id: str
+    clock: Any = None
     _values: dict[str, Any] = field(default_factory=dict, init=False)
     _lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
 
-    def publish(self, name: str, value: Any, *, source: str = "script") -> Any:
+    def publish(self, name: str, value: Any, *, source: str = "script", data_as_of: str | None = None) -> Any:
         """Publish an actual script result, preserving zero/false/empty values."""
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
             raise ValueError("input name must be a non-empty string of at most 200 characters")
         data = safe_data(value)
+        cutoff = None
+        if data_as_of:
+            parsed = datetime.fromisoformat(data_as_of.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("data_as_of must include a timezone")
+            cutoff = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         with self._lock:
-            self._values[name] = {"value": data, "source": source, "run_id": self.run_id, "captured_at": now_iso()}
+            self._values[name] = {"value": data, "source": source, "run_id": self.run_id,
+                "captured_at": self.clock.now_iso() if self.clock is not None else now_iso()}
+            if cutoff:
+                self._values[name]["data_as_of"] = cutoff
         return value
+
+    def read(self, name: str) -> Any:
+        """Read an upstream script output in this run as an isolated copy.
+
+        Scripts compose with ordinary Python imports and publish/read.
+        Missing outputs fail explicitly, without implicit data fetching.
+        """
+        with self._lock:
+            if name not in self._values:
+                raise KeyError(f"Script output {name!r} has not been published in this run")
+            return deepcopy(self._values[name]["value"])
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -170,6 +192,10 @@ def collect_task_context(task: Any, ctx: Any, configuration: dict[str, Any]) -> 
         if (key in selected if key.startswith("source:") else include_outputs and (outputs is None or key in outputs))}
     task.context = safe_data({"published": published, "script_outputs": task.context if include_outputs else {},
         "trigger": ctx.trigger.payload if include_trigger else {}, "input_errors": failures})
+    if published or include_trigger:
+        task.context["time_semantics"] = {"captured_at": "Time this input was captured for the run; not necessarily the market observation time.",
+            "data_as_of": "Explicit source observation cutoff, when supplied. Prefer this timestamp when describing data freshness.",
+            "candle_ts": "OHLCV ts is candle OPEN time. A closed candle is observable only after its timeframe ends."}
     task.metadata["input_selection"] = {"sources": list(sources),
         "outputs": [key for key in published if not key.startswith("source:")],
         "include_context": bool(include_outputs), "include_trigger": bool(include_trigger)}

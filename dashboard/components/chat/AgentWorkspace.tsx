@@ -4,7 +4,9 @@ import { ChoiceSelect } from "../ChoiceSelect";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocale } from "next-intl";
-import { ChevronRightIcon, MessagesIcon, SendIcon } from "../icons";
+import { copy as i18nCopy, type ResourceTranslator } from "../../lib/i18n";
+import { ChevronRightIcon, SendIcon } from "../icons";
+import { RoleAvatar } from "../RoleAvatar";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { AgentConversation } from "./AgentConversation";
 import { FinanceDraftContext, appendReviewDraft } from "../finance/FinanceReview";
@@ -13,17 +15,13 @@ import { agentRequest, isWorking, type AgentDetail, type AgentWork, type AgentWo
 
 const controls = "rounded-lg px-3 py-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 disabled:cursor-not-allowed disabled:opacity-40";
 const quiet = `${controls} text-[color:var(--text-muted)] hover:bg-ink-800/40`;
-function useCopy() {
+function useCopy(): ResourceTranslator {
   const zh = useLocale().startsWith("zh");
-  return (cn: string, en: string) => zh ? cn : en;
+  return (key: string, values?: Record<string, unknown>) => i18nCopy(zh, key, values);
 }
-function statusText(state: string, text: (cn: string, en: string) => string): string {
-  const names: Record<string, [string, string]> = {
-    running: ["进行中", "Running"], planned: ["准备中", "Starting"], queued: ["排队中", "Queued"], pending: ["等待中", "Pending"],
-    completed: ["已完成", "Completed"], failed: ["失败", "Failed"], timeout: ["超时", "Timed out"],
-    blocked: ["受阻", "Blocked"], cancelled: ["已停止", "Stopped"], interrupted: ["已中断", "Interrupted"], skipped: ["已跳过", "Skipped"],
-  };
-  return names[state] ? text(...names[state]) : text("状态未知", "Unknown status");
+function statusText(state: string, text: ResourceTranslator): string {
+  const names: Record<string, string> = { running: "copy.agentStatus.001", planned: "copy.agentStatus.002", queued: "copy.agentStatus.003", pending: "copy.agentStatus.004", completed: "copy.agentStatus.005", failed: "copy.agentStatus.006", timeout: "copy.agentStatus.007", blocked: "copy.agentStatus.008", cancelled: "copy.agentStatus.009", interrupted: "copy.agentStatus.010", skipped: "copy.agentStatus.011" };
+  return names[state] ? text(names[state]) : text("copy.components_chat_AgentWorkspace.001");
 }
 function Status({ state }: { state: string }) {
   const text = useCopy();
@@ -42,9 +40,9 @@ export function AgentTaskBar({ source, open, onOpen }: { source: AgentWorkSource
   return <div className="w-full shrink-0" data-testid="agent-task-bar">
     <button id="agent-task-trigger" type="button" onClick={onOpen} aria-expanded={open} aria-controls="chat-workspace-panel-agents" title={first.title}
       className="group flex min-h-11 w-full items-center gap-3 rounded-t-2xl border border-b-0 border-[color:var(--line-hi)] bg-[color:var(--card-hi)] px-3.5 py-2 text-left transition-colors hover:bg-ink-800/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-400">
-      <MessagesIcon size={16} className="shrink-0 text-[color:var(--text-muted)]" />
-      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-200">{first.title || text("多 agent 任务", "Agent task")}</span>
-      <span className="shrink-0 text-xs tabular-nums text-[color:var(--text-muted)]">{source.error ? text("连接中断", "Disconnected") : working ? text(`${working} 个进行中`, `${working} running`) : text(`${source.rows.length} 个 agent`, `${source.rows.length} agents`)}</span>
+      <span className="native-avatar-stack flex shrink-0 -space-x-1">{source.rows.slice(0, 3).map((agent) => <RoleAvatar key={agent.id} role={agent.name} size={24} />)}</span>
+      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-200">{first.title || text("copy.components_chat_AgentWorkspace.002")}</span>
+      <span className="shrink-0 text-xs tabular-nums text-[color:var(--text-muted)]">{source.error ? text("copy.components_chat_AgentWorkspace.003") : working ? text("copy.components_chat_AgentWorkspace.004", { value0: working }) : text("copy.components_chat_AgentWorkspace.005", { value0: source.rows.length })}</span>
       <ChevronRightIcon size={14} className={`shrink-0 text-[color:var(--text-muted)] ${open ? "rotate-90" : ""}`} />
     </button>
   </div>;
@@ -55,12 +53,18 @@ export function AgentWorkPanel({ source, active = true, onOpenResult, focusReque
   source: AgentWorkSource; active?: boolean; onOpenResult?: (result: ChatResult) => void; focusRequest?: AgentFocusRequest;
 }) {
   const text = useCopy();
+  const zh = useLocale().startsWith("zh");
+  const [memberFilter, setMemberFilter] = useState("all");
   const [chosenGroup, setChosenGroup] = useState("");
   const [chosenAgent, setChosenAgent] = useState("");
   const [visited, setVisited] = useState<Set<string>>(() => new Set());
   const groups = useMemo(() => [...new Map(source.rows.map((a) => [a.group_id, a.title])).entries()], [source.rows]);
   const group = groups.some(([id]) => id === chosenGroup) ? chosenGroup : groups[0]?.[0];
-  const members = source.rows.filter((a) => a.group_id === group).sort((a, b) => a.name.localeCompare(b.name));
+  const groupMembers = source.rows.filter(a => a.group_id === group);
+  const section = (state:string):"attention"|"active"|"ended" => ["failed","blocked","timeout","interrupted"].includes(state) ? "attention" : isWorking(state) ? "active" : "ended";
+  const priority = {attention:0,active:1,ended:2};
+  const members = groupMembers.filter(a => memberFilter === "all" || section(a.state) === memberFilter)
+    .sort((a,b) => priority[section(a.state)]-priority[section(b.state)] || a.name.localeCompare(b.name));
   const selected = members.find((a) => a.id === chosenAgent) || members.find((a) => isWorking(a.state)) || members[0];
   useEffect(() => {
     if (group && group !== chosenGroup) setChosenGroup(group);
@@ -70,23 +74,29 @@ export function AgentWorkPanel({ source, active = true, onOpenResult, focusReque
   const requestedAgent = source.rows.find((a) => a.id === focusRequest?.id);
   useEffect(() => {
     if (!requestedAgent) return;
+    setMemberFilter("all");
     setChosenGroup(requestedAgent.group_id); setChosenAgent(requestedAgent.id);
   }, [focusRequest?.count, requestedAgent?.id, requestedAgent?.group_id]);
   return <div className="flex h-full min-h-0 flex-col" data-testid="agent-work-panel">
-    {groups.length > 1 ? <div className="shrink-0 px-4 py-3"><ChoiceSelect aria-label={text("选择协作任务", "Select agent task")} value={group}
+    {groups.length > 1 ? <div className="shrink-0 px-4 py-3"><ChoiceSelect aria-label={text("copy.components_chat_AgentWorkspace.006")} value={group}
       onValueChange={(value) => { setChosenGroup(value); setChosenAgent(""); }} className="w-full text-sm">
-      {groups.map(([id, title]) => <option key={id} value={id}>{title || text("协作任务", "Agent task")}</option>)}
+      {groups.map(([id, title]) => <option key={id} value={id}>{title || text("copy.components_chat_AgentWorkspace.007")}</option>)}
     </ChoiceSelect></div> : null}
-    {source.error ? <div role="status" className="px-4 py-3 text-xs text-warn">{text("连接中断，显示最后一次保存的状态。", "Connection interrupted. Showing the last saved state.")}<button type="button" onClick={source.refresh} className={quiet}>{text("重试", "Retry")}</button></div> : null}
-    {members.length ? <WorkspaceTabs id="agent-members" label={text("任务成员", "Task members")} value={selected?.id || ""} onChange={setChosenAgent}
-      tabs={members.map((agent) => ({ id: agent.id, label: agent.name, meta: <Status state={agent.state} /> }))} /> : null}
+    {source.error ? <div role="status" className="px-4 py-3 text-xs text-warn">{text("copy.components_chat_AgentWorkspace.008")}<button type="button" onClick={source.refresh} className={quiet}>{text("copy.components_chat_AgentWorkspace.009")}</button></div> : null}
+    {groupMembers.length > 0 && <div className="flex flex-wrap gap-1 border-b border-[color:var(--line)] px-3 py-2" role="group" aria-label={zh ? "成员状态" : "Member states"}>
+      {([["all",zh?"全部":"All"],["attention",zh?"需要处理":"Needs attention"],["active",zh?"执行与等待":"Running and waiting"],["ended",zh?"已结束":"Ended"]] as const).map(([value,label]) => <button key={value} type="button" aria-pressed={memberFilter===value} onClick={()=>setMemberFilter(value)} className={"min-h-11 rounded px-3 text-xs " + (memberFilter===value?"bg-[color:var(--panel-bg)] text-[color:var(--text-base)]":"text-[color:var(--text-muted)]")}>
+        {label} · {value==="all"?groupMembers.length:groupMembers.filter(a=>section(a.state)===value).length}
+      </button>)}
+    </div>}
+    {members.length ? <WorkspaceTabs id="agent-members" label={text("copy.components_chat_AgentWorkspace.010")} value={selected?.id || ""} onChange={setChosenAgent}
+      tabs={members.map((agent) => ({ id: agent.id, label: agent.name, portrait: <RoleAvatar role={agent.name} size={26} alt="" />, meta: <Status state={agent.state} /> }))} /> : null}
     {source.rows.map((agent) => <section key={agent.id} role="tabpanel" id={`agent-members-panel-${agent.id}`}
       aria-labelledby={agent.group_id === group ? `agent-members-tab-${agent.id}` : undefined} aria-label={agent.group_id === group ? undefined : agent.name}
       hidden={selected?.id !== agent.id} className={selected?.id === agent.id ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       {visited.has(agent.id) || selected?.id === agent.id ? <AgentInspector row={agent} source={source} active={active && selected?.id === agent.id} onOpenResult={onOpenResult}
         focusRequest={focusRequest?.id === agent.id ? focusRequest : undefined} /> : null}
     </section>)}
-    {!selected ? <div className="m-auto max-w-md px-6 py-12 text-center"><h2 className="text-base font-medium">{text("还没有协作成员", "No collaborators yet")}</h2><p className="mt-3 text-sm leading-relaxed text-[color:var(--text-muted)]">{text("任务分配后，在这里切换成员，查看执行过程、结果并继续对话。", "Once work is delegated, switch between agents here to read their progress, review results and continue the conversation.")}</p></div> : null}
+    {!selected ? <div className="m-auto max-w-md px-6 py-12 text-center"><h2 className="text-base font-medium">{text("copy.components_chat_AgentWorkspace.011")}</h2><p className="mt-3 text-sm leading-relaxed text-[color:var(--text-muted)]">{text("copy.components_chat_AgentWorkspace.012")}</p></div> : null}
   </div>;
 }
 
@@ -175,23 +185,23 @@ function AgentInspector({ row, source, active, onOpenResult, focusRequest }: {
       await agentRequest(`/teams/agents/${action}`, { session_id: sessionId, agent_id: id, message, request_id: requestRef.current.id });
       setDraft(""); requestRef.current = { key: "", id: "" };
       stickToBottom.current = true; setAway(false);
-      setNotice(action === "message" ? text("消息已排队，接收状态会显示在对话中。", "Message queued. Delivery status appears in the conversation.") : text("已沿用这个 agent 继续执行。", "Continuing with this agent and its saved context."));
+      setNotice(action === "message" ? text("copy.components_chat_AgentWorkspace.013") : text("copy.components_chat_AgentWorkspace.014"));
     } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
     finally { actionLock.current = false; setBusy(""); source.refresh(); setRefresh((n) => n + 1); }
   }
   const contextPanel = <details data-testid="agent-context" className="mx-auto max-w-[860px] text-xs text-[color:var(--text-muted)]">
         <summary className="flex min-h-9 cursor-pointer items-center justify-between gap-3 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
-          <span>{row.legacy ? text("历史记录", "Historical record") : context?.scope === "explicit_payload_only" ? text("隔离上下文", "Isolated context") : text("沿用任务上下文", "Task context retained")}</span>
-          <span>{text("上下文与权限", "Context & permissions")}</span>
+          <span>{row.legacy ? text("copy.components_chat_AgentWorkspace.015") : context?.scope === "explicit_payload_only" ? text("copy.components_chat_AgentWorkspace.016") : text("copy.components_chat_AgentWorkspace.017")}</span>
+          <span>{text("copy.components_chat_AgentWorkspace.018")}</span>
         </summary>
-        <p className="py-2 leading-relaxed">{row.legacy ? text("这条历史记录没有可续跑的会话快照。", "This historical record has no resumable conversation snapshot.") : text("继续对话保留同一身份、角色、工具权限和此前保存的工具对话。", "Continuing retains this agent's identity, role, permissions and saved tool conversation.")}</p>
+        <p className="py-2 leading-relaxed">{row.legacy ? text("copy.components_chat_AgentWorkspace.019") : text("copy.components_chat_AgentWorkspace.020")}</p>
         {context ? <dl className="grid grid-cols-2 gap-x-6 gap-y-3 py-3">
-          {[[text("父会话消息", "Inherited parent messages"), context.inherited_messages], [text("已保存的对话消息", "Saved conversation messages"), context.saved_messages], [text("执行次数", "Runs"), current.attempt], [text("技能权限", "Allowed skills"), (Array.isArray(context.allowed_skills) ? context.allowed_skills.join(", ") : '') || text("未配置技能白名单", "No skill allowlist configured")], [text("上下文范围", "Context scope"), context.scope === "explicit_payload_only" ? text("隔离任务", "Isolated task") : text("继承父任务", "Inherited task context")], [text("模型", "Model"), context.model || text("沿用角色配置", "Role configuration")]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd className="mt-1 break-words text-ink-100">{value}</dd></div>)}
+          {[[text("copy.components_chat_AgentWorkspace.021"), context.inherited_messages], [text("copy.components_chat_AgentWorkspace.022"), context.saved_messages], [text("copy.components_chat_AgentWorkspace.023"), current.attempt], [text("copy.components_chat_AgentWorkspace.024"), (Array.isArray(context.allowed_skills) ? context.allowed_skills.join(", ") : '') || text("copy.components_chat_AgentWorkspace.025")], [text("copy.components_chat_AgentWorkspace.026"), context.scope === "explicit_payload_only" ? text("copy.components_chat_AgentWorkspace.027") : text("copy.components_chat_AgentWorkspace.028")], [text("copy.components_chat_AgentWorkspace.029"), context.model || text("copy.components_chat_AgentWorkspace.030")]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd className="mt-1 break-words text-ink-100">{value}</dd></div>)}
         </dl> : null}
         <p className="break-all pb-3">Agent ID: {id}</p>
       </details>;
   return <div className="relative flex min-h-0 flex-1 flex-col">
-    {loadError ? <div role="status" className="px-4 py-2 text-xs text-warn">{text("刷新失败，保留已有记录。", "Refresh failed; saved records are still shown.")} <button type="button" onClick={() => setRefresh((n) => n + 1)} className="underline">{text("重试", "Retry")}</button></div> : null}
+    {loadError ? <div role="status" className="px-4 py-2 text-xs text-warn">{text("copy.components_chat_AgentWorkspace.031")} <button type="button" onClick={() => setRefresh((n) => n + 1)} className="underline">{text("copy.components_chat_AgentWorkspace.032")}</button></div> : null}
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto" data-testid="agent-detail-content" onScroll={() => {
       const el = scrollRef.current; if (!el) return;
       const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
@@ -199,29 +209,28 @@ function AgentInspector({ row, source, active, onOpenResult, focusRequest }: {
     }}>
       <div className="mx-auto w-full max-w-[860px] px-4 pb-6 sm:px-5">
         {contextPanel}
-        {hasMore ? <button type="button" onClick={earlier} disabled={loadingOlder} className={`${quiet} mt-3 w-full`}>{text("加载更早的对话", "Load earlier conversation")}</button> : null}
+        {hasMore ? <button type="button" onClick={earlier} disabled={loadingOlder} className={`${quiet} mt-3 w-full`}>{text("copy.components_chat_AgentWorkspace.033")}</button> : null}
         <FinanceDraftContext.Provider value={{ disabled: Boolean(busy) || Boolean(row.legacy) || context?.scope === "explicit_payload_only", append: (review) => {
           const next = appendReviewDraft(draft, review);
-          if (next.length > 16000) { setNotice(text("草稿过长，请先缩短内容再加入复盘。", "Draft is too long; shorten it before adding this review.")); return; }
-          setDraft(next); setNotice(text("已填入此成员的草稿，确认后再发送。", "Added to this agent’s draft. Review before sending."));
+          setDraft(next); setNotice(text("copy.components_chat_AgentWorkspace.035"));
           requestAnimationFrame(() => inputRef.current?.focus());
         } }}><AgentConversation row={current} detail={detail} rows={source.rows} onOpenResult={onOpenResult} /></FinanceDraftContext.Provider>
       </div>
     </div>
-    {away ? <button type="button" className={`${quiet} mx-auto my-1 shrink-0 border border-[color:var(--line)] bg-[color:var(--card)]`} onClick={() => { stickToBottom.current = true; setAway(false); scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight }); }}>{text("回到最新消息 ↓", "Jump to latest ↓")}</button> : null}
+    {away ? <button type="button" className={`${quiet} mx-auto my-1 shrink-0 border border-[color:var(--line)] bg-[color:var(--card)]`} onClick={() => { stickToBottom.current = true; setAway(false); scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight }); }}>{text("copy.components_chat_AgentWorkspace.036")}</button> : null}
     {!row.legacy && context?.scope !== "explicit_payload_only" ? <form className="shrink-0 px-3 pb-3 pt-2 sm:px-5" onSubmit={(e) => { e.preventDefault(); void submit(running ? "message" : "resume"); }}>
       <div className="mx-auto max-w-[860px] rounded-2xl border border-[color:var(--line-hi)] bg-[color:var(--card-hi)] p-3">
-        <label htmlFor={`agent-message-${id}`} className="sr-only">{text(`发给 ${row.name}`, `Message ${row.name}`)}</label>
-        <textarea ref={inputRef} id={`agent-message-${id}`} value={draft} onChange={(e) => setDraft(e.target.value)} maxLength={16000} rows={1} disabled={Boolean(busy)}
+        <label htmlFor={`agent-message-${id}`} className="sr-only">{text("copy.components_chat_AgentWorkspace.037", { value0: row.name })}</label>
+        <textarea ref={inputRef} id={`agent-message-${id}`} value={draft} onChange={(e) => setDraft(e.target.value)} rows={1} disabled={Boolean(busy)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void submit(running ? "message" : "resume"); } }}
-          placeholder={running ? text("补充信息，或调整当前任务…", "Add context or guide the current task…") : text(`继续与 ${row.name} 对话…`, `Continue with ${row.name}…`)}
+          placeholder={running ? text("copy.components_chat_AgentWorkspace.038") : text("copy.components_chat_AgentWorkspace.039", { value0: row.name })}
           className="block min-h-8 w-full resize-none overflow-y-auto bg-transparent px-1 py-1 text-base leading-6 text-ink-100 placeholder:text-[color:var(--text-muted)] focus:outline-none" />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-          <span className="text-[11px] text-[color:var(--text-muted)]">{running ? text("下一轮接收补充消息", "Delivered at the next iteration") : text("保留上下文继续执行", "Continue with saved context")}</span>
+          <span className="text-[11px] text-[color:var(--text-muted)]">{running ? text("copy.components_chat_AgentWorkspace.040") : text("copy.components_chat_AgentWorkspace.041")}</span>
           <div className="ml-auto flex gap-1">
-            {!running ? <button type="button" onClick={() => void submit("message")} disabled={!draft.trim() || Boolean(busy)} className={quiet}>{text("仅加入消息队列", "Queue only")}</button> : null}
+            {!running ? <button type="button" onClick={() => void submit("message")} disabled={!draft.trim() || Boolean(busy)} className={quiet}>{text("copy.components_chat_AgentWorkspace.042")}</button> : null}
             <button type="submit" disabled={!draft.trim() || Boolean(busy)} className={`${controls} inline-flex items-center gap-2 bg-brand-600 text-white hover:bg-brand-500`}>
-              <SendIcon size={14} />{busy ? text("提交中…", "Submitting…") : running ? text("发送消息", "Send message") : text("继续此 agent", "Continue agent")}
+              <SendIcon size={14} />{busy ? text("copy.components_chat_AgentWorkspace.043") : running ? text("copy.components_chat_AgentWorkspace.044") : text("copy.components_chat_AgentWorkspace.045")}
             </button>
           </div>
         </div>

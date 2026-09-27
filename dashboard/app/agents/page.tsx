@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
+
 import {
   Advanced,
   Card,
@@ -14,7 +14,6 @@ import {
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
 import {
-  AgentsIcon,
   CheckIcon,
   PlusIcon,
   SearchIcon,
@@ -26,7 +25,9 @@ import {
 import { clientApi, type SkillSummary } from "../../lib/clientApi";
 import { confirm as confirmDialog, toast } from "../../lib/dialogs";
 import { Select } from "../../components/Select";
+import { AgentModelField } from "../../components/settings/AgentModelField";
 import { Markdown } from "../../components/chat/Markdown";
+import { RoleAvatar } from "../../components/RoleAvatar";
 
 // Backend actually sends source: "workspace" | "default" | "default_profile"
 // (describe_role marks alias roles), plus provider/model/execution_policy/
@@ -38,7 +39,9 @@ type AgentSummary = {
   tier: string;
   allowed_skills: string[];
   source: string;
+  enabled?: boolean;
   description?: string;
+  catalog_parent?: string;
   prompt_path?: string;
   prompt_excerpt?: string;
   provider?: string;
@@ -53,6 +56,7 @@ type AgentDetail = {
   prompt: string;
   prompt_path?: string;
   source: string;
+  enabled?: boolean;
   persistent: boolean;
   provider?: string;
   model?: string;
@@ -114,7 +118,11 @@ function tierOptions(t: Translator): Array<{ value: Tier; label: string }> {
 
 // Show an excerpt of the saved instructions, never an invented capability.
 function promptSummary(prompt: string): string {
-  const body = prompt.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, "");
+  let body = prompt.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, "");
+  if (body.startsWith("## Shared worker contract")) {
+    const roleStart = body.search(/^(?:# [^\n]+|You are\b)/m);
+    if (roleStart >= 0) body = body.slice(roleStart);
+  }
   const paragraph = body.split(/\n\s*\n/).map((block) => block.split("\n")
     .filter((line) => !/^(#{1,6}\s|```)/.test(line.trim())).join(" ").trim()).find(Boolean) || "";
   return paragraph.length > 360 ? `${paragraph.slice(0, 360).trimEnd()}…` : paragraph;
@@ -161,6 +169,8 @@ export default function AgentsPage() {
   const [detail, setDetail] = useState<AgentDetail | null>(null);
   const [draft, setDraft] = useState<{
     name: string;
+    provider?: string;
+    model?: string;
     tier: "light" | "medium" | "high";
     allowed_skills: string[];
     prompt: string;
@@ -172,6 +182,7 @@ export default function AgentsPage() {
   });
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [agentQuery, setAgentQuery] = useState("");
+  const [showProfiles, setShowProfiles] = useState(false);
   const [sourceFilter, setSourceFilter] = useState<"all" | "workspace" | "default">("all");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -197,7 +208,7 @@ export default function AgentsPage() {
     if (name !== selected) {
       setDetail(null);
       setDetailError(null);
-      setEditing(false);
+      setEditing(true);
       setEditorDirty(false);
     }
     setSelected(name);
@@ -209,7 +220,7 @@ export default function AgentsPage() {
     window.history.replaceState(null, "", url);
   }
 
-  async function selectAgent(name: string) {
+  async function selectAgent(name: string | null) {
     if (name === selected || busy) return;
     if (editorDirty) {
       const ok = await confirmDialog({
@@ -224,7 +235,7 @@ export default function AgentsPage() {
 
   async function closeEditor() {
     if (editorDirty && !await confirmDialog({ message: t("discardEditsConfirm"), tone: "warning" })) return;
-    setEditing(false);
+    applySelected(null);
     setEditorDirty(false);
   }
 
@@ -253,7 +264,7 @@ export default function AgentsPage() {
       setItems(list);
       const next = focus && list.some((r) => r.name === focus)
         ? focus
-        : list[0]?.name || null;
+        : null;
       applySelected(next);
       setError(null);
     } catch (e) {
@@ -317,11 +328,11 @@ export default function AgentsPage() {
   }, [selected]);
 
   useEffect(() => {
-    if (!editorDirty) return;
+    if (!editorDirty && !(creating && (draft.name || draft.provider || draft.model || draft.prompt !== DEFAULT_PROMPT_TEMPLATE || draft.allowed_skills.length || draft.tier !== "medium"))) return;
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
-  }, [editorDirty]);
+  }, [editorDirty, creating, draft]);
 
   const counts = useMemo(() => {
     const ws = items.filter((i) => i.source === "workspace").length;
@@ -331,6 +342,7 @@ export default function AgentsPage() {
   const filteredItems = useMemo(() => {
     const needle = agentQuery.trim().toLowerCase();
     return items.filter((agent) => {
+      if (!showProfiles && !needle && agent.catalog_parent && agent.name !== selected) return false;
       if (sourceFilter === "workspace" && agent.source !== "workspace") return false;
       if (sourceFilter === "default" && agent.source === "workspace") return false;
       return !needle || [
@@ -349,7 +361,7 @@ export default function AgentsPage() {
         .includes(needle);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentQuery, sourceFilter, items, t]);
+  }, [agentQuery, sourceFilter, items, t, showProfiles, selected]);
 
   const selectedSummary = useMemo(
     () => items.find((i) => i.name === selected) ?? null,
@@ -371,6 +383,8 @@ export default function AgentsPage() {
     try {
       const res = await clientApi.agentsSave({
         name: next.name,
+        provider: next.provider,
+        model: next.model,
         prompt: next.prompt,
         tier: (next.tier as "light" | "medium" | "high") || undefined,
         allowed_skills: next.allowed_skills,
@@ -380,12 +394,26 @@ export default function AgentsPage() {
       setEditing(false);
       setEditorDirty(false);
       toast({ message: t("savedInfo", { name: next.name }), tone: "ok" });
-      await refreshList(next.name);
+      await refreshList();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function toggleAgent(agent: AgentSummary) {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await clientApi.agentsGet(agent.name);
+      if (!response.ok || !response.role) throw new Error(response.error || t("roleNotFound"));
+      const role = response.role as AgentDetail;
+      const result = await clientApi.agentsSave({ name: role.name, prompt: role.prompt, tier: role.tier as Tier, allowed_skills: role.allowed_skills, provider: role.provider, model: role.model, enabled: agent.enabled === false });
+      if (!result.ok) throw new Error(result.error || t("saveFailed"));
+      await refreshList();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
   }
 
   async function deleteAgent(name: string) {
@@ -407,6 +435,13 @@ export default function AgentsPage() {
     }
   }
 
+  async function cancelCreate() {
+    const changed = draft.name || draft.provider || draft.model || draft.prompt !== DEFAULT_PROMPT_TEMPLATE || draft.allowed_skills.length || draft.tier !== "medium";
+    if (changed && !await confirmDialog({ message: t("discardDraftConfirm"), tone: "warning" })) return;
+    setCreating(false);
+    setDraft({ name: "", tier: "medium", allowed_skills: [], prompt: DEFAULT_PROMPT_TEMPLATE });
+  }
+
   async function createAgent() {
     if (busy) return;
     const name = draft.name.trim();
@@ -425,6 +460,8 @@ export default function AgentsPage() {
     try {
       const res = await clientApi.agentsSave({
         name,
+        provider: draft.provider,
+        model: draft.model,
         prompt: draft.prompt.replaceAll("<role-name>", name),
         tier: draft.tier,
         allowed_skills: draft.allowed_skills
@@ -440,7 +477,7 @@ export default function AgentsPage() {
         allowed_skills: [],
         prompt: DEFAULT_PROMPT_TEMPLATE,
       });
-      await refreshList(res.role.name);
+      await refreshList();
     } catch (e) {
       setCreateError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -449,12 +486,12 @@ export default function AgentsPage() {
   }
 
   return (
-    <Dialog.Root open={creating} onOpenChange={(open) => { if (!busy) { setCreating(open); setCreateError(null); } }}>
+    <>
     <PageBody>
       <PageHeader
         title={t("title")}
         description={t("description")}
-        actions={
+        actions={!creating && !selected ?
           <>
             <button
               type="button"
@@ -465,16 +502,17 @@ export default function AgentsPage() {
               <WrenchIcon size={14} />
               {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
-            <Dialog.Trigger asChild><button
+            <button
               type="button"
               className="btn btn-primary cursor-pointer"
+              onClick={() => { setCreating(true); setCreateError(null); }}
               disabled={busy || editorDirty}
               title={editorDirty ? t("saveDraftFirst") : undefined}
             >
               <PlusIcon size={14} />
               {t("newAgent")}
-            </button></Dialog.Trigger>
-          </>
+            </button>
+          </> : null
         }
       />
       <SectionTabs section="runtime" />
@@ -493,11 +531,9 @@ export default function AgentsPage() {
         </div>
       ) : null}
 
-      <div className="agent-library grid grid-cols-1 items-start gap-5 lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)]">
-        <Card
-          title={loading && !items.length ? t("loadingAgents") : t("personasCount", { count: counts.total })}
-          description={t("libraryHint")}
-        >
+      <div hidden={creating} className="agent-library mx-auto w-full max-w-4xl space-y-4">
+        <div hidden={selected !== null}>
+        <section>
           <div className="relative mb-3">
             <SearchIcon size={15} className="absolute left-2.5 top-2.5 text-ink-500" />
             <input
@@ -514,6 +550,7 @@ export default function AgentsPage() {
               {t(source === "all" ? "filterAll" : source === "workspace" ? "filterCustom" : "filterBuiltIn")}
             </button>)}
           </div>
+          {items.some(agent => agent.catalog_parent) && <label className="mb-4 flex items-center gap-2 text-xs text-[color:var(--text-muted)]"><input type="checkbox" checked={showProfiles} disabled={busy || editorDirty} onChange={event => setShowProfiles(event.target.checked)} />{t("showProfiles")}</label>}
           {loading && items.length === 0 ? (
             <div className="space-y-2" aria-hidden>
               {[0, 1, 2, 3, 4].map((i) => (
@@ -546,9 +583,11 @@ export default function AgentsPage() {
           ) : filteredItems.length === 0 ? (
             <div className="text-center"><Empty title={t("noMatchingAgents")} subtitle={t("noMatchingAgentsHint")} /><button type="button" className="btn btn-ghost mb-3" onClick={() => { setAgentQuery(""); setSourceFilter("all"); }}>{t("clearFilters")}</button></div>
           ) : (
-            <ul className="agent-library-list embedded-scroll max-h-64 space-y-1 pr-1 lg:max-h-[calc(100dvh-360px)] lg:min-h-[240px]" aria-label={t("title")}>
-              {filteredItems.map((agent) => (
+            <ul className="agent-library-list space-y-1" aria-label={t("title")}>
+              {filteredItems.map((agent, index) => (
                 <li key={`${agent.source}_${agent.name}`}>
+                  {(index === 0 || filteredItems[index - 1].source !== agent.source) && <h3 className="border-b border-[color:var(--line)] py-3 text-sm font-semibold">{t(agent.source === "workspace" ? "filterCustom" : "filterBuiltIn")} <span className="font-normal text-[color:var(--text-muted)]">{filteredItems.filter(row => row.source === agent.source).length}</span></h3>}
+                  <div className="flex items-center gap-3">
                   <button
                     type="button"
                     aria-pressed={selected === agent.name}
@@ -565,7 +604,7 @@ export default function AgentsPage() {
                         className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--line)] bg-[color:var(--bg)] text-[color:var(--text-muted)]"
                         aria-hidden
                       >
-                        <AgentsIcon size={17} />
+                        <RoleAvatar role={agent.name} size={34} alt="" />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center justify-between gap-2">
@@ -583,13 +622,18 @@ export default function AgentsPage() {
                       </span>
                     </div>
                   </button>
+                  <button type="button" role="switch" aria-label={t("toggleAgent", { name: roleLabel(agent.name) })} aria-checked={agent.enabled !== false} disabled={busy} onClick={() => void toggleAgent(agent)} className="relative inline-flex h-6 w-10 shrink-0 items-center rounded-full bg-[color:var(--line-hi)] aria-checked:bg-brand-500 disabled:opacity-40"><span aria-hidden className={"h-4 w-4 rounded-full bg-white transition-transform " + (agent.enabled !== false ? "translate-x-5" : "translate-x-1")} /></button>
+                  {agent.source === "workspace" && <button type="button" className="btn btn-ghost text-danger" aria-label={t("deleteNamed", { name: roleLabel(agent.name) })} disabled={busy} onClick={() => void deleteAgent(agent.name)}><TrashIcon size={14} /></button>}
+                  </div>
                 </li>
               ))}
             </ul>
           )}
-        </Card>
+        </section>
 
-        <div ref={detailPanelRef} className="min-w-0 scroll-mt-4" role="region" aria-label={t("agentDetails")} data-testid="agent-details">
+        </div>
+        {selected && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void selectAgent(null)}>← {t("title")}</button>}
+        <div hidden={!selected} ref={detailPanelRef} className="min-w-0 scroll-mt-4" role="region" aria-label={t("agentDetails")} data-testid="agent-details">
         <Card
           title={selected ? roleLabel(selected) : t("pickAgent")}
           description={
@@ -597,11 +641,7 @@ export default function AgentsPage() {
               ? selected
               : t("pickAgentHint")
           }
-          actions={
-            detail && !fetchingDetail ? <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { if (editing) void closeEditor(); else setEditing(true); }}>
-              {editing ? t("backToOverview") : t("editConfiguration")}
-            </button> : null
-          }
+
         >
           {fetchingDetail || (selected && !detail && !detailError) ? (
             <div className="space-y-4 py-4" role="status" aria-label={t("loadingDetails")}><div className="skeleton h-4 w-2/5" /><div className="skeleton h-16 w-full" /><div className="skeleton h-10 w-3/4" /></div>
@@ -669,7 +709,7 @@ export default function AgentsPage() {
                   ) : null}
                 </div>
               </Advanced>
-              {detail.source === "workspace" && !editing ? <div className="mt-4 flex justify-end border-t border-[color:var(--line)] pt-3"><button type="button" className="btn btn-ghost text-danger" disabled={busy} onClick={() => deleteAgent(detail.name)}><TrashIcon size={14} />{tCommon("delete")}</button></div> : null}
+              {detail.source === "workspace" ? <div className="mt-4 flex justify-end border-t border-[color:var(--line)] pt-3"><button type="button" className="btn btn-ghost text-danger" disabled={busy} onClick={() => deleteAgent(detail.name)}><TrashIcon size={14} />{tCommon("delete")}</button></div> : null}
             </>
           ) : (
             <Empty title={t("pickAgent")} subtitle={t("pickAgentHint")} />
@@ -678,15 +718,13 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      <Dialog.Portal>
-        <Dialog.Overlay className="ui-modal-overlay" />
-        <Dialog.Content className="ui-dialog agent-create-dialog" onOpenAutoFocus={(event) => { event.preventDefault(); nameInputRef.current?.focus(); }}>
+      {creating && <section className="mx-auto w-full max-w-4xl">
           <div className="flex items-start justify-between gap-4 border-b border-[color:var(--line)] px-5 py-4 sm:px-6">
             <div>
-              <Dialog.Title className="text-lg font-semibold">{t("createPersona")}</Dialog.Title>
-              <Dialog.Description className="mt-1 text-sm leading-6 text-[color:var(--text-muted)]">{t("createHint")}</Dialog.Description>
+              <h2 className="text-lg font-semibold">{t("createPersona")}</h2>
+              <p className="mt-1 text-sm leading-6 text-[color:var(--text-muted)]">{t("createHint")}</p>
             </div>
-            <Dialog.Close disabled={busy} className="ui-icon-button shrink-0" aria-label={tCommon("close")}><XIcon size={17} /></Dialog.Close>
+            <button type="button" onClick={() => void cancelCreate()} disabled={busy} className="ui-icon-button shrink-0" aria-label={tCommon("close")}><XIcon size={17} /></button>
           </div>
           <form className="space-y-5 px-5 pt-5 sm:px-6" onSubmit={(event) => { event.preventDefault(); void createAgent(); }}>
             <fieldset disabled={busy} className="min-w-0 space-y-5">
@@ -704,6 +742,7 @@ export default function AgentsPage() {
                   <Select<Tier> value={draft.tier} onChange={(tier) => setDraft({ ...draft, tier })} options={tierOptions(t)} size="sm" ariaLabel={t("llmTier")} />
                 </div>
               </div>
+              <AgentModelField provider={draft.provider || ""} model={draft.model || ""} disabled={busy} onChange={(provider, model) => setDraft({ ...draft, provider, model })} />
               <div className="text-sm">
                 <div className="mb-2">{t("preloadedSkills")}</div>
                 <SkillSelector selected={draft.allowed_skills} options={skillOptions} onChange={(allowed_skills) => setDraft({ ...draft, allowed_skills })} />
@@ -714,14 +753,13 @@ export default function AgentsPage() {
               </label>
             </fieldset>
             <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[color:var(--line)] bg-[color:var(--overlay-surface)] py-4">
-              <Dialog.Close asChild><button type="button" className="btn btn-ghost" disabled={busy}>{tCommon("cancel")}</button></Dialog.Close>
+              <button type="button" onClick={() => void cancelCreate()} className="btn btn-ghost" disabled={busy}>{tCommon("cancel")}</button>
               <button type="submit" className="btn btn-primary" disabled={busy || !draft.name.trim()}><PlusIcon size={14} />{busy ? tCommon("saving") : t("create")}</button>
             </div>
           </form>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </section>}
     </PageBody>
-    </Dialog.Root>
+    </>
   );
 }
 
@@ -742,17 +780,22 @@ function AgentEditor({
 }) {
   const t = useTranslations("agentsPage");
   const tCommon = useTranslations("common");
+  const [provider, setProvider] = useState(detail.provider || "");
+  const [model, setModel] = useState(detail.model || "");
   const [tier, setTier] = useState(detail.tier || "medium");
   const [allowed, setAllowed] = useState<string[]>(detail.allowed_skills || []);
   const [prompt, setPrompt] = useState(detail.prompt || "");
 
   useEffect(() => {
+    setProvider(detail.provider || "");
+    setModel(detail.model || "");
     setTier(detail.tier || "medium");
     setAllowed(detail.allowed_skills || []);
     setPrompt(detail.prompt || "");
-  }, [detail.name, detail.tier, detail.allowed_skills, detail.prompt]);
+  }, [detail.name, detail.tier, detail.allowed_skills, detail.prompt, detail.provider, detail.model]);
 
   const dirty =
+    provider !== (detail.provider || "") || model !== (detail.model || "") ||
     tier !== detail.tier ||
     allowed.join(",") !== (detail.allowed_skills || []).join(",") ||
     prompt !== detail.prompt;
@@ -768,6 +811,7 @@ function AgentEditor({
 
   return (
     <div className="space-y-5" data-testid="agent-editor">
+      <AgentModelField provider={provider} model={model} disabled={busy || detail.execution_policy?.allow_model_override === false || detail.execution_policy?.model_override_scope === "none"} onChange={(provider, model) => { setProvider(provider); setModel(model); }} />
       <div className="grid grid-cols-1 xl:grid-cols-[220px_1fr] gap-3">
         <label className="text-[12px] text-ink-300 block">
           {t("llmTier")}
@@ -813,6 +857,8 @@ function AgentEditor({
           onClick={() =>
             onSave({
               ...detail,
+              provider,
+              model,
               tier,
               allowed_skills: allowed,
               prompt,

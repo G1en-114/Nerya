@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": ".next-composer-review/typescript.tsbuildinfo",
+    "strictNullChecks": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.ts",
+    "components/**/*.tsx",
+    "lib/**/*.ts",
+    "messages/**/*.ts",
+    ".next-composer-review/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "tests"
+  ]
+}

@@ -8,7 +8,6 @@ and keeps the older Node-skill adapter only as a compatibility fallback.
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
 import hmac
@@ -18,7 +17,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Iterator
+from typing import Any
 
 from ..errors import (
     WalletDependencyError,
@@ -127,6 +126,10 @@ class BitgetWalletSkill(WalletProvider):
     market_api_secret: str = ""
     market_base_url: str = _MARKET_BASE_URL
     config: dict[str, Any] = field(default_factory=dict)
+    workspace: str = ''
+
+    def _official(self):
+        return self._uses_python_skill() and self.config.get('backend','official')=='official'
 
     def _ref(self) -> NodeSkillRef:
         return NodeSkillRef(
@@ -176,6 +179,10 @@ class BitgetWalletSkill(WalletProvider):
         )
 
     def capabilities(self) -> WalletCapabilities:
+        if self._official():
+            from dataclasses import replace
+            return replace(_CAPABILITIES,swap=WalletCapability(True,'partial','Standard local EVM/Solana transactions; no gasless or typed messages'),
+                swap_chains=('ethereum','bsc','base','arbitrum','polygon','solana'),minimum_output='enforced',receipt_polling=True)
         return _CAPABILITIES
 
     # ------------------------------------------------------------------
@@ -194,29 +201,6 @@ class BitgetWalletSkill(WalletProvider):
         if api_url:
             extras["BITGET_API_URL"] = api_url
         return extras
-
-    @contextmanager
-    def _skill_env(self) -> Iterator[None]:
-        """Expose ``_skill_env_extras`` to a child process.
-
-        Used around the Node-skill invoke (which inherits ``os.environ``);
-        the python-skill path passes the mapping directly to
-        ``subprocess.run(env=...)`` instead. Saved vars are restored.
-        """
-        extras = self._skill_env_extras()
-        if not extras:
-            yield
-            return
-        saved = {k: os.environ.get(k) for k in extras}
-        try:
-            os.environ.update(extras)
-            yield
-        finally:
-            for key, old in saved.items():
-                if old is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old
 
     def _py_action_argv(self, action: str, payload: dict[str, Any]) -> list[str]:
         """Build the python-skill argv for a wallet action.
@@ -250,11 +234,12 @@ class BitgetWalletSkill(WalletProvider):
             return self._run_python_skill(
                 self._py_action_argv(command, payload), timeout_s=timeout_s,
             )
-        with self._skill_env():
-            return self._ref().invoke(command, payload, timeout_s=timeout_s)
+        ref=self._ref()
+        ref.env_overrides=self._skill_env_extras()
+        return ref.invoke(command, payload, timeout_s=timeout_s)
 
     def _run_python_skill(
-        self, args: list[str], *, timeout_s: float = 30.0,
+        self, args: list[str], *, timeout_s: float = 30.0, input_doc=None,
     ) -> dict[str, Any]:
         ok, missing = self._python_skill_ready()
         if not ok:
@@ -263,7 +248,7 @@ class BitgetWalletSkill(WalletProvider):
         assert script is not None
         try:
             proc = subprocess.run(
-                [sys.executable, str(script), *args],
+                [sys.executable, str(script), *(['--wallet-id',str(self.config['social_wallet_id'])] if self.config.get('social_wallet_id') else []),*args],
                 cwd=str(Path(self.skill_path)),
                 capture_output=True,
                 timeout=timeout_s,
@@ -272,6 +257,7 @@ class BitgetWalletSkill(WalletProvider):
                 encoding="utf-8",
                 errors="replace",
                 env={**os.environ, **self._skill_env_extras()},
+                input=json.dumps(input_doc) if input_doc is not None else None,
             )
         except subprocess.TimeoutExpired as exc:
             raise WalletTransportError(f"Bitget wallet skill timed out after {timeout_s}s") from exc
@@ -368,7 +354,8 @@ class BitgetWalletSkill(WalletProvider):
                 except (TypeError, ValueError):
                     continue
             out.sort(key=lambda r: r["ts"])
-            return out
+            return [r for r in out if (_kw.get('start') is None or r['ts']>=int(_kw['start'])) and
+                    (_kw.get('end') is None or r['ts']<=int(_kw['end']))]
 
         chain_id = _BITGET_CHAINS.get((chain or "").strip().lower())
         if not chain_id:
@@ -421,11 +408,15 @@ class BitgetWalletSkill(WalletProvider):
             except (TypeError, ValueError):
                 continue
         out.sort(key=lambda r: r["ts"])
-        return out
+        return [r for r in out if (_kw.get('start') is None or r['ts']>=int(_kw['start'])) and
+                (_kw.get('end') is None or r['ts']<=int(_kw['end']))]
 
     def get_balance(
         self, *, chain: str, address: str, token: str, **kw: Any,
     ) -> WalletBalance:
+        if self._official():
+            from .bitget_official import balance
+            return balance(self,chain,address,token)
         doc = self._invoke_skill("balance", {
             "chain": chain, "address": address, "token": token, **kw,
         })
@@ -440,22 +431,15 @@ class BitgetWalletSkill(WalletProvider):
         self, *, chain: str, token_in: str, token_out: str,
         amount_in: float, slippage_bps: int = 50, **kw: Any,
     ) -> WalletQuote:
+        if self._official():
+            from .bitget_official import quote
+            return quote(self,chain=chain,token_in=token_in,token_out=token_out,amount_in=amount_in,slippage_bps=slippage_bps)
         doc = self._invoke_skill("quote", {
             "chain": chain, "token_in": token_in, "token_out": token_out,
             "amount_in": float(amount_in), "slippage_bps": slippage_bps, **kw,
         })
-        expected = float(doc.get("expected_out") or 0.0)
-        return WalletQuote(
-            provider=self.id, chain=chain,
-            token_in=token_in, token_out=token_out,
-            amount_in=float(amount_in),
-            expected_out=expected,
-            min_out=float(doc.get("min_out") or expected * (1 - slippage_bps / 10_000)),
-            slippage_bps=slippage_bps,
-            price_impact_bps=int(doc.get("price_impact_bps") or 0),
-            gas_cost_usd=float(doc.get("gas_cost_usd") or 0.0),
-            extra={"raw": doc},
-        )
+        from ..adapter_contract import parse_quote
+        return parse_quote(self.id,dict(chain=chain,token_in=token_in,token_out=token_out,amount_in=amount_in,slippage_bps=slippage_bps),doc)
 
     def swap(
         self, *, chain: str, token_in: str, token_out: str,
@@ -468,23 +452,36 @@ class BitgetWalletSkill(WalletProvider):
                 reason="live=False; Bitget skill swap requires runtime.live_trading_enabled",
                 amount_in=float(amount_in),
             )
+        if self._official():
+            from .bitget_official import swap
+            return swap(self,chain=chain,token_in=token_in,token_out=token_out,amount_in=amount_in,
+                        slippage_bps=slippage_bps,receiver=receiver,**kw)
         doc = self._invoke_skill(
             "swap",
             {
                 "chain": chain, "token_in": token_in, "token_out": token_out,
                 "amount_in": float(amount_in), "slippage_bps": slippage_bps,
-                "receiver": receiver or "", **kw,
+                "receiver": receiver or "", **{k:v for k,v in kw.items() if k!='on_broadcast'},
             },
             timeout_s=60.0,
         )
-        # Default ok=False: a skill doc that omits "ok" must never be
-        # reported as a successful transaction.
-        return WalletSwapResult(
-            provider=self.id, chain=chain,
-            ok=bool(doc.get("ok", False)),
-            tx_hash=str(doc.get("tx_hash") or ""),
-            amount_in=float(amount_in),
-            amount_out=float(doc.get("amount_out") or 0.0),
-            reason=str(doc.get("reason") or ""),
-            extra={"raw": doc},
-        )
+        from ..adapter_contract import parse_result
+        return parse_result(self.id,dict(chain=chain,token_out=token_out,amount_in=amount_in,receiver=receiver),doc,on_broadcast=kw.get('on_broadcast'))
+
+    def get_execution_status(self,*,request,transaction):
+        if self._official():
+            from .bitget_official import call
+            ref=transaction.get('execution_ref')
+            if ref:
+                doc=call(self,'get-order-details',{'order_id':ref})
+                details=doc.get('details') or {}
+                if details.get('status') in ('failed','fail'):
+                    return WalletSwapResult(provider=self.id,chain=request['chain'],ok=False,
+                        reason='provider_order_failed',extra={'status':'failed'})
+                transaction={**transaction,'tx_hash':details.get('toTxId') or details.get('fromTxId') or transaction.get('tx_hash') or ''}
+            from ..confirmation import read_transaction
+            result=read_transaction(self.id,self.config,request,transaction)
+            result.extra.update(transaction=transaction,execution_ref=ref)
+            return result
+        from ..adapter_contract import parse_result
+        return parse_result(self.id,request,self._invoke_skill('get_execution_status',{'request':request,'transaction':transaction}))

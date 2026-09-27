@@ -1,0 +1,31 @@
+"use client";
+
+import { useEffect } from "react";
+import { useLocale } from "next-intl";
+import { confirm } from "../../lib/dialogs";
+
+/** In-app links warn; programmatic navigation/Back is protected by draft storage. */
+export function useUnsavedChanges(dirty: boolean) {
+  const zh = useLocale().startsWith("zh");
+  useEffect(() => {
+    if (!dirty) return;
+    let asking = false, disposed = false;
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const click = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+      if (!anchor || anchor.target === "_blank" || anchor.download || anchor.href === location.href || anchor.getAttribute("href")?.startsWith("#")) return;
+      event.preventDefault(); event.stopPropagation();
+      if (asking) return;
+      asking = true;
+      void confirm({ title: zh ? "离开未保存的编辑？" : "Leave this unsaved edit?",
+        message: zh ? "草稿会保留在本机，返回后可继续编辑。已经保存或执行的内容不会被撤销。" : "The draft is retained locally and can be restored when you return. Saved or executed actions will not be undone.",
+        okLabel: zh ? "保留草稿并离开" : "Keep draft and leave", cancelLabel: zh ? "继续编辑" : "Keep editing" }).then(ok => {
+          asking = false;
+          if (ok && !disposed) { window.removeEventListener("beforeunload",beforeUnload); window.location.assign(anchor.href); }
+        });
+    };
+    window.addEventListener("beforeunload",beforeUnload); document.addEventListener("click",click,true);
+    return () => { disposed = true; window.removeEventListener("beforeunload",beforeUnload); document.removeEventListener("click",click,true); };
+  }, [dirty,zh]);
+}

@@ -30,14 +30,14 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 from ..agent.error_recovery import RecoveryAction, classify_for_recovery, policy_for_kind
-from .executor import NativeToolExecutor
+from .executor import NativeToolExecutor, resolve_execution_target
 from .registry import ToolRegistry
 from ..harness.cancellation import CancelToken
 from .execution_contracts import (
-    dispatch_stop_reason, execution_unknown_result, is_read_only_tool,
+    dispatch_stop_reason, execution_unknown_result,
     pair_executed_results, skipped_before_dispatch,
 )
-from .types import ContextModifier, ToolCall, ToolResult
+from .types import ContextModifier, RiskLevel, ToolCall, ToolResult
 
 
 _LOG = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ class ToolOrchestrator:
             if (
                 not result.is_error or not self.auto_retry_transient
                 or error is None or error.retryable is False
-                or not is_read_only_tool(call.name, self.registry)
+                or not self._is_read_only(call, require_concurrency_safe=False)
             ):
                 return result, retries
             verdict = classify_for_recovery(
@@ -206,11 +206,15 @@ class ToolOrchestrator:
                 else:
                     time.sleep(delay)
 
-    def _is_read_only(self, call: ToolCall) -> bool:
-        descriptor = self.registry.find(call.name)
+    def _is_read_only(self, call: ToolCall, *, require_concurrency_safe: bool = True) -> bool:
+        target = resolve_execution_target(call, self.registry)
+        if isinstance(target, ToolResult):
+            return False
+        descriptor = self.registry.find(target.name)
         return bool(
-            descriptor and descriptor.is_concurrency_safe
-            and is_read_only_tool(call.name, self.registry)
+            descriptor and descriptor.read_only
+            and descriptor.per_call_risk(target.arguments) is RiskLevel.READ
+            and (not require_concurrency_safe or descriptor.is_concurrency_safe)
         )
 
 

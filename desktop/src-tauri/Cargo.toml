@@ -1,0 +1,26 @@
+[package]
+name = "nerya-desktop"
+version = "1.0.0-beta.1"
+edition = "2021"
+rust-version = "1.77.2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# Keep proc-macro metadata intact with the macOS/Homebrew Rust toolchain.
+strip = "none"
+
+[build-dependencies]
+cc = "1"
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

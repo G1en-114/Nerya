@@ -2,11 +2,47 @@
 from __future__ import annotations
 from copy import deepcopy
 import math
+import re
 from typing import Any
 from ..core.config import Config
 from ..tools.capability_policy import normalise_tool_policy
 
 BUDGET_KEYS = {"max_iterations": "max_iterations", "max_tool_calls": "max_total_tool_calls", "max_wall_seconds": "max_wall_seconds"}
+
+
+def task_output_error(final_text: Any) -> str | None:
+    """A raw model tool protocol is not an executed tool or a final deliverable.
+
+    Do not parse/execute it after the fact: doing so would bypass the native
+    tool dispatcher. Quoted examples inside an ordinary answer are left alone.
+    """
+    text = str(final_text or "").lstrip()
+    if re.match(r"(?:<tool_call>\s*)*(?:<tool_call>|<function[=>]|<function_calls>|<invoke\b)", text, re.I):
+        return "unexecuted_tool_protocol"
+    return None
+
+
+def agent_task_receipt(strategy_id: str, task: dict[str, Any], session_id: Any = None) -> dict[str, Any]:
+    """Project the existing task ledger without inventing missing command IDs."""
+    from ..triggers.execution_receipt import turn_execution_status
+
+    status = task.get("status") or "unrecorded"
+    if status == "executed":
+        status = "failed" if task.get("output_error") or task_output_error(task.get("final_text")) else turn_execution_status(task.get("stopped_reason"))
+    return {
+        "receipt_id": task.get("task_id"),
+        "source": "strategy",
+        "strategy_id": strategy_id,
+        "task_id": task.get("task_id"),
+        "session_id": session_id or task.get("session_id"),
+        "turn_id": task.get("turn_id"),
+        "command_id": task.get("command_id"),
+        "trigger_event_id": task.get("trigger_event_id"),
+        "execution_status": status,
+        "stopped_reason": task.get("stopped_reason"),
+        "delivery_status": task.get("delivery_status") or "unrecorded",
+        "prompt_artifact": task.get("prompt_artifact"),
+    }
 
 
 def validate_agent_configuration(raw: dict[str, Any]) -> None:
@@ -94,12 +130,18 @@ def execution_config(config: Config, manifest: Any) -> Config:
     # Strategy-owned child loops inherit the main run's capacity unless an
     # operator explicitly supplied a child policy or a role has its own cap.
     child = data["agent"].setdefault("subagents", {})
+    child["reuse_strategy_context"] = manifest.agent_session.include_prior_messages
     for target, source in (("max_iterations", "max_iterations"), ("max_skill_calls", "max_total_tool_calls"), ("max_wall_seconds", "max_wall_seconds")):
-        if target not in child and source in native:
+        # Parent zero is an unlimited sentinel, not a child "no tools" policy.
+        # Keep the child's independent defaults when no finite parent cap exists.
+        if target not in child and source in native and float(native[source] or 0) > 0:
             child[target] = native[source]
     team = data["agent"].setdefault("team_run", {})
     wall = native.get("max_wall_seconds")
-    if wall is not None:
+    # Zero means unlimited in the main Agent, but a TeamRequest's zero is an
+    # immediate timeout. Inherit only a finite positive bound; otherwise keep
+    # the team's own defaults/explicit policy.
+    if wall is not None and float(wall) > 0:
         team.setdefault("timeout_s", wall)
         team.setdefault("max_timeout_s", wall)
     requested_parallel = execution.get("team", {}).get("max_parallel")

@@ -45,6 +45,13 @@ def run(*, venue: str) -> dict[str, Any]:
     if not venue:
         return {"error": "venue is required", "symbols": [], "count": 0}
     venue = venue.lower()
+    if venue in ('polymarket','polymarket_v2','pm'):
+        from nerya.connectors.polymarket import PolymarketConnector
+        try:
+            symbols=PolymarketConnector().list_markets(limit=20)
+            return {'venue':'polymarket','symbols':symbols,'count':len(symbols)}
+        except Exception as exc:
+            return {'venue':'polymarket','symbols':[],'count':0,'error':str(exc)}
 
     try:
         import ccxt  # type: ignore
@@ -85,6 +92,7 @@ def run(*, venue: str) -> dict[str, Any]:
         precision = m.get("precision") or {}
         out.append({
             "symbol": sym,
+            "id": m.get("id"),
             "base": m.get("base"),
             "quote": m.get("quote"),
             "active": bool(m.get("active", True)),

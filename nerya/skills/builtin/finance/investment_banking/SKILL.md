@@ -1,5 +1,8 @@
 ---
 name: finance.investment_banking
+metadata:
+  nerya:
+    catalog_group: professional
 description: "Transaction preparation: buyer lists, company profiles, teasers, CIMs, pitch decks, datapacks, merger models, process letters and deal tracking."
 version: 0.2.0
 license: MIT

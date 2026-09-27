@@ -138,39 +138,20 @@ class MCPPolicy:
 
 
 def policy_from_config(config: Any) -> MCPPolicy:
-    """Build an :class:`MCPPolicy` from a Nerya :class:`Config`.
+    """Use the workspace operator policy, without MCP-only write restrictions.
 
-    Reads the ``mcp.dynamic_tools`` block and falls back to safe
-    defaults (read-only style: only actions whose name pattern looks
-    like a query are exposed, no mutating skills). When
-    ``mcp.dynamic_tools.preset`` is not set, we inherit
-    ``agent.operator.preset`` so the MCP surface follows the same
-    policy as the workspace operator.
+    Legacy MCP allow/deny lists and presets are retired. Skill availability,
+    proposals, approval and live-trading gates remain enforced by the runtime.
     """
-
-    data = (getattr(config, "data", None) or {}) or {}
-    runtime = (data.get("runtime") or {}) if isinstance(data, dict) else {}
-    agent = (data.get("agent") or {}) if isinstance(data, dict) else {}
-    operator_cfg = (agent.get("operator") or {}) if isinstance(agent, dict) else {}
-    mcp_cfg = (data.get("mcp") or {}) if isinstance(data, dict) else {}
-    dynamic = (mcp_cfg.get("dynamic_tools") or {}) if isinstance(mcp_cfg, dict) else {}
-
-    explicit_preset = str(dynamic.get("preset") or "").strip() or None
-    inherited_preset = str(operator_cfg.get("preset") or "").strip() or None
-
+    data = getattr(config, "data", None) or {}
+    runtime = data.get("runtime", {}) or {}
+    operator = (data.get("agent", {}) or {}).get("operator", {}) or {}
+    dynamic = (data.get("mcp", {}) or {}).get("dynamic_tools", {}) or {}
     return MCPPolicy(
-        preset=explicit_preset or inherited_preset,
-        allow_mutating=bool(dynamic.get("allow_mutating", False)),
-        allow_skills=tuple(dynamic["allow_skills"])
-            if isinstance(dynamic.get("allow_skills"), (list, tuple))
-            else None,
-        deny_skills=tuple(dynamic.get("deny_skills") or ()),
-        allow_actions=tuple(dynamic["allow_actions"])
-            if isinstance(dynamic.get("allow_actions"), (list, tuple))
-            else None,
-        deny_actions=tuple(dynamic.get("deny_actions") or ()),
-        include_unimplemented=bool(dynamic.get("include_unimplemented", False)),
-        live_trading_enabled=bool(runtime.get("live_trading_enabled", False)),
+        preset=str(operator.get("preset") or "").strip() or None,
+        allow_mutating=True,
+        include_unimplemented=dynamic.get("include_unimplemented") is True,
+        live_trading_enabled=runtime.get("live_trading_enabled") is True,
     )
 
 

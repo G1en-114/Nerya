@@ -342,7 +342,6 @@ class AgentSessionRepository:
         turn_id: str,
         checkpoint: dict[str, Any],
         expected_claim_id: str | None = None,
-        max_bytes: int = 2 * 1024 * 1024,
         ts: float | None = None,
     ) -> bool:
         """Persist one private continuation checkpoint for ``session_id``.
@@ -363,12 +362,6 @@ class AgentSessionRepository:
             separators=(",", ":"),
         )
         payload_bytes = len(payload.encode("utf-8"))
-        byte_limit = max(1, int(max_bytes or 0))
-        if payload_bytes > byte_limit:
-            raise ValueError(
-                "turn checkpoint exceeds size limit: "
-                f"{payload_bytes} > {byte_limit} bytes"
-            )
         saved_at = float(ts or time.time())
         claim_id = str(expected_claim_id or "").strip()
         if claim_id:
@@ -462,7 +455,6 @@ class AgentSessionRepository:
         claim_id: str,
         checkpoint: dict[str, Any],
         stale_before: float | None = None,
-        max_bytes: int = 64 * 1024,
         ts: float | None = None,
     ) -> dict[str, Any] | None:
         """Atomically create/replace a session checkpoint with a live lease.
@@ -484,12 +476,6 @@ class AgentSessionRepository:
             separators=(",", ":"),
         )
         payload_bytes = len(payload.encode("utf-8"))
-        byte_limit = max(1, int(max_bytes or 0))
-        if payload_bytes > byte_limit:
-            raise ValueError(
-                "turn lease checkpoint exceeds size limit: "
-                f"{payload_bytes} > {byte_limit} bytes"
-            )
         started_at = float(ts or time.time())
         availability = "agent_turn_checkpoints.claim_id IS NULL"
         params: list[Any] = [
@@ -602,6 +588,9 @@ class AgentSessionRepository:
                 content=excluded.content,
                 meta_json=excluded.meta_json,
                 deleted=0
+            WHERE agent_messages.deleted=0
+              AND json_extract(CASE WHEN json_valid(agent_messages.meta_json)
+                  THEN agent_messages.meta_json ELSE '{}' END, '$.edited_at') IS NULL
             """,
             (
                 message_id,

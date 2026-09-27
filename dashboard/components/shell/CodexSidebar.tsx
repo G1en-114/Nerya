@@ -1,57 +1,26 @@
 "use client";
 import { TaskList } from "../chat/TaskList";
 
-/**
- * CodexSidebar — the persistent left rail for the Codex-inspired shell.
- *
- * Layout mirrors the Codex desktop app:
- *
- *   ┌──────────────┐
- *   │ Nerya     [⟨] │  brand + collapse
- *   │ ▦ Overview    │  ── core daily drivers only
- *   │ ✎ New chat    │
- *   │ ⌕ Search   ⌘K │
- *   │ ◇ Agents      │  (agents / skills / tasks share one page)
- *   │ ◔ Strategies  │
- *   │ ▸ More…       │  collapsible: Trading / Automation +
- *   │               │  capability-gated routes
- *   │ CHATS         │  ── recent conversations (folded-in rail)
- *   │ ▭ alpha plan  │
- *   │ ⚙ Settings    │  ── footer (settings only)
- *   └──────────────┘
- *
- * Destinations still flow from ``/operator/nav`` so capability gating +
- * badges keep working; this component is purely the presentation layer
- * that re-shapes them into the Codex information architecture. Low-frequency
- * routes fold under "More"; notifications live in the top-right shell bell
- * (ShellNotifications), not in this rail.
- */
-
+/** Destination rail and conversation tree. */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import type { SVGProps } from "react";
-import { clientApi } from "../../lib/clientApi";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import styles from "./CodexSidebar.module.css";
+
 import type { NavEntry } from "../../lib/operatorTypes";
-import {
-  loadThreads,
-  subscribeThreadsChanged,
-  deleteThreadLocally,
-  type ChatThread,
-} from "../../lib/chat";
-import { confirm as confirmDialog } from "../../lib/dialogs";
-import { ConversationActions } from "../chat/ChatHistoryActions";
 import { startDesktopDragging } from "../../lib/desktop";
 import { useOperatorNav } from "../../lib/useOperatorNav";
 import { NeryaLogo } from "../NeryaLogo";
-import { ConversationSourceIcon } from "../chat/ConversationSourceIcon";
-import { isExternalSource } from "../../lib/externalCalls";
+
+
 import { useCommandPalette } from "./CommandPalette";
 import { SidebarStrategies } from "./SidebarStrategies";
 import {
   AgentsIcon,
-  ChevronDownIcon,
+
   ComposeIcon,
   NAV_ICONS,
   NAV_ICON_BY_NAME,
@@ -61,11 +30,20 @@ import {
   SearchIcon,
   SettingsIcon,
   StrategiesIcon,
-  TrashIcon,
+  MoreIcon,
   TriggersIcon,
 } from "../icons";
 
 type IconComp = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
+
+function SidebarHint({ label, children }: { label: string; children: React.ReactElement }) {
+  return <Tooltip.Provider delayDuration={200}><Tooltip.Root>
+    <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+    <Tooltip.Portal><Tooltip.Content side="right" sideOffset={8} collisionPadding={8} className={styles.tooltip}>
+      {label}
+    </Tooltip.Content></Tooltip.Portal>
+  </Tooltip.Root></Tooltip.Provider>;
+}
 
 const COLLAPSE_KEY = "nerya.sidebar.collapsed";
 const ADVANCED_OPEN_KEY = "nerya.sidebar.advanced-open";
@@ -170,34 +148,24 @@ function SideRow({
     collapsed ? "justify-center px-0" : "",
   ].join(" ");
 
-  if (href) {
-    return (
-      <Link href={href} className={cls} title={collapsed ? label : undefined} aria-label={label} aria-current={active ? "page" : undefined}>
+  const control = href ? (
+      <Link href={href} className={cls} aria-label={label} aria-current={active ? "page" : undefined}>
         {inner}
       </Link>
-    );
-  }
-  return (
-    <button type="button" onClick={onClick} className={cls} title={collapsed ? label : undefined} aria-label={label} data-navigation-action>
+    ) : (
+    <button type="button" onClick={onClick} className={cls} aria-label={label} data-navigation-action>
       {inner}
     </button>
   );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="px-3 pb-1 pt-1 text-[11px] font-medium uppercase tracking-wide text-[color:var(--text-muted)]">
-      {children}
-    </div>
-  );
+  return collapsed ? <SidebarHint label={label}>{control}</SidebarHint> : control;
 }
 
 export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
   const pathname = usePathname() || "/";
   const t = useTranslations("sidebar");
   const tNav = useTranslations("nav");
-  const tChat = useTranslations("chat");
-  const tCommon = useTranslations("common");
+
+
   const palette = useCommandPalette();
   const nav = useOperatorNav();
 
@@ -205,7 +173,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
   const [isNarrow, setIsNarrow] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [chats, setChats] = useState<ChatThread[]>([]);
+
 
   useEffect(() => {
     try {
@@ -243,31 +211,6 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
     }
   }, [advancedOpen, hydrated]);
 
-  // Recent conversations live here now (the chat view no longer carries
-  // its own rail). ChatView broadcasts on every save/delete, so we just
-  // re-read the local store whenever it changes. Threads bound to a
-  // strategy render in the SidebarStrategies block instead of the flat
-  // CHATS list, so they're filtered out here.
-  useEffect(() => {
-    const read = () =>
-      setChats(
-        loadThreads()
-          .filter((t) => !t.strategy_id)
-          .sort((a, b) => (b.updated_ts || 0) - (a.updated_ts || 0)),
-      );
-    read();
-    return subscribeThreadsChanged(read);
-  }, []);
-
-  async function removeChat(id: string) {
-    const ok = await confirmDialog({ message: tChat("deleteConfirm"), tone: "danger" });
-    if (!ok) return;
-    deleteThreadLocally(id); // tombstone + persist + broadcast (ChatView leaves dead route)
-    void clientApi.sessionDelete(id).catch(() => {
-      /* keep the local tombstone even if the backend delete fails */
-    });
-  }
-
   const advancedItems = useMemo(() => {
     const seen = new Set<string>();
     const out: NavEntry[] = [];
@@ -292,140 +235,48 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
   }, [pathname, advancedActive]);
 
   const railCollapsed = !inDrawer && (collapsed || isNarrow);
-  const width = railCollapsed ? (isNarrow ? "w-14" : "w-[68px]") : "w-64";
+  const width = railCollapsed ? "w-14" : "w-[280px]";
 
   return (
     <aside
-      className={`${width} nerya-sidebar sticky top-0 flex h-dvh shrink-0 flex-col overflow-hidden border-r`}
+      className={`${styles.sidebar} ${width} nerya-sidebar sticky top-0 flex h-dvh shrink-0 flex-col overflow-hidden border-r`}
       style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}
     >
       <div className="nerya-sidebar-titlebar-drag shrink-0" aria-hidden="true"
         onMouseDown={(event) => { if (event.button === 0) void startDesktopDragging().catch(() => undefined); }} />
-      {/* Brand + collapse */}
-      <div className="flex items-center gap-2.5 px-3 py-3">
-        <Link href="/" className="flex min-w-0 items-center gap-2" aria-label="Nerya">
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg">
-            <NeryaLogo size={26} />
-          </span>
-          {!railCollapsed ? (
-            <span className="truncate text-[14px] font-semibold text-[color:var(--text-base)]">
-              {t("brandName")}
-            </span>
-          ) : null}
-        </Link>
-        {!railCollapsed && !inDrawer ? (
-          <button
-            type="button"
-            onClick={() => setCollapsed(true)}
-            className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-md text-[color:var(--text-muted)] transition-colors hover:bg-brand-500/10 hover:text-[color:var(--text-base)]"
-            title={t("collapse")}
-            aria-label={t("collapse")}
-          >
-            <PanelLeftIcon size={17} />
-          </button>
-        ) : null}
-      </div>
-
-      {railCollapsed && !isNarrow ? (
-        <button
-          type="button"
-          onClick={() => setCollapsed(false)}
-          className="mx-auto mb-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-[color:var(--text-muted)] transition-colors hover:bg-brand-500/10 hover:text-[color:var(--text-base)]"
-          title={t("expand")}
-          aria-label={t("expand")}
-        >
-          <PanelLeftIcon size={17} />
-        </button>
-      ) : null}
-
-      <nav aria-label={t("brandName")} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2 pb-2">
-        {/* Codex-minimal core: just the daily drivers. Overview leads (it is
-            the strategies/positions cockpit), then chat + search, then the
-            two destinations that share their tabbed sections: Agents
-            (agents/skills/tasks) and Strategies. Everything lower-frequency
-            (Trading, Automation, capability-gated routes) folds under a
-            single "More". Notifications live in the top-right shell bell. */}
-        <div className="shrink-0 space-y-0.5">
-          <SideRow icon={OverviewIcon} label={t("overview")} href="/dashboard" collapsed={railCollapsed} active={isActive(pathname, "/dashboard")} />
-          <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed={railCollapsed} active={pathname === "/chat"} />
-          <SideRow icon={SearchIcon} label={t("search")} collapsed={railCollapsed} shortcut="⌘K" onClick={() => palette.setOpen(true)} />
-          <SideRow icon={AgentsIcon} label={t("agents")} href="/agents" collapsed={railCollapsed} active={isActive(pathname, "/agents", ["/skills", "/tasks"])} />
-          <SideRow icon={StrategiesIcon} label={t("strategies")} href="/strategies" collapsed={railCollapsed} active={isActive(pathname, "/strategies")} />
-
-          {railCollapsed ? (
-            <>
-              <SideRow icon={PortfolioIcon} label={t("trading")} href="/portfolio" collapsed active={isActive(pathname, "/portfolio", ["/accounts", "/orders", "/incidents"])} />
-              <SideRow icon={TriggersIcon} label={t("automation")} href="/workflows" collapsed active={isActive(pathname, "/workflows")} />
-              {advancedItems.map((item) => {
-                const Icon = resolveNavIcon(item) ?? OverviewIcon;
-                return (
-                  <SideRow
-                    key={item.href}
-                    icon={Icon}
-                    label={safeNavTranslate(tNav, item.href, item.label)}
-                    href={item.href}
-                    collapsed
-                    active={isActive(pathname, item.href, item.match_hrefs)}
-                  />
-                );
-              })}
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={() => setAdvancedOpen((v) => !v)}
-                aria-expanded={advancedOpen}
-                aria-controls="sidebar-additional-destinations"
-                className="group sidebar-item sidebar-item-idle w-full"
-              >
-                <ChevronDownIcon
-                  size={15}
-                  className={`shrink-0 text-[color:var(--text-muted)] transition-transform ${advancedOpen ? "" : "-rotate-90"}`}
-                />
-                <span className="truncate">{t("sectionAdvanced")}</span>
-              </button>
-              {advancedOpen ? (
-                <div id="sidebar-additional-destinations" className="space-y-0.5">
-                  <SideRow icon={PortfolioIcon} label={t("trading")} href="/portfolio" collapsed={false} active={isActive(pathname, "/portfolio", ["/accounts", "/orders", "/incidents"])} />
-                  <SideRow icon={TriggersIcon} label={t("automation")} href="/workflows" collapsed={false} active={isActive(pathname, "/workflows")} />
-                  {advancedItems.map((item) => {
-                    const Icon = resolveNavIcon(item) ?? OverviewIcon;
-                    return (
-                      <SideRow
-                        key={item.href}
-                        icon={Icon}
-                        label={safeNavTranslate(tNav, item.href, item.label)}
-                        href={item.href}
-                        collapsed={false}
-                        active={isActive(pathname, item.href, item.match_hrefs)}
-                      />
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
-
-        {/* Running strategies + chats — one shared scroll region. The
-            strategies block pins above the CHATS list so the operator sees
-            what's live without opening the strategies page; each strategy
-            expands into its second-level sessions (incl. evolution runs). */}
+      <div className="flex min-h-0 flex-1">
+        <nav aria-label={t("brandName")} className="flex w-12 shrink-0 flex-col gap-3 px-1.5 py-3">
+          <Link href="/" aria-label="Nerya" className="mx-auto mb-1"><NeryaLogo size={26} /></Link>
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+            <SideRow icon={OverviewIcon} label={t("overview")} href="/dashboard" collapsed active={isActive(pathname,"/dashboard")} />
+            <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed active={pathMatches(pathname,"/chat")} />
+            <SideRow icon={AgentsIcon} label={t("agents")} href="/agents" collapsed active={isActive(pathname,"/agents",["/skills","/tasks"])} />
+            <SideRow icon={StrategiesIcon} label={t("strategies")} href="/strategies" collapsed active={isActive(pathname,"/strategies")} />
+            <SideRow icon={PortfolioIcon} label={t("trading")} href="/portfolio" collapsed active={isActive(pathname,"/portfolio",["/accounts","/orders","/incidents"])} />
+            <SideRow icon={TriggersIcon} label={t("automation")} href="/workflows" collapsed active={isActive(pathname,"/workflows")} />
+            {advancedItems.length > 0 && <SidebarHint label={t("sectionAdvanced")}><button type="button" className="sidebar-item sidebar-item-idle w-full justify-center px-0" aria-label={t("sectionAdvanced")} aria-expanded={advancedOpen} aria-controls="sidebar-additional-destinations" onClick={() => setAdvancedOpen(value => !value)}><MoreIcon size={18} /></button></SidebarHint>}
+            {advancedOpen && <div id="sidebar-additional-destinations" className="space-y-2">{advancedItems.map(item => <SideRow key={item.href} icon={resolveNavIcon(item) ?? OverviewIcon} label={safeNavTranslate(tNav,item.href,item.label)} href={item.href} collapsed active={isActive(pathname,item.href,item.match_hrefs)} />)}</div>}
+          </div>
+          {railCollapsed && <SideRow icon={SearchIcon} label={t("search")} collapsed onClick={() => palette.setOpen(true)} />}
+          {!inDrawer && !isNarrow && <div className={railCollapsed ? undefined : styles.collapseControl}><SideRow icon={PanelLeftIcon} label={t(railCollapsed ? "expand" : "collapse")} collapsed onClick={() => setCollapsed(value => !value)} /></div>}
+          <SideRow icon={SettingsIcon} label={t("settings")} href="/settings" collapsed active={isActive(pathname,"/settings")} />
+        </nav>
+        {!railCollapsed && <div className="flex min-w-0 flex-1 flex-col rounded-tl-xl border-l" style={{borderColor:"var(--line)",background:"var(--bg-deep)"}}>
+          <div className="flex h-14 shrink-0 items-center gap-2 px-4">
+            <Link href="/chat" className="min-w-0 truncate text-[15px] font-semibold text-[color:var(--text-base)]">{t("brandName")}</Link>
+            <SidebarHint label={t("search")}><button type="button" className="ui-icon-button ml-auto" aria-label={t("search")} onClick={() => palette.setOpen(true)}><SearchIcon size={16} /></button></SidebarHint>
+          </div>
+          <div className="shrink-0 px-2 pb-4"><SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed={false} active={pathname === "/chat"} /></div>
+        {/* Recent tasks and strategy folders share one scroll region. */}
         {!railCollapsed ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="embedded-scroll min-h-0 flex-1 pr-1">
-              <SidebarStrategies />
+            <div className="embedded-scroll min-h-0 flex-1 px-2 pb-6">
               <TaskList />
+              <SidebarStrategies />
             </div>
           </div>
         ) : null}
-      </nav>
-
-      {/* Footer — theme + language now live in Settings → Interface →
-          Appearance (Codex parity), so the rail footer is just Settings. */}
-      <div className="space-y-1 border-t px-2 py-2" style={{ borderColor: "var(--line)" }}>
-        <SideRow icon={SettingsIcon} label={t("settings")} href="/settings" collapsed={railCollapsed} active={isActive(pathname, "/settings")} />
+        </div>}
       </div>
     </aside>
   );

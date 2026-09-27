@@ -1,0 +1,85 @@
+import { test, expect } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
+const installFixture = require('./research-fixture.cjs');
+const ROOT = path.resolve(__dirname, '../../..');
+const OUTPUT = path.join(ROOT, 'test-results/research-acceptance');
+let fixture: any;
+test.beforeAll(() => {
+  mkdirSync(OUTPUT, { recursive: true });
+  execFileSync(path.join(ROOT, '.venv/bin/python'), ['dashboard/tests/ui/research-fixture.py', '--output', OUTPUT], { cwd: ROOT, timeout: 30000 });
+  fixture = JSON.parse(readFileSync(path.join(OUTPUT, 'fixture.json'), 'utf8'));
+});
+async function open(page: any, darkMode='dark') {
+  await page.addInitScript(installFixture, fixture);
+  await page.addInitScript((mode: string) => localStorage.setItem('nerya.ui_settings.v1', JSON.stringify({language:'zh',darkMode:mode})), darkMode);
+  await page.goto('http://127.0.0.1:18381/chat/research-visual-acceptance');
+  await expect(page.getByTestId('research-instrument-card')).toHaveCount(2);
+  await expect(page.getByTestId('research-instrument-bar')).toHaveCount(0);
+  if (!await page.getByTestId('workspace-source').isVisible()) {
+    await page.getByTestId('task-dock-header').getByRole('tab').last().focus();
+    await page.keyboard.press('Escape');
+  }
+  await expect(page.getByTestId('workspace-source')).toBeVisible();
+}
+for (const theme of ['dark','light']) test(`Skill artifacts render in reply cards, asset drawer and left studies (${theme})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1040 });
+  await open(page, theme);
+  const cards = page.getByTestId('research-reply-cards');
+  const btc = cards.getByTestId('research-instrument-card').filter({ hasText: 'BTC' });
+  await expect(btc.getByTestId('research-card-price')).not.toHaveText('—');
+  await expect(btc.getByRole('img')).toBeVisible();
+  await cards.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(OUTPUT, `reply-cards-${theme}.png`) });
+  await btc.click();
+  const detail = page.getByTestId('research-instrument-panel');
+  await expect(detail.getByTestId('market-chart-workbench')).toBeVisible();
+  await expect(detail.locator('canvas').first()).toBeVisible();
+  await expect(detail.getByTestId('research-news')).toContainText('Bitcoin');
+  await expect(detail.getByTestId('research-news')).not.toContainText('Ethereum');
+  await detail.getByTestId('chart-indicators').locator('summary').click();
+  const rsi = detail.getByTestId('chart-indicators').getByRole('button', { name: /RSI/ });
+  await rsi.click(); await expect(rsi).toHaveAttribute('aria-pressed','true');
+  const macd = detail.getByTestId('chart-indicators').getByRole('button', { name: /MACD/ });
+  await macd.click(); await expect(macd).toHaveAttribute('aria-pressed','true');
+  await page.screenshot({ path: path.join(OUTPUT, `instrument-${theme}.png`) });
+  await cards.getByRole('button', { name: /资金流/ }).click();
+  const studies = page.getByTestId('research-charts-panel');
+  await expect(studies).toBeVisible(); await expect(studies.locator('canvas').first()).toBeVisible();
+  await expect(studies.getByTestId('financial-chart')).toContainText('净流入');
+  await page.screenshot({ path: path.join(OUTPUT, `flow-${theme}.png`) });
+  await studies.getByRole('button', { name: /归一化/ }).click();
+  await expect(studies.getByTestId('financial-chart')).toContainText('BTC');
+  await page.screenshot({ path: path.join(OUTPUT, `comparison-${theme}.png`) });
+  await page.getByRole('group', { name: '研究工作区' }).getByRole('button', { name: '对话', exact: true }).click();
+  await cards.getByTestId('research-instrument-card').filter({ hasText: 'ETH' }).click();
+  await expect(detail.getByTestId('research-news')).toContainText('Ethereum');
+  await expect(detail.getByTestId('research-news')).not.toContainText('Bitcoin');
+  await page.reload();
+  await expect(page.getByTestId('research-instrument-card')).toHaveCount(2);
+  await expect(page.getByTestId('research-instrument-panel').locator('canvas').first()).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__researchErrors)).toEqual([]);
+});
+test('compact reply cards, keyboard collapse, provider failure, and session isolation', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page);
+  await page.getByTestId('research-instrument-card').filter({ hasText: 'BTC' }).click();
+  const detail = page.getByTestId('research-instrument-panel');
+  await expect(detail.locator('canvas').first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: path.join(OUTPUT, 'instrument-mobile.png') });
+  await page.evaluate(() => { (window as any).__researchNewsFailure = true; });
+  await detail.getByRole('button', { name: '刷新资讯' }).click();
+  await expect(detail.getByTestId('research-news')).toContainText('暂不可用');
+  await expect(detail.getByTestId('research-news')).toContainText('Bitcoin');
+  await page.getByTestId('task-dock-header').getByRole('tab').last().focus();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#task-workspace')).not.toBeVisible();
+  await page.getByTestId('research-reply-cards').getByRole('button', { name: /资金流/ }).click();
+  await expect(page.getByTestId('research-charts-panel')).toBeVisible();
+  await page.screenshot({ path: path.join(OUTPUT, 'studies-mobile.png') });
+  await page.goto('http://127.0.0.1:18381/chat/research-empty-acceptance');
+  await expect(page.getByTestId('research-reply-cards')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__researchErrors)).toEqual([]);
+});

@@ -448,7 +448,7 @@ def test_unoffered_only_tool_call_retries_without_execution() -> None:
         isinstance(message, dict)
         and message.get("role") == "user"
         and "toolu_1" in str(message.get("content") or "")
-        and "permission_denied" in str(message.get("content") or "")
+        and "tool_not_found" in str(message.get("content") or "")
         for message in retry_messages
     )
 
@@ -473,7 +473,7 @@ def test_unoffered_only_tool_call_blocks_at_iteration_limit() -> None:
     assert any(
         isinstance(message, dict)
         and message.get("role") == "user"
-        and "permission_denied" in str(message.get("content") or "")
+        and "tool_not_found" in str(message.get("content") or "")
         for message in outcome.transcript
     )
 
@@ -520,7 +520,7 @@ def test_mixed_offered_and_unoffered_calls_preserve_result_pairing() -> None:
     ]
     hidden_result = result_blocks[1]
     assert hidden_result["is_error"] is True
-    assert "permission_denied" in str(hidden_result["content"])
+    assert "tool_not_found" in str(hidden_result["content"])
 
 
 @pytest.mark.parametrize("cancel_during_summary", [False, True])
@@ -885,3 +885,37 @@ def test_cancel_at_each_execution_boundary_stops_new_work(monkeypatch, phase):
     assert len(gateway.calls) == 1
     assert len(executed) == (1 if phase == "tool_result" else 0)
     assert outcome.input_tokens_total == (0 if phase == "provider_error" else 10)
+
+def test_skill_alias_does_not_restore_filtered_skill_capability():
+    executed = []
+    gateway = _Gateway(
+        _response(_tool_use('skill_load'), stop_reason='tool_use'),
+        _response({'type': 'text', 'text': 'Unavailable.'}),
+    )
+    loop = _loop(gateway, [_descriptor('Skill', lambda call: executed.append(call.name) or _json_result(call, {'ok': True}))], max_iterations=2)
+    outcome = loop.run(system='system', user_message='load skill', tool_filter=lambda d: d.name != 'Skill')
+    assert executed == []
+    assert outcome.error_count == 1
+
+
+def test_registered_but_filtered_tool_remains_permission_denied():
+    executed = []
+    gateway = _Gateway(
+        _response(_tool_use('restricted'), stop_reason='tool_use'),
+        _response({'type': 'text', 'text': 'Unavailable.'}),
+    )
+    loop = _loop(gateway, [_descriptor('restricted', lambda call: executed.append(call.name) or _json_result(call, {'ok': True}))], max_iterations=2)
+    loop.run(system='system', user_message='use tool', tool_filter=lambda d: False)
+    assert executed == []
+    assert 'permission_denied' in str(gateway.calls[-1]['messages'])
+
+def test_unlimited_loop_runs_past_old_default_and_finishes():
+    executed = []
+    responses = [_response(_tool_use('read_evidence', call_id=f'call-{i}', index=i), stop_reason='tool_use') for i in range(125)]
+    responses.append(_response({'type': 'text', 'text': 'All evidence collected.'}))
+    gateway = _Gateway(*responses)
+    loop = _loop(gateway, [_descriptor('read_evidence', lambda call: executed.append(call.id) or _json_result(call, {'index': call.arguments['index']}))], max_iterations=0, max_total_tool_calls=0)
+    outcome = loop.run(system='system', user_message='collect all evidence')
+    assert len(executed) == 125
+    assert outcome.final_text == 'All evidence collected.'
+    assert not outcome.aborted

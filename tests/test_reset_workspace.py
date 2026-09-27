@@ -51,7 +51,7 @@ def test_reset_workspace_clear_memory_preserves_vault(tmp_path: Path) -> None:
     assert json.loads(log_path.read_text(encoding="utf-8"))["clear_memory"] is True
 
 
-def test_reset_workspace_reseeds_manual_agent_strategy(tmp_path: Path) -> None:
+def test_reset_workspace_leaves_zero_strategies(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "state").mkdir(parents=True)
     (workspace / "accounts").mkdir()
@@ -77,9 +77,7 @@ def test_reset_workspace_reseeds_manual_agent_strategy(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert not (workspace / "strategies" / "stale").exists()
-    manual_root = workspace / "strategies" / "manual_agent"
-    assert (manual_root / "strategy.yml").exists()
-    assert (manual_root / "limits.yml").exists()
+    assert list((workspace / "strategies").iterdir()) == []
 
 
 def test_reset_workspace_can_sync_default_prompt_bundle_without_deleting_custom_roles(

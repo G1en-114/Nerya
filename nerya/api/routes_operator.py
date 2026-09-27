@@ -353,18 +353,10 @@ _PRIMARY_NAV: tuple[dict[str, Any], ...] = (
 _ADVANCED_NAV: tuple[dict[str, Any], ...] = (
     {
         "id": "self_evolution",
-        "label": "Self Evolution",
+        "label": "Memory & learning",
         "href": "/self-evolution",
         "icon": "evolution",
-        "tagline": "Signals, assets, proposals, validation, outcomes.",
-        "always_visible": True,
-    },
-    {
-        "id": "memory",
-        "label": "Memory",
-        "href": "/memory",
-        "icon": "memory",
-        "tagline": "Notebook entries, activity log, write rules, evidence vault, operator profile.",
+        "tagline": "Scoped memory, reflection, proposals and validation.",
         "always_visible": True,
     },
     {
@@ -687,22 +679,29 @@ def _readiness_handler(client, _query):
     blocking: list[str] = []
 
     llm = _llm_tier_summary(client)
-    llm_ready = any(t.get("ready") for t in llm["tiers"])
+    # Setup records configuration, not live service health. Never resolve
+    # secrets or probe optional capabilities here. Only the selected default
+    # model matters; a configured fallback must not mask a missing main model.
+    selected = next((row for row in llm["tiers"] if row["tier"] == llm["default"]), {})
+    llm_ready = bool(
+        selected.get("provider") and selected.get("provider") != "mock"
+        and str(selected.get("model") or "").strip()
+    )
     checks.append(
         _readiness_check(
             name="LLM provider",
             status="ok" if llm_ready else "blocked",
             summary=(
-                "At least one LLM tier is ready."
+                "Default model is configured."
                 if llm_ready
-                else "No LLM tier has both a provider and credentials."
+                else "Choose and save a default model."
             ),
             fix=None
             if llm_ready
             else action(
                 id="configure_llm",
                 label="Configure LLM",
-                href="/settings?section=integrations",
+                href="/setup?step=llm",
             ),
             sources=[source_ref("settings", "llm")],
         )
@@ -715,7 +714,7 @@ def _readiness_handler(client, _query):
     checks.append(
         _readiness_check(
             name="Trading account",
-            status="ok" if has_account else "warn",
+            status="ok" if has_account else "blocked",
             summary=(
                 f"{len(accounts)} account(s) discovered."
                 if has_account
@@ -726,7 +725,7 @@ def _readiness_handler(client, _query):
             else action(
                 id="create_account",
                 label="Create paper account",
-                href="/settings?section=integrations",
+                href="/setup?step=account",
             ),
             sources=[source_ref("settings", "accounts")],
         )
@@ -734,90 +733,36 @@ def _readiness_handler(client, _query):
     if not has_account:
         blocking.append("account")
 
-    strategies = _strategy_package_count(client) + _trading_strategy_count(client)
-    has_strategy = strategies > 0
-    checks.append(
-        _readiness_check(
-            name="Strategy",
-            status="ok" if has_strategy else "warn",
-            summary=(
-                f"{strategies} strategy(ies) available."
-                if has_strategy
-                else "No strategies yet. Create one or import a sample."
-            ),
-            fix=None
-            if has_strategy
-            else action(
-                id="create_strategy",
-                label="Create strategy",
-                href="/strategies",
-            ),
-            sources=[source_ref("nav", "strategies")],
-        )
-    )
-    if not has_strategy:
-        blocking.append("strategy")
-
-    cfg = client.config
-    risk_configured = bool(
-        cfg.get("risk.max_drawdown_usd")
-        or cfg.get("risk.max_open_positions")
-        or cfg.get("approval.policy")
+    password_configured = bool(
+        str(client.config.get("runtime.auth.admin_password_hash") or "").strip()
     )
     checks.append(
         _readiness_check(
-            name="Risk policy",
-            status="ok" if risk_configured else "warn",
-            summary=(
-                "Risk and approval policies are configured."
-                if risk_configured
-                else "Default risk/approval policy in use. Review before going live."
+            name="Admin password",
+            status="ok" if password_configured else "blocked",
+            summary=("External-access administrator password is configured."
+                     if password_configured else "Set an administrator password for external access."),
+            fix=None if password_configured else action(
+                id="configure_password", label="Set admin password", href="/setup?step=password",
             ),
-            fix=None
-            if risk_configured
-            else action(
-                id="configure_risk",
-                label="Configure risk",
-                href="/settings?section=risk",
-            ),
-            sources=[source_ref("settings", "risk")],
+            sources=[source_ref("settings", "auth")],
         )
     )
-
-    wallets = _wallet_providers(client)
-    wallet_ok = any(p.get("ready") for p in wallets)
-    checks.append(
-        _readiness_check(
-            name="Wallet / Exchange",
-            status="ok" if wallet_ok else "warn",
-            summary=(
-                "At least one wallet/exchange provider is ready."
-                if wallet_ok
-                else "No wallet or exchange provider is ready. Live trading is gated."
-            ),
-            fix=None
-            if wallet_ok
-            else action(
-                id="connect_provider",
-                label="Connect provider",
-                href="/settings?section=integrations",
-            ),
-            sources=[source_ref("settings", "integrations")],
-        )
-    )
+    if not password_configured:
+        blocking.append("password")
 
     if blocking:
         env = blocked(
             f"Blocked on: {', '.join(blocking)}",
             primary_action=action(
                 id="resolve_setup",
-                label="Resolve setup",
-                href="/settings",
+                label="Continue setup",
+                href=f"/setup?step={blocking[0]}",
             ),
         )
     else:
         env = ok(
-            "Workspace is ready.",
+            "Model, account and administrator password are configured.",
             primary_action=action(
                 id="open_workspace",
                 label="Open Agent Workspace",
@@ -828,7 +773,6 @@ def _readiness_handler(client, _query):
     merge_data(env, checks=checks, blocking=blocking)
     env["debug_refs"] = [
         debug_ref("module", "routes_operator.readiness"),
-        debug_ref("source", "capability", href="/runtime/capability_matrix"),
     ]
     return env
 

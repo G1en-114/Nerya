@@ -1,24 +1,8 @@
-"""Self-evolution native tools.
+"""Native learning tools: scoped evidence review, memory updates and proposals.
 
-compatibility: the agent can ask for a reflection cycle directly,
-without the legacy ``runtime.call("evolve", "tick", ...)`` bridge. Two
-tools are exposed:
-
-* ``evolve_reflect`` — run :func:`nerya.evolution.runner.evolve`
-  to summarise journals + risk + ranked seeds, collect structured
-  evolution signals/assets/events, and write a ``learning_update``
-  proposal under ``evolution/proposals/``.
-* ``evolve_skill_proposal`` — capture a repeatable workflow as a
-  reviewable ``skill_proposal`` with ``after/skills/<id>/SKILL.md``.
-* ``evolve_proposals`` — read-only enumeration of pending proposals
-  (id + kind + summary + path) so the model can decide whether to
-  trigger a fresh reflection or summarise an existing one.
-* ``evolve_post_apply_observation`` — append evidence-backed post-apply
-  observations for an applied proposal.
-
-Both are write-light: ``evolve_reflect`` only ever creates a
-*proposal* (never mutates live config), matching the safety contract
-in ``evolution.runner.evolve``'s docstring.
+Reflection collects evidence and can retain a justified conclusion in the
+built-in store. Code, strategy and policy changes remain separate proposals
+subject to the existing validation and approval gates.
 """
 
 from __future__ import annotations
@@ -31,7 +15,9 @@ from ...evolution import runner as evolution_runner
 from ...evolution.patch_proposal import create_proposal, list_proposals
 from ...evolution.post_apply_observation import record_post_apply_observation
 from ...evolution.self_config import propose_core_config_patch
-from ...evolution.skill_proposal import propose_skill_from_workflow
+from ...evolution.skill_proposal import _coerce_lines, _render_skill_md
+from ...skills import management as skill_management
+from ...skills.manifest import _slugify
 from ..tool_errors import schema_validation_result
 from ..types import (
     ToolCall,
@@ -43,7 +29,12 @@ from ..types import (
 
 EVOLVE_REFLECT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {},
+    "properties": {
+        "conclusion": {"type": "string", "description": "Optional evidence-backed lesson after reviewing a prior reflection packet. No code or policy is applied."},
+        "key": {"type": "string", "description": "Stable fact key; reuse it when correcting an earlier lesson."},
+        "evidence_sha256": {"type": "string", "description": "Exact digest returned by the reflection you reviewed. A changed packet requires a new review."},
+        "expected_memory_id": {"type": "string", "description": "Current memory id when correcting a recalled lesson."},
+    },
 }
 
 EVOLVE_PROPOSALS_SCHEMA: dict[str, Any] = {
@@ -65,9 +56,19 @@ EVOLVE_PROPOSALS_SCHEMA: dict[str, Any] = {
     },
 }
 
-EVOLVE_SKILL_PROPOSAL_SCHEMA: dict[str, Any] = {
+SKILL_MANAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["save", "enable", "disable", "delete"],
+            "default": "save",
+            "description": "Direct Skill mutation. save creates/updates a reusable workflow.",
+        },
+        "skill_id": {
+            "type": "string",
+            "description": "Exact Skill id for enable, disable, or delete.",
+        },
         "name": {
             "type": "string",
             "description": "Human-readable skill name. It is slugified for the target skill id.",
@@ -121,11 +122,20 @@ EVOLVE_SKILL_PROPOSAL_SCHEMA: dict[str, Any] = {
         "update_existing": {
             "type": "boolean",
             "default": False,
-            "description": "Allow the proposal to replace an existing workspace skill.",
+            "description": "Allow this direct save to replace an existing workspace skill.",
         },
     },
-    "required": ["name", "description", "workflow"],
+    "anyOf": [
+        {"required": ["name", "description", "workflow"]},
+        {
+            "required": ["action", "skill_id"],
+            "properties": {"action": {"enum": ["enable", "disable", "delete"]}},
+        },
+    ],
 }
+
+# Historical import compatibility only. The active native tool is skill_manage.
+EVOLVE_SKILL_PROPOSAL_SCHEMA = SKILL_MANAGE_SCHEMA
 
 EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -137,8 +147,8 @@ EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
                 "agents.yml, workspace.yml, news_feeds.yml, "
                 "messages/channels.yml, triggers/routes.yml, "
                 "ui/workspace.yml (or legacy workspace/ui.yml), "
-                "policies/planner.yml, policies/tier_policy.yml, or "
-                "skills/enabled.yml."
+                "policies/planner.yml, or policies/tier_policy.yml. "
+                "Skill mutations are not config proposals; use skill_manage."
             ),
         },
         "summary": {
@@ -324,11 +334,23 @@ def _provider_proposal_markdown(args: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
+def evolve_reflect_handler(call: ToolCall, *, config: Config, strategy_id: str | None = None,
+                           workflow_id: str | None = None, session_id: str | None = None,
+                           actor_id: str = "default") -> ToolResult:
     """Run a reflection tick and return the new proposal envelope."""
 
     try:
-        result = evolution_runner.evolve(config)
+        result = evolution_runner.evolve(config, strategy_id=strategy_id, isolated=True)
+        from ...memory.runtime import MemoryRuntime
+        from ...memory.learning import remember_review
+        memory = MemoryRuntime(config, actor_id=actor_id or "default", strategy_id=strategy_id or "",
+                               workflow_id=workflow_id or "", session_id=session_id or "")
+        result["memory_context"] = [
+            {"memory_id": hit.memory_id, "key": hit.stable_key, "scope": hit.scope, "content": hit.content}
+            for hit in memory.recall("", limit=8)
+        ]
+        if str((call.arguments or {}).get("conclusion") or "").strip():
+            result["learning"] = remember_review(memory, result.get("reflection") or {}, call.arguments or {})
     except Exception as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -346,6 +368,11 @@ def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
         tool_use_id=call.id,
         name=call.name,
         data={
+            "reflection": result.get("reflection"),
+            "status": result.get("status"),
+            "memory_context": result.get("memory_context", []),
+            "learning": result.get("learning"),
+            "next_action": result.get("next_action"),
             "proposal": proposal,
             "ranked_seeds": ranked[:10],
             "seed_count": len(ranked),
@@ -358,7 +385,7 @@ def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
     )
 
 
-def evolve_proposals_handler(call: ToolCall, *, config: Config) -> ToolResult:
+def evolve_proposals_handler(call: ToolCall, *, config: Config, strategy_id: str | None = None) -> ToolResult:
     """List pending proposals under ``evolution/proposals/``.
 
     Reads through :func:`nerya.evolution.patch_proposal.list_proposals`
@@ -370,6 +397,9 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config) -> ToolResult:
     limit = max(1, int(args.get("limit") or 20))
     try:
         proposals = list_proposals(config.paths)
+        if strategy_id:
+            proposals = [p for p in proposals if (p.metadata or {}).get("strategy_id") == strategy_id
+                         or str(p.target or "").startswith(f"strategies/{strategy_id}/")]
     except Exception as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -438,23 +468,125 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config) -> ToolResult:
     )
 
 
-def evolve_skill_proposal_handler(call: ToolCall, *, config: Config) -> ToolResult:
-    """Draft a workflow-to-skill proposal without mutating live skills."""
-
+def skill_manage_handler(
+    call: ToolCall,
+    *,
+    config: Config,
+    skill_index=None,
+    skill_kernel=None,
+) -> ToolResult:
+    """Create/update/enable/disable/delete Workspace Skills immediately."""
     args = call.arguments or {}
     try:
-        result = propose_skill_from_workflow(
-            config.paths,
-            name=str(args.get("name") or ""),
-            description=str(args.get("description") or ""),
-            workflow=args.get("workflow"),
-            triggers=args.get("triggers"),
-            evidence_refs=args.get("evidence_refs"),
-            gotchas=args.get("gotchas"),
-            script_notes=args.get("script_notes"),
-            reference_notes=args.get("reference_notes"),
-            update_existing=bool(args.get("update_existing") or False),
+        requested_action = str(args.get("action") or "save").strip().lower()
+        if requested_action in {"enable", "disable", "delete"}:
+            skill_id = str(args.get("skill_id") or "").strip()
+            if not skill_id:
+                raise ValueError("skill_id is required")
+            catalog = skill_management.catalog(config, scope="workspace", query=skill_id, limit=200)
+            existing = next((row for row in catalog["skills"] if row["id"] == skill_id), None)
+            if existing is None:
+                raise ValueError(f"workspace skill not found: {skill_id}")
+            if requested_action in {"enable", "disable"}:
+                result = skill_management.manage(
+                    config,
+                    requested_action,
+                    skill_id,
+                    scope="workspace",
+                    revision=catalog["enabled_revision"],
+                )
+            else:
+                if existing["enabled"]:
+                    skill_management.manage(
+                        config,
+                        "disable",
+                        skill_id,
+                        scope="workspace",
+                        revision=catalog["enabled_revision"],
+                    )
+                current = skill_management.read(config, skill_id, scope="workspace")
+                result = skill_management.manage(
+                    config,
+                    "delete",
+                    skill_id,
+                    scope="workspace",
+                    revision=current["revision"],
+                )
+            if skill_kernel is not None:
+                skill_kernel.reload()
+            if skill_index is not None:
+                skill_index.reload()
+            result.update({"tool": "skill_manage", "requested_action": requested_action})
+            return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
+
+        if requested_action != "save":
+            raise ValueError(f"unsupported skill action: {requested_action}")
+        raw_name = str(args.get("name") or "").strip()
+        description = str(args.get("description") or "").strip()
+        if not raw_name:
+            raise ValueError("name is required")
+        if len(raw_name) > 120:
+            raise ValueError("name is too long")
+        if not description:
+            raise ValueError("description is required")
+        skill_id = _slugify(raw_name)
+        if skill_id in {"installed", "pending", "rejected", "enabled", "trust"}:
+            raise ValueError(f"reserved skill id: {skill_id}")
+
+        content = _render_skill_md(
+            name=raw_name,
+            description=description,
+            workflow=_coerce_lines(args.get("workflow")),
+            triggers=_coerce_lines(args.get("triggers")),
+            gotchas=_coerce_lines(args.get("gotchas")),
+            script_notes=_coerce_lines(args.get("script_notes")),
+            reference_notes=_coerce_lines(args.get("reference_notes")),
         )
+        catalog = skill_management.catalog(config, scope="workspace", query=skill_id, limit=200)
+        existing = next((row for row in catalog["skills"] if row["id"] == skill_id), None)
+        if existing and not bool(args.get("update_existing") or False):
+            raise FileExistsError(f"workspace skill already exists: {skill_id}; set update_existing=true")
+
+        if existing:
+            current = skill_management.read(config, skill_id, scope="workspace")
+            action, revision = "update", current["revision"]
+        else:
+            action, revision = "create", "missing"
+        result = skill_management.manage(
+            config,
+            action,
+            skill_id,
+            scope="workspace",
+            revision=revision,
+            content=content,
+        )
+
+        if action == "create":
+            catalog = skill_management.catalog(config, scope="workspace", query=skill_id, limit=200)
+            created = next((row for row in catalog["skills"] if row["id"] == skill_id), None)
+            if created and not created["enabled"]:
+                skill_management.manage(
+                    config,
+                    "enable",
+                    skill_id,
+                    scope="workspace",
+                    revision=catalog["enabled_revision"],
+                )
+        if skill_kernel is not None:
+            skill_kernel.reload()
+        if skill_index is not None:
+            skill_index.reload()
+        refreshed = skill_management.read(config, skill_id, scope="workspace")
+        latest_catalog = skill_management.catalog(config, scope="workspace", query=skill_id, limit=200)
+        latest = next((row for row in latest_catalog["skills"] if row["id"] == skill_id), None)
+        result.update({
+            "tool": "skill_manage",
+            "requested_action": "save",
+            "created": action == "create",
+            "updated": action == "update",
+            "enabled": bool(latest and latest["enabled"]),
+            "revision": refreshed["revision"],
+        })
     except Exception as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -465,6 +597,11 @@ def evolve_skill_proposal_handler(call: ToolCall, *, config: Config) -> ToolResu
             ),
         )
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
+
+
+# Historical Python import compatibility. It is intentionally not registered as
+# a native tool anymore, so new Agent turns cannot create Skill proposals.
+evolve_skill_proposal_handler = skill_manage_handler
 
 
 def evolve_core_config_patch_handler(call: ToolCall, *, config: Config) -> ToolResult:
@@ -651,10 +788,12 @@ __all__ = [
     "EVOLVE_REFLECT_SCHEMA",
     "EVOLVE_CORE_CONFIG_PATCH_SCHEMA",
     "EVOLVE_SKILL_PROPOSAL_SCHEMA",
+    "SKILL_MANAGE_SCHEMA",
     "evolve_core_config_patch_handler",
     "evolve_post_apply_observation_handler",
     "evolve_provider_proposal_handler",
     "evolve_proposals_handler",
     "evolve_reflect_handler",
     "evolve_skill_proposal_handler",
+    "skill_manage_handler",
 ]

@@ -172,21 +172,17 @@ def _orders_list(client, payload):
 
 
 def _orders_cancel(client, payload):
-    from ..trading.order_tracker import OrderTracker
-
     order_id = str(payload.get("order_id") or "")
     if not order_id:
         return {"ok": False, "error": "order_id required"}
-    tracker = OrderTracker(client.config.paths)
-    tracker.request_cancel(order_id)
+    from ..trading.cancellation import cancel_tracked_order
+    result = cancel_tracked_order(client.config, order_id, auth_context=payload)
     jsonl.append(client.config.paths.journal("operator"), {
-        "kind": "order.cancel_requested",
-        "ts": now_iso(),
-        "order_id": order_id,
-        "operator": payload.get("operator"),
-        "reason": payload.get("reason") or "operator",
+        "kind": "order.cancel_requested", "ts": now_iso(), "order_id": order_id,
+        "operator": payload.get("_auth_actor_id") or payload.get("operator"),
+        "reason": payload.get("reason") or "operator", "result": result,
     })
-    return {"ok": True, "order_id": order_id, "state": "cancel_requested"}
+    return result
 
 
 def _executors_list(client, payload):
@@ -210,12 +206,22 @@ def _executors_list(client, payload):
 
 def _executors_cancel(client, payload):
     from ..trading.executors import ExecutorOrchestrator
+    from ..trading.access_control import guard_http_trade_scope
 
     executor_id = str(payload.get("executor_id") or "")
     if not executor_id:
         return {"ok": False, "error": "executor_id required"}
     orchestrator = ExecutorOrchestrator(client.config)
-    run = orchestrator.cancel(executor_id, reason=str(payload.get("reason") or "operator"))
+    existing = orchestrator.get(executor_id)
+    if existing is not None:
+        denial = guard_http_trade_scope(client.config, payload, account_id=existing.account_id, action="cancel_executor")
+        if denial is not None:
+            orchestrator.close()
+            return denial
+    try:
+        run = orchestrator.cancel(executor_id, reason=str(payload.get("reason") or "operator"))
+    finally:
+        orchestrator.close()
     jsonl.append(client.config.paths.journal("operator"), {
         "kind": "executor.cancel_requested",
         "ts": now_iso(),

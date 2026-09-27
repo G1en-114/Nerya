@@ -87,6 +87,9 @@ def _payload_number(payload: dict[str, Any], key: str, *, minimum: float, maximu
         value = float(raw)
     except Exception:
         return None
+    import math
+    if not math.isfinite(value):
+        return None
     if not (minimum <= value <= maximum):
         value = max(minimum, min(maximum, value))
     return value
@@ -104,16 +107,9 @@ def _payload_context_window(payload: dict[str, Any]) -> int | None:
         value = int(str(raw).strip().replace("_", ""))
     except Exception:
         return None
-    aliases = {
-        128000: 131072,
-        131072: 131072,
-        256000: 262144,
-        262144: 262144,
-        1000000: 1048576,
-        1048576: 1048576,
-    }
-    value = aliases.get(value, value)
-    return max(4_096, min(16_777_216, value))
+    if value <= 0:
+        return None
+    return min(16_777_216, value)
 
 
 def _with_turn_limit_overrides(config, payload: dict[str, Any]):
@@ -121,9 +117,9 @@ def _with_turn_limit_overrides(config, payload: dict[str, Any]):
 
     if not isinstance(payload, dict):
         return config
-    max_iterations = _payload_number(payload, "max_iterations", minimum=1, maximum=240)
-    max_tool_calls = _payload_number(payload, "max_total_tool_calls", minimum=1, maximum=1000)
-    max_wall_seconds = _payload_number(payload, "max_wall_seconds", minimum=10, maximum=7200)
+    max_iterations = _payload_number(payload, "max_iterations", minimum=0, maximum=float("inf"))
+    max_tool_calls = _payload_number(payload, "max_total_tool_calls", minimum=0, maximum=float("inf"))
+    max_wall_seconds = _payload_number(payload, "max_wall_seconds", minimum=0, maximum=float("inf"))
     model_context_window = _payload_context_window(payload)
     if (
         max_iterations is None
@@ -532,20 +528,9 @@ def agent_reply_text(result: AgentTurnResult) -> str:
 
 def routes():
     def _normalise_reasoning_effort(value: object) -> str | None:
-        if value is None:
-            return None
-        raw = str(value).strip().lower()
-        if raw in {"", "default", "none", "off", "disabled"}:
-            return None
-        aliases = {
-            "min": "minimal",
-            "normal": "medium",
-            "x-high": "xhigh",
-            "extra_high": "xhigh",
-            "extra-high": "xhigh",
-        }
-        raw = aliases.get(raw, raw)
-        if raw in {"minimal", "low", "medium", "high", "xhigh", "max"}:
+        from ..llm.messages import normalise_reasoning_effort
+        raw = normalise_reasoning_effort(value)
+        if raw in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
             return raw
         return None
 
@@ -627,13 +612,23 @@ def routes():
                     mode=_plan_json.loads(original[0]).get("work_mode","execute")
             finally:
                 con.close()
-        if mode not in ("execute", "plan"):
+        if mode not in ("execute", "plan", "goal"):
             return {"ok":False,"_status":400,"error":"invalid_work_mode"}
         run_config.data.setdefault("agent",{}).setdefault("native",{})["plan_only"] = mode == "plan"
         if mode == "plan" and not payload.get("resume_turn_id"):
             payload = deepcopy(payload)
             user_payload = payload.setdefault("payload",{})
             user_payload["text"] = str(user_payload.get("text") or "") + "\nWork mode: plan. Investigate with read-only tools, then use propose_plan. Do not modify external state or execute the plan."
+        elif mode == "goal" and not payload.get("resume_turn_id"):
+            payload = deepcopy(payload)
+            user_payload = payload.setdefault("payload", {})
+            user_payload["text"] = str(user_payload.get("text") or "") + (
+                "\nWork mode: goal. Define concrete acceptance criteria, carry out the task, "
+                "and verify the result with evidence. Keep iterating within this turn's limits "
+                "while useful work remains. Preserve permission, approval, and proposal rules. "
+                "If blocked, ask for the missing input. If the limits are reached or verification "
+                "is incomplete, report the remaining work without claiming completion."
+            )
 
         trigger = _inject_trusted_actor(
             normalise_trigger_payload(payload),
@@ -1212,6 +1207,16 @@ def routes():
 
             con = connect(client.config.paths.db)
             repo = AgentSessionRepository(con)
+            session_row = repo.get_session(str(sid))
+            if not full and (
+                (session_row and session_row.get("source") in {"mcp", "tunnel"})
+                or (not session_row and str(sid).startswith(("ext_mcp_", "ext_tunnel_")))
+            ):
+                from ..agent.external_history import external_transcript_page
+                try:
+                    return external_transcript_page(con, str(sid), q)
+                finally:
+                    con.close()
             canonical_history = has_message_history(con, str(sid))
             anchor=q.get("anchor_message_id")
             if anchor and not full:

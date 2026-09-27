@@ -77,7 +77,7 @@ def source_files(paths: WorkspacePaths, strategy_id: str, proposal_id: str | Non
     # A directory request shares its own snapshot; never cache across requests.
     proposal = (_proposal_index.get(proposal_id) if _proposal_index is not None
                 else next((p for p in list_proposals(paths) if p.id == proposal_id), None))
-    if proposal is None or proposal.kind not in {"strategy_package_proposal", "strategy_tuning_proposal"}:
+    if proposal is None or proposal.kind not in {"strategy_package_proposal", "strategy_tuning_proposal", "prompt_patch"}:
         raise WorkflowError("Strategy proposal not found")
     after = proposal_root / "after" / "strategies"
     if after.is_symlink() or (proposal_root / "after").is_symlink():
@@ -90,16 +90,30 @@ def source_files(paths: WorkspacePaths, strategy_id: str, proposal_id: str | Non
     return seed, {"proposal_id": proposal_id, "state": proposal.state, "omitted_files": sorted(set(omitted + skipped))}
 
 
+def _resolve_role_prompts(paths: WorkspacePaths, view: dict[str, Any]) -> None:
+    """Show inherited instructions; edits create a strategy-local prompt file."""
+    from ..subagents.registry import load_registry
+    missing = [node for node in view["strategy"]["nodes"]
+               if node["id"].startswith("agent:role/") and node.get("content") is None]
+    if not missing:
+        return
+    registry = load_registry(paths)
+    for node in missing:
+        role = registry.get(node["config"]["name"])
+        node["content"] = role.prompt if role else ""
+
+
 def view_workflow(paths: WorkspacePaths, strategy_id: str, proposal_id: str | None = None,
                   *, schedules: list[dict[str, Any]] | None = None,
                   _proposal_index: dict[str, Any] | None = None) -> dict[str, Any]:
     files, source = source_files(paths, strategy_id, proposal_id, _proposal_index=_proposal_index)
     out = build_workflows(files)
+    _resolve_role_prompts(paths, out)
     declared_id = str(out["manifest"].get("strategy_id") or out["manifest"].get("id") or strategy_id)
     if declared_id != strategy_id:
         raise WorkflowError("Manifest strategy ID does not match the requested package")
     out.update(ok=True, strategy_id=strategy_id, source=source,
-               can_edit=not bool(source["omitted_files"] or out["legacy"]),
+               can_edit=not bool(source["omitted_files"]),
                metadata=parse_metadata(files.get(WORKFLOW_FILE, "")))
     if schedules and not proposal_id:
         _attach_schedules(out, schedules, strategy_id)
@@ -144,7 +158,7 @@ def workflow_index(paths: WorkspacePaths) -> dict[str, Any]:
     proposals = list_proposals(paths)
     proposal_index = {proposal.id: proposal for proposal in proposals}
     for proposal in proposals:
-        if proposal.kind not in {"strategy_package_proposal", "strategy_tuning_proposal"} or proposal.state in {"applied", "rejected", "superseded", "rolled_back"}:
+        if proposal.kind not in {"strategy_package_proposal", "strategy_tuning_proposal", "prompt_patch"} or proposal.state in {"applied", "rejected", "superseded", "rolled_back"}:
             continue
         after = proposal.path / "after" / "strategies"
         if after.exists() and not after.is_symlink():
@@ -269,8 +283,8 @@ def propose_workflow(paths: WorkspacePaths, payload: dict[str, Any]) -> dict[str
         if payload.get("base_revision") != revision:
             raise WorkflowError("revision_conflict: package changed; reload before saving")
         view = build_workflows(files)
-        if view["legacy"]:
-            raise WorkflowError("Legacy strategy: use its existing detail editor before migrating to a runtime package")
+        _resolve_role_prompts(paths, view)
+        original_files = dict(files)
         manifest = copy.deepcopy(view["manifest"])
         canonical = {n["id"]: n for g in (view["strategy"], view["evolution"]) for n in g["nodes"]}
         changes, additions = payload.get("changes", []), payload.get("additions", [])
@@ -291,23 +305,37 @@ def propose_workflow(paths: WorkspacePaths, payload: dict[str, Any]) -> dict[str
                 raise WorkflowError("Workflow metadata must be an object")
             files[WORKFLOW_FILE] = json.dumps(metadata, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         build_workflows(files)
-        validation = validate_proposal_files(strategy_id=strategy_id, files=files)
-        if not validation.ok:
-            return {"ok": False, "error": "validation_failed", "validation": validation.asdict()}
+        if view["legacy"]:
+            # Legacy prompts/config retain their existing execution contract.
+            # Review only the edited delta through the generic patch lane.
+            import ast
+            for name, content in files.items():
+                if name.endswith(".py") and content != original_files.get(name):
+                    try:
+                        ast.parse(content, filename=name)
+                    except SyntaxError as exc:
+                        raise WorkflowError(f"{name}: {exc}") from exc
+            validation_data = {"ok": True, "blockers": [], "warnings": [], "legacy": True}
+        else:
+            # Saving operator source, including imported source, must not execute it.
+            validation = validate_proposal_files(strategy_id=strategy_id, files=files, smoke_test=False)
+            if not validation.ok:
+                return {"ok": False, "error": "validation_failed", "validation": validation.asdict()}
+            validation_data = validation.asdict()
         # Recheck after validation: tools outside this service may edit files.
         latest, _ = source_files(paths, strategy_id, proposal_id)
         if package_revision(latest) != revision:
             raise WorkflowError("revision_conflict: package changed during validation")
         proposal = create_proposal(
-            paths, kind="strategy_package_proposal", summary=f"Workflow · {manifest.get('title') or strategy_id}",
+            paths, kind="prompt_patch" if view["legacy"] else "strategy_package_proposal", summary=f"Workflow · {manifest.get('title') or strategy_id}",
             rationale="Operator-authored workflow edits. Existing executable source remains authoritative; annotations do not execute.",
-            test_plan="Static/SDK validation passed. Review the diff and run required backtests before promotion.",
+            test_plan="Legacy syntax check passed; review the patch through evolution before applying." if view["legacy"] else "Static validation passed without executing source. Review the diff and run required backtests before promotion.",
             rollback="The current strategy is unchanged until approved promotion; use version rollback after promotion.",
             target=f"strategies/{strategy_id}", initial_state="pending_review",
-            extra_files={**{f"after/strategies/{strategy_id}/{rel}": text for rel, text in files.items()},
-                         "validation_report.json": json.dumps(validation.asdict(), indent=2)},
+            extra_files={**{f"after/strategies/{strategy_id}/{rel}": text for rel, text in files.items() if not view["legacy"] or original_files.get(rel) != text},
+                         "validation_report.json": json.dumps(validation_data, indent=2)},
             metadata={"strategy_id": strategy_id, "workflow_edit": True, "source_proposal_id": proposal_id, "base_revision": revision},
         )
         return {"ok": True, "strategy_id": strategy_id, "proposal_id": proposal.id,
-                "state": proposal.state, "validation": validation.asdict(),
+                "state": proposal.state, "validation": validation_data,
                 "workflow": view_workflow(paths, strategy_id, proposal.id)}

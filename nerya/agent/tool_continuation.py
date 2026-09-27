@@ -199,7 +199,7 @@ def decide_unoffered_tool_calls(
             _tool_use_is_read_only(tool_use, registry)
             for tool_use in rejected_uses
         )
-        if iteration < max_iterations:
+        if (not max_iterations or iteration < max_iterations):
             return ToolContinuationDecision(
                 diagnostic=diagnostic,
                 retry_prompt=(
@@ -227,7 +227,7 @@ def decide_unoffered_tool_calls(
             ),
         )
 
-    if iteration < max_iterations:
+    if (not max_iterations or iteration < max_iterations):
         return ToolContinuationDecision(
             diagnostic=diagnostic,
             retry_prompt=provider_unoffered_tool_retry_prompt(

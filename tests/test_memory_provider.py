@@ -383,6 +383,7 @@ class TestBuiltinMemoryProvider:
         assert "target" in memory.input_schema.get("properties", {})
 
     def test_session_end_summary_captures(self, workspace):
+        workspace.data.setdefault("memory", {})["auto_save_enabled"] = True
         from nerya.memory.activity import MemoryActivityLog
         from nerya.memory.builtin_provider import BuiltinMemoryProvider
         prov = BuiltinMemoryProvider(workspace)
@@ -494,9 +495,8 @@ class TestAgentMemoryExternalProvider:
         client = type("C", (), {"config": workspace})()
         out = rs[("GET", "/memory/providers")](client, {})
 
-        assert out["external"]["id"] == "agentmemory"
-        assert out["external"]["initialised"] is True
-        assert out["external"]["install_command"] == "npx @agentmemory/agentmemory"
+        assert out["external"] is None
+        assert out["available_external"] == []
 
     def test_agentmemory_prefetch_parses_smart_search_rows(self, workspace, monkeypatch):
         from nerya.memory.agentmemory_provider import AgentMemoryProvider
@@ -531,4 +531,4 @@ class TestAgentMemoryExternalProvider:
         )
 
         assert out["ok"] is False
-        assert "unsupported memory provider" in out["error"]
+        assert out["error"] == "builtin_memory_only"

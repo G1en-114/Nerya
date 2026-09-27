@@ -2,7 +2,7 @@
 ---
 name: analysis
 description: "Use for local data/log/table analysis and quantitative research: profiling, charts, factors, leakage checks, signal validation and performance attribution."
-version: 0.1.0
+version: 0.2.0
 license: MIT
 author: Nerya
 ---
@@ -20,6 +20,17 @@ READ schema/head/sample before computing.
 RUN the narrowest script or shell command that proves the answer.
 SUMMARISE numbers, anomalies, and uncertainty.
 SAVE generated artifacts only when they help reproduce the result.
+
+## Interactive quantitative evidence
+
+For time-series comparisons, money flows or market studies, load
+`Skill(skill="research", file="references/visual-deliverables.md")` and execute
+its publisher with the computed data. Publish an actual interactive chart,
+not just plotting code or a Markdown table. Keep timestamps, units, source
+artifacts and calculation definitions inspectable. Register the researched
+instruments; price candles go to their right drawer, advanced studies to the
+left research workspace. Trade volume is not exchange/ETF capital flow; a
+proxy must be explicitly named and must not replace unavailable flow data.
 
 ## Scripts
 

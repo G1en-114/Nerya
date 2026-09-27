@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from nerya.integrations import managed_browser as browser
-from nerya.api import route_scopes, routes_browser_desktop, routes_browsers_session
+from nerya.api import route_scopes, routes_browser_desktop
 
 pytestmark = pytest.mark.smoke
 
@@ -85,6 +85,7 @@ def test_non_extension_directory_is_not_enumerated(tmp_path, monkeypatch):
 class FakePage:
     def __init__(self, driver, url="about:blank"):
         self.driver, self.url, self.closed = driver, url, False
+        self.viewport_size = {'width': 1280, 'height': 800}
         self.mouse = SimpleNamespace(click=self.click, wheel=lambda *args: driver.check())
         self.keyboard = SimpleNamespace(insert_text=lambda *args: driver.check(), press=lambda *args: driver.check())
 
@@ -112,6 +113,10 @@ class FakePage:
     def wait_for_timeout(self, value):
         self.driver.check()
         time.sleep(0.001)
+
+    def set_viewport_size(self, size):
+        self.driver.check()
+        self.viewport_size = dict(size)
 
     def bring_to_front(self):
         self.driver.check()
@@ -148,7 +153,7 @@ class FakeDriver:
 
     def launch(self, directory, **kwargs):
         self.check()
-        assert kwargs["headless"] is False
+        assert kwargs["headless"] is True
         assert kwargs["ignore_https_errors"] is False
         assert kwargs["chromium_sandbox"] is True
         assert not any("remote-debugging-port" in a for a in kwargs["args"])
@@ -275,12 +280,3 @@ def test_operator_scope_and_error_redaction(tmp_path, monkeypatch):
     result = handler(client, {"operation": "open"})
     assert not result["ok"]
     assert "DO_NOT_LEAK" not in json.dumps(result)
-
-
-@pytest.mark.parametrize("endpoint", ["cdp_action", "cdp_screenshot"])
-def test_legacy_shared_flag_cannot_bypass_worker(endpoint, monkeypatch):
-    worker = SimpleNamespace(is_owner_thread=lambda: False, call=lambda fn, **kw: {"ok": True, "dispatched": True})
-    monkeypatch.setitem(routes_browsers_session._RUNTIME, "test-thread", {
-        "kind": "cloakbrowser_worker", "worker": worker, "_inside_worker": True,
-    })
-    assert not any(path.endswith('/' + endpoint) for _, path, _ in routes_browsers_session.routes())

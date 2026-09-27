@@ -13,7 +13,7 @@
 
 import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
-import { useTranslations } from "next-intl";
+import { useTranslations,useLocale } from "next-intl";
 import {
   createContext,
   useCallback,
@@ -26,7 +26,8 @@ import {
   type ComponentType,
 } from "react";
 import type { SVGProps } from "react";
-import { clientApi } from "../../lib/clientApi";
+import { taskEntryTitle } from "../../lib/workbench";
+import { clientApi, callApi } from "../../lib/clientApi";
 import type { StrategyCard } from "../../lib/api";
 import { loadThreads, type ChatThread } from "../../lib/chat";
 import { setComposeDraft } from "../../lib/composeDraft";
@@ -107,6 +108,7 @@ type PaletteItem = {
 
 function CommandPalette() {
   const { open, setOpen } = useCommandPalette();
+  const zh=useLocale().startsWith("zh");
   const router = useRouter();
   const t = useTranslations("commandPalette");
   const tUi = useTranslations("ui");
@@ -114,6 +116,8 @@ function CommandPalette() {
   const [query, setQuery] = useState("");
   const [strategies, setStrategies] = useState<StrategyCard[]>([]);
   const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [serverTasks,setServerTasks]=useState<Array<{session_id:string;title:string;match?:{message_id:string;snippet:string}}>>([]);
+  const [searching,setSearching]=useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -140,6 +144,19 @@ function CommandPalette() {
     };
   }, [open]);
 
+  useEffect(()=>{
+    if(!open)return;
+    let cancelled=false;const controller=new AbortController();
+    setSearching(true);setServerTasks([]);
+    const timer=setTimeout(()=>{
+      const params=new URLSearchParams({view:"workbench",q:query.trim(),limit:"12"});
+      void callApi<{sessions:Array<{session_id:string;title:string;meta?:unknown;match?:{message_id:string;snippet:string}}> }>("/agent/sessions?"+params,{signal:controller.signal}).then(result=>{
+        if(!cancelled)setServerTasks((result.sessions||[]).map(row=>({...row,title:taskEntryTitle(row)})));
+      }).catch(()=>{if(!cancelled)setServerTasks([]);}).finally(()=>{if(!cancelled)setSearching(false);});
+    },query.trim()?180:0);
+    return()=>{cancelled=true;controller.abort();clearTimeout(timer);};
+  },[open,query]);
+
   const go = useCallback(
     (href: string) => {
       setOpen(false);
@@ -159,7 +176,7 @@ function CommandPalette() {
       { href: "/workflows", label: tNav("automation"), icon: TriggersIcon, keywords: "automation workflow trigger schedule" },
       { href: "/inbox", label: tNav("inbox"), icon: BellIcon, keywords: "inbox approvals notifications" },
       { href: "/agents", label: tNav("agents"), icon: AgentsIcon, keywords: "agents subagents runtime" },
-      { href: "/memory", label: tNav("memory"), icon: MemoryIcon, keywords: "memory profile facts" },
+      { href: "/self-evolution?tab=memory", label: tNav("memory"), icon: MemoryIcon, keywords: "memory profile facts" },
       { href: "/web-search", label: tNav("webSearch"), icon: GlobeIcon, keywords: "web search browse" },
       { href: "/settings", label: tNav("settings"), icon: SettingsIcon, keywords: "settings preferences" },
     ];
@@ -187,17 +204,11 @@ function CommandPalette() {
     [strategies, go, t],
   );
 
-  const recentItems = useMemo<PaletteItem[]>(
-    () =>
-      threads.slice(0, 8).map((th) => ({
-        id: `thread:${th.id}`,
-        label: th.title || t("untitledChat"),
-        group: t("recent"),
-        icon: ChatIcon,
-        onSelect: () => go(`/chat/${encodeURIComponent(th.id)}`),
-      })),
-    [threads, go, t],
-  );
+  const recentItems = useMemo<PaletteItem[]>(()=>{
+    if(serverTasks.length)return serverTasks.map(task=>({id:"thread:"+task.session_id,label:task.title||t("untitledChat"),sub:task.match?.snippet,group:t("recent"),icon:ChatIcon,
+      onSelect:()=>go("/chat/"+encodeURIComponent(task.session_id)+(task.match?"?message="+encodeURIComponent(task.match.message_id):""))}));
+    return threads.slice(0,8).map(th=>({id:"thread:"+th.id,label:th.title||t("untitledChat"),group:t("recent"),icon:ChatIcon,onSelect:()=>go("/chat/"+encodeURIComponent(th.id))}));
+  },[serverTasks,threads,t,go]);
 
   const actionItems = useMemo<PaletteItem[]>(() => {
     const trimmed = query.trim();
@@ -228,13 +239,13 @@ function CommandPalette() {
     const pool = [...destinations, ...strategyItems, ...recentItems];
     const matched = q
       ? pool.filter((item) =>
-          `${item.label} ${item.sub ?? ""} ${item.keywords ?? ""}`
+          (item.id.startsWith("thread:") && serverTasks.some(task=>"thread:"+task.session_id===item.id)) || `${item.label} ${item.sub ?? ""} ${item.keywords ?? ""}`
             .toLowerCase()
             .includes(q),
         )
       : [...recentItems, ...destinations, ...strategyItems];
-    return [...actionItems, ...matched];
-  }, [query, destinations, strategyItems, recentItems, actionItems]);
+    return [...matched, ...actionItems];
+  }, [query, destinations, strategyItems, recentItems, actionItems,serverTasks]);
 
   useEffect(() => {
     setActiveIdx(0);
@@ -282,7 +293,7 @@ function CommandPalette() {
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      filtered[activeIdx]?.onSelect();
+      grouped.flatMap(group=>group.items)[activeIdx]?.onSelect();
     }
   }
 
@@ -323,6 +334,7 @@ function CommandPalette() {
           <Dialog.Close className="ui-icon-button text-xs" aria-label={tUi("close")}>ESC</Dialog.Close>
         </div>
 
+        {searching&&query&&<div className="px-4 pt-2 text-xs text-[color:var(--text-muted)]" role="status">{zh?"搜索中…":"Searching…"}</div>}
         <div ref={listRef} id={listId} role="listbox" aria-label={t("jumpTo")} className="embedded-scroll max-h-[60dvh] py-2">
           {filtered.length === 0 ? (
             <div className="px-4 py-10 text-center text-[13px] text-[color:var(--text-muted)]">
@@ -359,7 +371,7 @@ function CommandPalette() {
                       <Icon size={16} className="shrink-0 opacity-80" />
                       <span className="flex-1 truncate">{item.label}</span>
                       {item.sub ? (
-                        <span className="shrink-0 text-[11px] text-[color:var(--text-muted)]">
+                        <span className="max-w-[40%] truncate text-[11px] text-[color:var(--text-muted)]">
                           {item.sub}
                         </span>
                       ) : null}

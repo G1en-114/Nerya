@@ -19,6 +19,7 @@ import csv
 import json
 from pathlib import Path
 from typing import Any
+from .chart_artifacts import market_panels, market_indicator_panels, trade_id, VISUALIZATION_REVISION
 
 # ``nerya.charting`` is imported lazily inside ``render_chart`` — eager
 # imports would form a cycle (this module is reachable from
@@ -32,36 +33,17 @@ def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
     metrics = json.loads((root / "metrics.json").read_text(encoding="utf-8"))
     rows = _read_csv(root / "ohlcv_indicators_portfolio.csv")
     trades = _read_csv(root / "trades.csv")
-    price_series = [
-        {
-            "time": int(float(r["ts"])),
-            "open": float(r["open"]),
-            "high": float(r["high"]),
-            "low": float(r["low"]),
-            "close": float(r["close"]),
-        }
-        for r in rows if r.get("ts") and r.get("open")
-    ]
+    signals = _read_csv(root / "signals.csv")
+    instrument_panels = market_panels(rows, trades, metrics, signals)
+    equity_rows = _read_csv(root / "equity.csv") if (root / "equity.csv").exists() else rows
+    benchmark_rows = _read_csv(root / "benchmark.csv") if (root / "benchmark.csv").exists() else []
+    decisions = _read_csv(root / "decisions.csv") if (root / "decisions.csv").exists() else []
     equity = [
         {"time": int(float(r["ts"])), "value": float(r.get("equity") or 0.0)}
-        for r in rows if r.get("ts") and r.get("equity") not in (None, "")
+        for r in equity_rows if r.get("ts") and r.get("equity") not in (None, "")
     ]
+    benchmark = [{"time": int(float(r["ts"])), "value": float(r["equity"])} for r in benchmark_rows if r.get("ts") and r.get("equity")]
     drawdown = _drawdown_points(equity)
-    rsi_key = next((k for k in rows[0].keys() if k.startswith("rsi_")), None) if rows else None
-    rsi = [
-        {"time": int(float(r["ts"])), "value": float(r[rsi_key])}
-        for r in rows if rsi_key and r.get(rsi_key) not in (None, "")
-    ]
-    markers = [
-        {
-            "time": int(float(t.get("ts") or 0)),
-            "position": "belowBar" if t.get("side") == "buy" else "aboveBar",
-            "color": "#22c55e" if t.get("side") == "buy" else "#ef4444",
-            "shape": "arrowUp" if t.get("side") == "buy" else "arrowDown",
-            "text": str(t.get("reason") or t.get("side") or ""),
-        }
-        for t in trades if t.get("ts")
-    ]
     chart = {
         "schema_version": "1.0",
         "meta": {
@@ -72,19 +54,43 @@ def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
             "start": metrics.get("start_utc"),
             "end": metrics.get("end_utc"),
             "initial_capital_usd": metrics.get("initial_capital_usd"),
+            "evaluation_mode": metrics.get("evaluation_mode", "trading"),
+            "execution_mode": metrics.get("execution_mode", "script"),
+            "performance_evidence": metrics.get("performance_evidence", True),
+            "replay": metrics.get("replay", {}),
+            "provenance": metrics.get("provenance", {}),
+            "coverage_message": metrics.get("coverage_message"),
+            "requested_window_days": metrics.get("requested_window_days"),
+            "requested_window_complete": metrics.get("requested_window_complete"),
+            "data_manifest": metrics.get("data_manifest"),
+            "verdict": metrics.get("verdict"),
+            "flags": metrics.get("flags", []),
+            "engine_version": metrics.get("engine_version"),
+            "execution_limits": metrics.get("execution_limits", {}),
+            "visualization_revision": VISUALIZATION_REVISION,
+            "market_details_source": "recorded_csv",
+            "signals_recorded": (root / "signals.csv").exists(),
+            "trade_count": len(trades),
+            "trades_displayed": len(trades),
         },
         "panels": [
-            {"id": "price", "type": "candlestick", "title": "Price", "series": [{"kind": "candles", "data": price_series}, {"kind": "markers", "data": markers}]},
-            {"id": "equity", "type": "line", "title": "Equity vs B&H", "series": [{"kind": "line", "name": "equity", "data": equity}]},
+            *instrument_panels,
+            {"id": "equity", "type": "line", "title": "Equity vs B&H", "series": [{"kind": "line", "name": "equity", "data": equity}, *([{"kind": "line", "name": "benchmark", "data": benchmark}] if benchmark else [])]},
             {"id": "drawdown", "type": "area", "title": "Drawdown %", "series": [{"kind": "area", "name": "drawdown", "data": drawdown}], "annotations": metrics.get("drawdown_episodes", [])},
-            {"id": "rsi", "type": "line", "title": "RSI(14)", "series": [{"kind": "line", "name": "rsi", "data": rsi}], "guides": [{"value": 30}, {"value": 70}]},
+            *market_indicator_panels(rows, instrument_panels),
             {"id": "missed", "type": "overlay_spans", "title": "Missed profit", "series": [], "annotations": metrics.get("missed_profit_episodes", [])},
         ],
         "summary_cards": _summary_cards(metrics),
         "tables": [
             _table("drawdown_episodes", metrics.get("drawdown_episodes", [])[:10]),
             _table("missed_profit_episodes", metrics.get("missed_profit_episodes", [])[:10]),
-            _table("trades", trades[:500]),
+            # 明细在前端分页，不能先截取最早 500 笔，否则长回测后半段
+            # 的成交明细消失，且和图上的完整成交标记不一致。
+            _table("trades", [{**trade, "trade_id": trade_id(trade, index)} for index, trade in enumerate(trades)]),
+            _table("signals", signals[:500]),
+            _table("decisions", decisions[:500]),
+            _table("order_events", _read_csv(root / "order_events.csv")[:500]),
+            _table("rejected_signals", _read_csv(root / "rejected_signals.csv")[:500]),
         ],
     }
     (root / "chart.json").write_text(json.dumps(chart, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -132,20 +138,30 @@ def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
             f"sharpe: {metrics.get('sharpe_ratio', '?')}",
         ],
     )
-    if equity_block is not None:
+    if equity_block is not None and metrics.get("performance_evidence", True):
         blocks.append(equity_block)
 
-    if price_series:
+    for instrument_panel in instrument_panels:
+        price_series = instrument_panel["series"][0]["data"]
+        if not price_series:
+            continue
         candle_block = candle_chart_from_rows(
             price_series,
-            title=f"{strategy_id} · Price + trades · {backtest_ts}",
+            title=f"{strategy_id} · {instrument_panel['title']} · {backtest_ts}",
             skill="backtest",
             action="render_chart",
             path=chart_path,
             ctx=ctx,
-            insights=[f"trades: {len(markers)}"],
+            overlays=[{"type": "marker", "time": marker["time"],
+                "position": "below" if marker["position"] == "belowBar" else "inBar" if marker["position"] == "inBar" else "above",
+                "shape": {"arrowUp": "arrow_up", "arrowDown": "arrow_down", "circle": "circle"}[marker["shape"]],
+                "color": marker["color"], "text": marker["text"], "tooltip": marker["reason"]}
+                for marker in instrument_panel["series"][1]["data"]],
+            insights=[f"recorded markers: {len(instrument_panel['series'][1]['data'])}"],
         )
         if candle_block is not None:
+            candle_block["market"] = instrument_panel["market"]
+            candle_block["interval"] = str(metrics.get("tf") or "")
             blocks.append(candle_block)
 
     if blocks:
@@ -164,9 +180,13 @@ def _workspace_root_from_backtest_dir(backtest_dir: Path) -> Path | None:
     """
 
     cur = backtest_dir.resolve()
-    for parent in [cur, *cur.parents]:
+    parents = [cur, *cur.parents]
+    # 候选目录也包含 strategies；必须先找真实 workspace，不能在 after
+    # 就停止，否则 bulk 图表写进服务不会读取的伪 artifacts 目录。
+    for parent in parents:
         if (parent / "nerya.yml").exists():
             return parent
+    for parent in parents:
         if parent.name == "strategies" and parent.parent:
             return parent.parent
     return None

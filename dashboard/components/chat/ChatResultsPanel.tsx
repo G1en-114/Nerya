@@ -24,6 +24,7 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
 }) {
   const zh = useLocale().startsWith("zh");
   const prefix = useId().replace(/:/g, "");
+  const exportDescriptionId = prefix + "-export-description";
   const [chosen, setChosen] = useState("");
   const [view, setView] = useState("preview");
   const [exportError, setExportError] = useState("");
@@ -96,15 +97,16 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
           </Popover.Content></Popover.Portal>
         </Popover.Root>
         <CopyButton text={result.text} />
-        <button type="button" onClick={download} aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.019")} title={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.020")}><SaveIcon size={14} /></button>
+        <button type="button" onClick={download} aria-label={zh ? "下载 Markdown 正文" : "Download Markdown body"} title={zh ? "仅下载正文，不含证据、文件或验证记录" : "Body only; excludes evidence, files and validation records"} aria-describedby={exportDescriptionId}><SaveIcon size={14} /></button>
         {onReveal ? <button type="button" onClick={() => onReveal(result.id)} aria-label={revealLabel} title={revealLabel}><MessagesIcon size={14} /></button> : null}
       </div>
     </div>
+    <p id={exportDescriptionId} className="px-4 py-2 text-xs text-[color:var(--text-muted)]">{zh ? "Markdown 下载仅包含正文，不是证据包；文件、验证失败和未验证事项请查看下方交付与验证。" : "Markdown download contains the body only, not an evidence bundle. Files, failed checks and unverified work are listed in Delivery and verification."}</p>
     {exportError ? <p role="alert" className="px-4 py-2 text-xs text-danger">{exportError}</p> : null}
     <div ref={scrollRef} hidden={view !== "preview"} role="region" aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.021")} className={view === "preview" ? styles.body : "hidden"}>
       <article className={styles.article} data-result-id={result.id}>
         {!hasHeading ? <h2 className={styles.title}>{result.title}</h2> : null}
-        <DeliveryEvidence result={result} onOpenFile={onOpenFile} onReveal={()=>onReveal?.(result.id)} />
+        <DeliveryEvidence result={result} onOpenFile={onOpenFile} onReveal={onReveal?()=>onReveal(result.id):undefined} />
         <div ref={bodyRef} data-testid="canvas-result-body"><Markdown>{result.text}</Markdown></div>
         <footer className={styles.provenance}>{result.agentId ? (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.022", { value0: result.attempt })) : (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.023"))}</footer>
       </article>

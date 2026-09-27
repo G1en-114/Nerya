@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../lib/i18n";
 
 /**
  * Memory > Profile subtab panel.
@@ -33,9 +34,7 @@ export function MemoryProfilePanel() {
   const t = useTranslations("memoryProfile");
   const tCommon = useTranslations("common");
   const zh = useLocale().startsWith("zh");
-  const facetNames: Record<string, string> = zh
-    ? { style: "表达风格", tooling: "工具偏好", universe: "关注市场", risk_preference: "风险偏好", veto: "避免事项", channel: "通知渠道" }
-    : { style: "Style", tooling: "Tools", universe: "Markets", risk_preference: "Risk preferences", veto: "Things to avoid", channel: "Notifications" };
+  const facetNames: Record<string, string> = Object.fromEntries(FACET_OPTIONS.map((facet) => [facet, i18nCopy(zh, `copy.memoryProfile.facets.${facet}`)]));
 
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [stats, setStats] = useState<Record<string, unknown>>({});
@@ -191,7 +190,7 @@ export function MemoryProfilePanel() {
         </div>
       </Card>
 
-      <SearchField value={query} onChange={setQuery} label={zh ? "搜索偏好记录" : "Search preferences"} />
+      <SearchField value={query} onChange={setQuery} label={i18nCopy(zh, "copy.components_MemoryProfilePanel.001")} />
       <Card
         title={t("factsTitle")}
         description={t("factsDescription", { total: Number(stats.total ?? 0) })}
@@ -210,9 +209,9 @@ export function MemoryProfilePanel() {
         {loading && !facts.length ? (
           <LoadingState label={tCommon("loading")} />
         ) : error && !facts.length ? null : filtered.length === 0 ? (
-          <Empty label={query ? (zh ? "没有匹配的偏好" : "No matching preferences") : t("empty")}
-            subtitle={query ? (zh ? "更换关键词，或清除搜索查看全部记录。" : "Try another term or clear the search.") : (zh ? "在上方添加一条偏好，让 Agent 更了解你的工作方式。" : "Add a preference above to guide how your agent works.")}
-            action={query ? <button type="button" className="btn btn-ghost" onClick={() => setQuery("")}>{zh ? "清除搜索" : "Clear search"}</button> : undefined} />
+          <Empty label={query ? (i18nCopy(zh, "copy.components_MemoryProfilePanel.002")) : t("empty")}
+            subtitle={query ? (i18nCopy(zh, "copy.components_MemoryProfilePanel.003")) : (i18nCopy(zh, "copy.components_MemoryProfilePanel.004"))}
+            action={query ? <button type="button" className="btn btn-ghost" onClick={() => setQuery("")}>{i18nCopy(zh, "copy.components_MemoryProfilePanel.005")}</button> : undefined} />
         ) : (
           <><ul>
             {paging.rows.map((f) => (

@@ -191,7 +191,7 @@ class StrategyAgentTaskExecutor:
             )
 
         session_key = self._resolve_session_key(package, event, task, task_id)
-        policy = package.manifest.agent_session.policy or "per_strategy_market_timeframe"
+        policy = package.manifest.agent_session.policy or "per_strategy"
         session_profile = self._session_profile_module()
         session_id = session_profile.strategy_agent_session_id(
             strategy_id=package.strategy_id,
@@ -314,11 +314,16 @@ class StrategyAgentTaskExecutor:
         row["final_text"] = getattr(turn_result, "final_text", "")
         row["iterations"] = getattr(turn_result, "iterations", None)
         row["budget"] = dict(getattr(turn_result, "budget", {}) or {})
+        from ..strategies.agent_execution import task_output_error
+        output_error = task_output_error(row["final_text"])
+        if output_error:
+            row.update(status="failed", output_error=output_error, error={"code":output_error,
+                "message":"The model returned tool-call markup as ordinary text. No operation in that markup was executed. Check the model tool protocol or provide a supported plain-text output contract."})
         # Executed means the kernel returned, not a successful business outcome.
         # Consumers must retain stopped_reason and the actual final response.
         self._record_task(package.strategy_id, session_id, row)
         jsonl.append(self.config.paths.journal("triggers"), {
-            "kind": "trigger.agent_task_executed",
+            "kind": "trigger.agent_task_failed" if output_error else "trigger.agent_task_executed",
             "ts": now_iso(),
             "event_id": event.event_id,
             "target": target,
@@ -331,13 +336,14 @@ class StrategyAgentTaskExecutor:
         return StrategyAgentTaskExecutionResult(
             event_id=event.event_id,
             target=target,
-            status="executed",
+            status="failed" if output_error else "executed",
             strategy_id=package.strategy_id,
             task_id=task_id,
             session_id=session_id,
             turn_id=turn_id,
             route_id=route_result.route_id,
             result=row,
+            error=row.get("error"),
         )
 
     def _assert_mode_allowed(self, package: StrategyPackage) -> None:
@@ -362,29 +368,17 @@ class StrategyAgentTaskExecutor:
             connector_registry=self.connector_registry,
             trigger_event=event,
         )
-        module = self._load_strategy_module(package)
-        fn = getattr(module, "build_agent_task", None)
-        if callable(fn):
-            raw = self._call_task_builder(package, fn, ctx)
-            return StrategyAgentTask.from_value(raw)
-        fn = getattr(module, package.manifest.entrypoint_func, None)
-        if not callable(fn):
-            raise AttributeError(
-                f"strategy {package.strategy_id!r}: missing build_agent_task(ctx)"
-            )
+        from ..strategies.runner import StrategyRunner
+        fn = StrategyRunner._load_entrypoint(package, prefer_agent_builder=True)
         raw = self._call_task_builder(package, fn, ctx)
         return StrategyAgentTask.from_value(raw)
 
     def _call_task_builder(self, package: StrategyPackage, fn: Any, ctx: Any) -> Any:
         def _call() -> Any:
-            from ..strategies.input_context import collect_task_context
-            task = StrategyAgentTask.from_value(fn(ctx))
-            if task.status == "dispatch" and task.roles is not None:
-                if any(role not in package.manifest.subagents for role in task.roles):
-                    raise ValueError("Task roles must refer to declared strategy subagents")
-                task.metadata["selected_roles"] = list(task.roles)
-            collect_task_context(task, ctx, package.manifest.extras.get("agent_context", {}))
-            return task
+            from ..strategies.agent_task import prepare_agent_task
+            return prepare_agent_task(fn(ctx), ctx,
+                context_config=package.manifest.extras.get("agent_context", {}),
+                roles=package.manifest.subagents)
 
         return _run_with_timeout(
             _call,
@@ -473,7 +467,8 @@ class StrategyAgentTaskExecutor:
                 "session_id": session_id,
                 "trigger_event_id": event.event_id,
                 "required_by": "strategy.agent_team",
-                "turn_deadline_epoch": time.time() + float(effective.get("agent.native.max_wall_seconds", 1800)),
+                **({"turn_deadline_epoch": time.time() + float(effective.get("agent.native.max_wall_seconds"))}
+                   if float(effective.get("agent.native.max_wall_seconds", 0) or 0) > 0 else {}),
                 "wall_time_final_synthesis_seconds": float(effective.get("agent.native.wall_time_final_synthesis_seconds", 30)),
                 "task_id": task_id,
             },
@@ -756,7 +751,7 @@ class StrategyAgentTaskExecutor:
         task: StrategyAgentTask,
         task_id: str,
     ) -> dict[str, Any]:
-        policy = package.manifest.agent_session.policy or "per_strategy_market_timeframe"
+        policy = package.manifest.agent_session.policy or "per_strategy"
         meta = dict(task.metadata or {})
         payload = dict(event.payload or {})
         market = (

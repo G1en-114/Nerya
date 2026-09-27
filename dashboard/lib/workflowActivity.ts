@@ -22,12 +22,12 @@ export function activities(runs: unknown, tasks: unknown): Activity[] {
   return [...result.values()].sort((a, b) => (Date.parse(b.ts) || 0) - (Date.parse(a.ts) || 0));
 }
 export function activityState(item: Activity, t: WorkflowText) {
-  if (["failed", "error"].includes(item.status) || item.row.error) return { label: t("运行失败", "Failed"), tone: "error" };
-  if (["running", "queued"].includes(item.status)) return { label: t("等待执行结束", "Awaiting completion"), tone: "running" };
-  if (["skipped", "skip"].includes(item.status)) return { label: item.kind === "agent" ? t("已跳过 · 未调用 Agent", "Skipped · Agent not invoked") : t("脚本已跳过", "Script skipped"), tone: "muted" };
+  if (["failed", "error"].includes(item.status) || item.row.error) return { label: t("copy.lib_workflowActivity.001"), tone: "error" };
+  if (["running", "queued"].includes(item.status)) return { label: t("copy.lib_workflowActivity.002"), tone: "running" };
+  if (["skipped", "skip"].includes(item.status)) return { label: item.kind === "agent" ? t("copy.lib_workflowActivity.003") : t("copy.lib_workflowActivity.004"), tone: "muted" };
   const stop = text(item.row.stopped_reason);
-  if (stop && !["end_turn", "stop", "completed"].includes(stop)) return { label: t("已结束 · 需检查", "Ended · review needed"), tone: "warning" };
-  return { label: ({ hold: t("未采取行动", "No action"), ok: t("脚本已完成", "Script completed"), submitted: t("已提交请求", "Request submitted"), executed: t("Agent 已结束", "Agent ended") } as Record<string, string>)[item.status] || item.status || t("状态未记录", "Status unrecorded"), tone: "neutral" };
+  if (stop && !["end_turn", "stop", "completed"].includes(stop)) return { label: t("copy.lib_workflowActivity.005"), tone: "warning" };
+  return { label: ({ hold: t("copy.lib_workflowActivity.006"), ok: t("copy.lib_workflowActivity.007"), submitted: t("copy.lib_workflowActivity.008"), executed: t("copy.lib_workflowActivity.009") } as Record<string, string>)[item.status] || item.status || t("copy.lib_workflowActivity.010"), tone: "neutral" };
 }
 export function runtimeTools(item: Activity, events: Facts[]): RuntimeTool[] {
   const tools = new Map<string, RuntimeTool>();
@@ -89,6 +89,6 @@ export function parallelMembers(item: Activity, events: Facts[], snapshot?: unkn
   return [...members.values()];
 }
 export function durationText(value: unknown, t: WorkflowText): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return t("未记录", "Not recorded");
+  if (typeof value !== "number" || !Number.isFinite(value)) return t("copy.lib_workflowActivity.011");
   return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`;
 }

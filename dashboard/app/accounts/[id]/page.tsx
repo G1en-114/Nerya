@@ -1,4 +1,5 @@
 "use client";
+import { Icon as NeryaGlyph } from "../../../components/icons";
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -216,7 +217,7 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
             aria-expanded={expanded}
           >
             <span className="font-mono text-[10px]">
-              {expanded ? "▾" : "▸"}
+              <NeryaGlyph name={expanded ? 'chevronDown' : 'chevronRight'} size={14} />
             </span>
           </button>
         ) : (

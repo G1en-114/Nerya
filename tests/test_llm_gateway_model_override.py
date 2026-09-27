@@ -742,7 +742,7 @@ def test_context_full_logging_records_provider_wire_messages_payload(
     monkeypatch,
     tmp_path,
 ) -> None:
-    provider_key = "sk-wire-secret-12345678901234567890"
+    provider_key = "sk-test0000000000000000000000000000"
     monkeypatch.setenv("MINIMAX_CN_API_KEY", provider_key)
     transport = _CapturingTransport({
         "choices": [
@@ -841,7 +841,7 @@ def test_context_full_logging_records_provider_wire_prompt_payload(
     monkeypatch,
     tmp_path,
 ) -> None:
-    provider_key = "sk-wire-prompt-secret-12345678901234567890"
+    provider_key = "sk-test00000000000000000000000000000000000"
     monkeypatch.setenv("OPENAI_API_KEY", provider_key)
     transport = _CapturingTransport({
         "choices": [
@@ -1314,6 +1314,63 @@ def test_model_router_retries_across_configured_provider_routes(
         ("provider-a", "primary-model", "bad-key", "https://primary.example/v1"),
         ("provider-b", "backup-model", "good-key", "https://backup.example/v1"),
     ]
+
+
+def test_model_router_uses_reasoning_effort_from_selected_route(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("PRIMARY_ROUTE_KEY", "bad-key")
+    monkeypatch.setenv("BACKUP_ROUTE_KEY", "good-key")
+    calls: list[tuple[str, str]] = []
+
+    def adapter(**kwargs):  # noqa: ANN001
+        provider = str(kwargs["provider_name"])
+        effort = str(kwargs.get("reasoning_effort") or "")
+        calls.append((provider, effort))
+        if provider == "provider-b":
+            return ProviderResult(
+                text="ok",
+                prompt_tokens=2,
+                completion_tokens=3,
+                total_tokens=5,
+                provider=provider,
+                model=str(kwargs["model"]),
+            )
+        raise LLMError("primary route failed")
+
+    router = ModelRouter(
+        tiers={
+            "medium": {
+                "reasoning_effort": "minimal",
+                "routes": [
+                    {
+                        "provider": "provider-a",
+                        "model": "primary-model",
+                        "provider_key_env": "PRIMARY_ROUTE_KEY",
+                        "base_url": "https://primary.example/v1",
+                        "reasoning_effort": "low",
+                    },
+                    {
+                        "provider": "provider-b",
+                        "model": "backup-model",
+                        "provider_key_env": "BACKUP_ROUTE_KEY",
+                        "base_url": "https://backup.example/v1",
+                        "reasoning_effort": "high",
+                    },
+                ],
+            },
+        },
+        workspace=tmp_path,
+        providers={"compat": adapter},
+        allow_mock=False,
+    )
+
+    result = router.dispatch(tier="medium", task="subagent_analysis", prompt="hello")
+
+    assert result.text == "ok"
+    assert result.reasoning_effort == "high"
+    assert calls == [("provider-a", "low"), ("provider-b", "high")]
 
 
 def test_tier_can_disable_provider_profile_native_web_search(tmp_path):

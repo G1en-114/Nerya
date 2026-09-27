@@ -235,7 +235,7 @@ def test_live_swap_without_any_ref_refused(tmp_path) -> None:
 # live BSC swap signing with the seed-derived key
 
 
-def _bsc_script() -> dict[str, Any]:
+def _bsc_script(receiver=ADDR_0) -> dict[str, Any]:
     def eth_call(body: dict) -> str:
         to = body["params"][0]["to"].lower()
         data = body["params"][0]["data"]
@@ -255,7 +255,10 @@ def _bsc_script() -> dict[str, Any]:
         "eth_getTransactionReceipt": {"status": "0x1",
                                       "blockHash": "0x" + "c" * 64,
                                       "blockNumber": hex(100),
-                                      "gasUsed": hex(150000)},
+                                      "gasUsed": hex(150000), "logs":[{
+                                          "address":"0x55d398326f99059fF775485246999027B3197955",
+                                          "topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                                          "0x"+"0"*64,"0x"+receiver.lower().removeprefix("0x").rjust(64,"0")],"data":hex(4_000_000)}]},
     }
 
 
@@ -290,7 +293,7 @@ def test_bsc_swap_with_private_key_ref(tmp_path) -> None:
          "rpc_urls": {"bsc": _BSC_RPC}},
         workspace=tmp_path, vault_passphrase="test-pp",
     )
-    p.transport = FakeRpcTransport(_bsc_script())
+    p.transport = FakeRpcTransport(_bsc_script(Account.from_key(key).address))
     result = p.swap(chain="bsc", token_in="BNB", token_out="USDT",
                     amount_in=1.0, slippage_bps=50, live=True)
     assert result.ok is True

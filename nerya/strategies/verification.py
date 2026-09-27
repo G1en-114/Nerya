@@ -17,6 +17,7 @@ from ..core.redaction import redact_display_dict
 from .workflow_graph import WorkflowError, package_revision
 from .workflow_service import source_files, _safe_root, _read_files
 from .validator import validate_proposal_files
+from ..core.runtime_identity import BUILD_ID, SDK_BUILD_ID
 
 
 def source_revision(files: dict[str, str]) -> str:
@@ -39,7 +40,7 @@ def replay_provenance(package: Any, cfg: Any, series: dict[str, dict[str, list]]
                 digest.update(b"\n")
                 stamps.append(int(row.get("ts", 0)))
                 envelope = row.get("_envelope") or {}
-                is_sample |= isinstance(envelope, dict) and envelope.get("truth") == "mock"
+                is_sample |= isinstance(envelope, dict) and (envelope.get("truth") == "mock" or envelope.get("mode") in {"mock", "paper", "sample"})
                 is_sample |= bool(row.get("fixture"))
             data.append({"market": market, "timeframe": timeframe, "rows": len(rows),
                 "first_ts": stamps[0] if stamps else None, "last_ts": stamps[-1] if stamps else None,
@@ -47,6 +48,7 @@ def replay_provenance(package: Any, cfg: Any, series: dict[str, dict[str, list]]
                 "out_of_order": any(b < a for a, b in zip(stamps, stamps[1:])),
                 "sha256": digest.hexdigest()})
     return {"version": 1, "strategy_id": package.strategy_id, "proposal_id": proposal_id,
+        "runtime_build_id": BUILD_ID, "sdk_build_id": SDK_BUILD_ID,
         "source_revision": source_revision(files) if not omitted else None,
         "omitted_files": omitted, "package_hash": package.content_hash,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -59,6 +61,22 @@ def replay_provenance(package: Any, cfg: Any, series: dict[str, dict[str, list]]
         "scope": "Historical code replay; no real Agent answers, live fills or out-of-sample claim."}
 
 
+def replay_run_sort_key(path: Path) -> tuple[float, int]:
+    """Prefixes such as repair_ and run-1_ are not chronological order."""
+    match = re.search(r"(\d{8}_\d{6})$", path.name)
+    try:
+        modified = path.stat().st_mtime_ns if not path.is_symlink() else 0
+    except OSError:
+        modified = 0
+    timestamp = modified / 1_000_000_000
+    if match:
+        try:
+            timestamp = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            pass
+    return (timestamp, modified)
+
+
 def _read_report(root: Path) -> tuple[dict[str, Any] | None, list[str]]:
     warnings: list[str] = []
     folder = root / "backtests"
@@ -66,7 +84,7 @@ def _read_report(root: Path) -> tuple[dict[str, Any] | None, list[str]]:
         return None, ["unsafe_report_directory"]
     if not folder.is_dir():
         return None, []
-    for run in sorted(folder.iterdir(), reverse=True)[:50]:
+    for run in sorted(folder.iterdir(), key=replay_run_sort_key, reverse=True)[:50]:
         if run.is_symlink() or not run.is_dir():
             continue
         path = run / "metrics.json"
@@ -105,6 +123,55 @@ def _datasets_complete(value: Any) -> bool:
         if row.get("duplicate_timestamps") != 0 or row.get("out_of_order") is not False:
             return False
     return True
+
+
+def completed_replay_receipt(root: Path, strategy_id: str, proposal_id: str | None) -> dict[str, Any] | None:
+    """A finished calculation is evidence even when its economic verdict is FAIL.
+
+    Used by authoring tools to avoid requesting the same replay indefinitely.
+    This does not approve trading, waive a new requested window or certify profit.
+    """
+    files, omitted = _read_files(root)
+    if omitted:
+        return None
+    report, warnings = _read_report(root)
+    if report is None or warnings:
+        return None
+    metrics = report["metrics"]
+    provenance = metrics.get("provenance") or {}
+    if not isinstance(provenance, dict):
+        return None
+    revision = source_revision(files)
+    if (provenance.get("source_revision") != revision
+            or provenance.get("sdk_build_id") != SDK_BUILD_ID
+            or provenance.get("strategy_id") != strategy_id
+            or provenance.get("proposal_id") != proposal_id
+            or provenance.get("source_changed_during_run") is not False
+            or provenance.get("data_kind") != "historical"
+            or metrics.get("requested_window_complete") is not True
+            or not _datasets_complete(provenance.get("datasets"))):
+        return None
+    run_path = root / "backtests" / report["id"]
+    state_path = run_path / "run.json"
+    if state_path.is_symlink() or not state_path.is_file() or state_path.stat().st_size > 100_000:
+        return None
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict) or state.get("status") != "completed" or state.get("preflight_only"):
+        return None
+    replay = metrics.get("replay") or {}
+    if not isinstance(replay, dict):
+        return None
+    if replay.get("errors") or replay.get("sdk_errors") or replay.get("order_accounting_ok") is False:
+        return None
+    return {"status": "completed", "strategy_id": strategy_id, "proposal_id": proposal_id,
+            "backtest_ts": report["id"], "source_revision": revision,
+            "verdict": metrics.get("verdict"), "requested_window_days": metrics.get("requested_window_days"),
+            "requested_window_complete": True, "start_utc": metrics.get("start_utc"),
+            "end_utc": metrics.get("end_utc"), "tf": metrics.get("tf"),
+            "metrics_path": str(run_path / "metrics.json"), "run_receipt": str(state_path)}
 
 
 def _window_complete(metrics: dict[str, Any]) -> bool:

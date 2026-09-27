@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..llm.retry import is_retryable_status
+
 from ..core.errors import (
     LLMApprovalRequired,
     LLMError,
@@ -109,10 +111,19 @@ _SAFETY_REJECTION_HINTS: tuple[str, ...] = (
 )
 
 
+def is_rate_limit_error(exc: BaseException) -> bool:
+    if not isinstance(exc, LLMError):
+        return False
+    status = getattr(exc, "status_code", None)
+    return status == 429 if status is not None else "(429)" in str(exc)
+
+
 def is_context_overflow_error(exc: BaseException) -> bool:
     if not isinstance(exc, LLMError):
         return False
     if isinstance(exc, _NON_RETRYABLE_LLM_ERRORS):
+        return False
+    if is_rate_limit_error(exc):
         return False
     message = str(exc).lower()
     return any(hint in message for hint in _CONTEXT_OVERFLOW_HINTS)
@@ -125,6 +136,12 @@ def is_transient_error(exc: BaseException) -> bool:
         return False
     if is_context_overflow_error(exc):
         return False
+    retryable = getattr(exc, "retryable", None)
+    if isinstance(retryable, bool):
+        return retryable
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return is_retryable_status(status)
     message = str(exc).lower()
     return any(hint.lower() in message for hint in _TRANSIENT_HINTS)
 
@@ -153,6 +170,7 @@ def transcript_char_size(messages: list[dict[str, Any]]) -> int:
 
 __all__ = [
     "is_context_overflow_error",
+    "is_rate_limit_error",
     "is_safety_rejection",
     "is_transient_error",
     "transcript_char_size",

@@ -27,6 +27,7 @@ class PortfolioState:
     initial_cash: float
     cash: float | None = None
     positions: dict[str, Position] = field(default_factory=dict)
+    protections: dict[str, Any] = field(default_factory=dict)
     realized_pnl: float = 0.0
     fees_cum: float = 0.0
     slippage_cum: float = 0.0
@@ -36,6 +37,7 @@ class PortfolioState:
     exposure_bars: int = 0
     bars_seen: int = 0
     turnover_notional: float = 0.0
+    daily_notional: dict[int, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.cash is None:
@@ -59,6 +61,8 @@ class PortfolioState:
         self.fees_cum += fee
         self.slippage_cum += abs(float(fill.get("slippage_usd", 0.0)))
         self.turnover_notional += abs(notional)
+        day = int(fill.get("ts", 0)) // 86400
+        self.daily_notional[day] = self.daily_notional.get(day, 0.0) + abs(notional)
         pos = self.positions.get(market, Position(market=market))
         signed_qty = qty if side == "buy" else -qty
         cash_delta = -notional if side == "buy" else notional
@@ -70,6 +74,7 @@ class PortfolioState:
             pos.opened_ts = int(fill.get("ts", 0)) or pos.opened_ts
             self.cash = float(self.cash or 0.0) + cash_delta - fee
         else:
+            previous_qty = pos.qty
             closing_qty = min(abs(pos.qty), abs(signed_qty))
             pnl = closing_qty * (price - pos.avg_price) * (1.0 if pos.qty > 0 else -1.0)
             self.realized_pnl += pnl
@@ -79,6 +84,13 @@ class PortfolioState:
                 pos.qty = 0.0
                 pos.avg_price = 0.0
                 pos.opened_ts = None
+                self.protections.pop(market, None)
+            elif previous_qty * pos.qty < 0:
+                self.protections.pop(market, None)
+                # Only the old leg was realized; the reversed residual opens
+                # at this fill, never at the previous position's cost basis.
+                pos.avg_price = price
+                pos.opened_ts = int(fill.get("ts", 0)) or None
         self.positions[market] = pos
 
     def mark_to_market(self, ts: int, prices: dict[str, float]) -> float:
@@ -122,4 +134,3 @@ class PortfolioState:
             },
             "max_drawdown_pct": self.max_drawdown_pct(),
         }
-

@@ -7,10 +7,12 @@ all retry at the same instant.
 
 from __future__ import annotations
 
+import math
 import random
 import threading
 import time
-from typing import Any, Callable
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable, Mapping
 
 _jitter_counter = 0
 _jitter_lock = threading.Lock()
@@ -50,6 +52,72 @@ def jittered_backoff(
 
 def is_retryable_status(status: int) -> bool:
     return int(status) in _TRANSIENT_STATUSES
+
+
+# These business codes require operator action, not another RPM retry.
+_QUOTA_CODES = frozenset({
+    "insufficient_quota", "credit_balance_exhausted", "quota_exhausted",
+    "organization_spend_limit_exceeded", "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded", "billing_hard_limit_reached",
+})
+
+
+def is_quota_error(doc: Mapping[str, Any] | None) -> bool:
+    data = doc or {}
+    error = data.get("error")
+    error = error if isinstance(error, dict) else {}
+    return any(str(value).lower() in _QUOTA_CODES for value in (
+        data.get("code"), error.get("code"), error.get("type"),
+    ))
+
+
+def provider_retryable(
+    status: int, doc: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
+    normalized = {str(k).lower(): str(v).strip().lower() for k, v in (headers or {}).items()}
+    if normalized.get("x-should-retry") in {"false", "0"} or is_quota_error(doc):
+        return False
+    return is_retryable_status(status)
+
+
+def parse_retry_after(
+    headers: Mapping[str, str] | None, *, now: float | None = None,
+) -> float | None:
+    """Preserve provider cooldowns (seconds, HTTP-date, or millisecond header)."""
+    normalized = {str(k).lower(): str(v).strip() for k, v in (headers or {}).items()}
+    for key, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        raw = normalized.get(key)
+        if not raw:
+            continue
+        try:
+            value = float(raw) * scale
+        except ValueError:
+            if key != "retry-after":
+                continue
+            try:
+                value = max(0.0, parsedate_to_datetime(raw).timestamp() - (time.time() if now is None else now))
+            except (ValueError, TypeError, OverflowError):
+                continue
+        if math.isfinite(value) and value >= 0:
+            return value
+    return None
+
+
+def retry_delay(
+    attempt: int, *, base_delay: float = 2.0, max_delay: float = 60.0,
+    headers: Mapping[str, str] | None = None, jitter: bool = True,
+) -> float:
+    """One retry curve, like ZCode: 2s -> 60s, equal jitter, provider wait first.
+
+    The local cap must not shorten a valid Retry-After. The caller owns its
+    overall deadline and must stop rather than issue an early retry.
+    """
+    explicit = parse_retry_after(headers)
+    if explicit is not None:
+        return explicit
+    delay = min(max(0.0, max_delay), max(0.0, base_delay) * 2 ** min(62, max(0, attempt - 1)))
+    return delay * random.uniform(0.5, 1.0) if jitter and delay else delay
 
 
 def retry_call(
@@ -92,4 +160,8 @@ __all__ = [
     "jittered_backoff",
     "is_retryable_status",
     "retry_call",
+    "retry_delay",
+    "parse_retry_after",
+    "provider_retryable",
+    "is_quota_error",
 ]

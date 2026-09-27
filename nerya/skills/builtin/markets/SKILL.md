@@ -23,6 +23,35 @@ FOR charts, prefer `get_candles` so raw series stay out of context.
 CHECK timestamp, venue, and fallback method.
 PASS fresh results to `trading`, `backtest`, or `market_research`.
 
+## Ranked universes (top N by market cap, volume, etc.)
+
+For crypto market-cap requests, use ONE native call:
+`market_data(action="ranked_universe", venue="binance", count=N,
+rank_by="market_cap", quote="USDT")`. It performs the ranking read and venue
+mapping together and returns ordered `market_ids`, plus skipped/substituted
+assets. Do not search for another market-cap source after this succeeds.
+The native action also defaults a missing venue to Binance for this specific
+crypto ranking path and returns `venue_mapping_complete`. When it is true,
+`market_ids` are already venue-validated; do not call `list_symbols` again.
+
+For other ranked sources, use ONE authoritative ranking response, then ONE
+`market_data(action="list_symbols", venue="...")` call to map that ordered list
+onto active venue markets. Preserve ranking order; if an asset has no usable
+market on the requested venue, skip it and continue down the same ranking until
+the requested count of tradable markets is reached, and report the skipped
+asset/substitution.
+
+Do not call `data_api`, web search/fetch, or shell for crypto market-cap ranking
+when `ranked_universe` succeeds. Do not re-fetch the same ranking, launch
+per-symbol urllib/curl/python probes,
+run exchange checks through `run_shell`, inspect Git state, or hunt for the web
+fetch's cached artifact just to reconstruct data already returned by a tool.
+The tool result is the evidence. Only retry a source once when the first request
+actually failed, and then move on or state the limitation.
+
+For wallet/DEX/prediction-market integration failures or adding a provider, load
+`adapter` to inspect the exact binding and public execution contract.
+
 Use a bundled script only for a capability the native tools do not expose and
 only when the operator explicitly requests it; `script_run` may require
 approval.

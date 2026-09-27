@@ -92,7 +92,7 @@ class MemoryProjection:
             atomic_write_text(path, "".join(blocks))
 
     def _targets(self, record: MemoryRecord) -> tuple[str, ...]:
-        if record.scope == "session":
+        if record.scope in {"session", "workflow"}:
             return ()
         if record.scope == "strategy":
             if not record.strategy_id:

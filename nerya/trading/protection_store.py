@@ -72,6 +72,11 @@ class ProtectionStore:
             self._con = connect(self.paths.db)
         return self._con
 
+    def close(self) -> None:
+        if self._con is not None:
+            self._con.close()
+            self._con = None
+
     def upsert(self, rule: ProtectionRule) -> ProtectionRule:
         if not rule.position_id:
             raise IntentValidationError("ProtectionRule requires position_id before persistence")
@@ -87,6 +92,10 @@ class ProtectionStore:
                 triggered_at, triggered_kind, notes
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(protection_id) DO UPDATE SET
+                position_id    = excluded.position_id,
+                mode           = excluded.mode,
+                trigger_source = excluded.trigger_source,
+                time_limit_sec = excluded.time_limit_sec,
                 executor_id    = excluded.executor_id,
                 status         = excluded.status,
                 rule_json      = excluded.rule_json,
@@ -118,15 +127,16 @@ class ProtectionStore:
             return None
         return _rule_from_json(json.loads(str(row["rule_json"])))
 
-    def get_for_position(self, position_id: str) -> ProtectionRule | None:
+    def get_for_position(self, position_id: str, *, strategy_id: str | None = None) -> ProtectionRule | None:
         row = self._con_lazy().execute(
             """
             SELECT rule_json FROM protection_rules
              WHERE position_id = ?
+               AND (? IS NULL OR strategy_id = ?)
                AND status NOT IN ('triggered', 'released', 'failed')
              ORDER BY created_at DESC LIMIT 1
             """,
-            (position_id,),
+            (position_id, strategy_id, strategy_id),
         ).fetchone()
         if not row:
             return None
@@ -174,6 +184,62 @@ class ProtectionStore:
         if rule.status == "armed":
             rule.status = "exchange_armed"
         self.upsert(rule)
+
+
+def activate_protection(config, rule: ProtectionRule) -> ProtectionRule:
+    """Persist and activate a rule for exactly one open strategy share."""
+    from .locks import trading_lock
+    with trading_lock(config.paths, f"protection:{rule.account_id}:{rule.strategy_id}:{rule.market}") as acquired:
+        if not acquired:
+            raise IntentValidationError("protection activation in progress; retry after current update")
+        return _activate_locked(config, rule)
+
+
+def _activate_locked(config, rule):
+    from contextlib import closing
+    from .position_book import PositionBook
+    from .executors.orchestrator import ExecutorOrchestrator
+
+    validate_supported_specs(rule)
+    with closing(PositionBook(config.paths)) as book:
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        if share is None or not share.is_open:
+            raise IntentValidationError("protection requires an open strategy position")
+        if rule.position_id and rule.position_id != share.position_id:
+            raise IntentValidationError("protection position_id does not belong to this strategy/account/market")
+        if rule.side != share.side:
+            raise IntentValidationError("protection side does not match the strategy position")
+        rule.position_id = share.position_id
+        store = ProtectionStore(config.paths)
+        existing = store.get(rule.protection_id)
+        if existing is not None and existing.status != "pending":
+            store.close()
+            return existing
+        previous = store.get_for_position(rule.position_id, strategy_id=rule.strategy_id)
+        if previous is not None and previous.protection_id != rule.protection_id and previous.native.get("generations"):
+            from .locks import trading_lock
+            from .native_protection import sync_native
+            with trading_lock(config.paths, previous.executor_id) as acquired:
+                if not acquired or not sync_native(config, previous, share, cancel=True):
+                    store.close()
+                    raise IntentValidationError("previous native protection cancellation is pending")
+        rule.status = "pending"
+        store.upsert(rule)
+        try:
+            with closing(ExecutorOrchestrator(config)) as orch:
+                executor = orch.create_position_protection(rule=rule, position_id=rule.position_id)
+                rule.executor_id = executor.run.executor_id
+            book.attach_protection(rule.position_id, rule.protection_id)
+            rule.status = "exchange_armed" if rule.exchange_order_ids else "armed"
+            store.upsert(rule)
+            if previous is not None and previous.protection_id != rule.protection_id:
+                store.set_status(previous.protection_id, "released")
+        except Exception:
+            store.set_status(rule.protection_id, "failed")
+            raise
+        finally:
+            store.close()
+        return rule
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +441,7 @@ def _rule_from_json(payload: dict[str, Any]) -> ProtectionRule:
         status=str(payload.get("status") or "pending"),  # type: ignore[arg-type]
         trigger_source=str(payload.get("trigger_source") or "mark"),  # type: ignore[arg-type]
         exchange_order_ids=dict(payload.get("exchange_order_ids") or {}),
+        native=dict(payload.get("native") or {}),
         created_at=str(payload.get("created_at") or _now_iso()),
         updated_at=str(payload.get("updated_at") or _now_iso()),
         triggered_at=payload.get("triggered_at"),

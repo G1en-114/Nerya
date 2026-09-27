@@ -12,7 +12,8 @@ def continue_agent(client: Any, *, session_id: str, agent_id: str,
     from ..agent.kernel import AgentKernel
     from ..agent.hooks import _bind_config, _unbind_config
     from ..harness.cancellation import CancelToken, register_token, unregister_token
-    from ..tools import NativeToolExecutor, PermissionContext, PermissionEngine
+    from ..tools import NativeToolExecutor, PermissionEngine
+    from .permissions import child_permission_context
     from ..tools.tool_approvals import ToolApprovalCoordinator, ToolApprovalScope
     from .dispatcher import SubAgentDispatcher
 
@@ -39,7 +40,8 @@ def continue_agent(client: Any, *, session_id: str, agent_id: str,
     executor = NativeToolExecutor(
         registry=kernel.tool_registry,
         permission_engine=PermissionEngine(),
-        permission_context=PermissionContext(mode=kernel.permission_mode),
+        permission_context=child_permission_context(
+            client.config, saved=saved.get("permission_ceiling"), strategy_id=strategy_id),
         approval_resolver=ToolApprovalCoordinator(
             client.config, scope=ToolApprovalScope.from_values(
                 session_id=session_id, strategy_id=strategy_id, actor_id="operator"),

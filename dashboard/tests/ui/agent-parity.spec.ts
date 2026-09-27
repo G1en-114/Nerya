@@ -7,15 +7,15 @@ async function start(page:import("@playwright/test").Page) {await page.goto("/ch
 test("running tasks accept queue and guidance; stop waits for terminal confirmation",async({page},info)=>{
   const state=await parityFixture(page);await start(page);
   await input(page).fill("Inspect the source evidence");await page.getByTestId("native-command-send").click();
-  await expect(page.getByTestId("command-execution-state")).toHaveAttribute("data-state","running");
+  await expect(page.getByTestId("task-header-status")).toContainText("Running");
   await input(page).fill("Second independent task");await input(page).press("Enter");
   await expect(page.getByTestId("conversation-queue")).toContainText("Second independent task");
   await input(page).fill("Keep the original constraints");await page.getByTestId("guide-current-turn").click();
   await expect(page.getByTestId("guidance-receipt")).toHaveAttribute("data-state","delivered");
   const guide=[...state.commands.values()].find(item=>item.kind === "guide")!;state.setState(guide.command_id,"injected");
-  await expect(page.getByTestId("guidance-receipt")).toHaveAttribute("data-state","injected");
+  await expect(page.getByTestId("guidance-receipt")).toHaveCount(0);
   await page.getByTestId("stop-current-command").click();
-  await expect(page.getByTestId("command-execution-state")).toHaveAttribute("data-state","stopping");
+  await expect(page.getByTestId("task-header-status")).toContainText("Stopping");
   await page.screenshot({path:info.outputPath("stopping-and-queue.png"),fullPage:true});
   const active=[...state.commands.values()].find(item=>item.state === "stopping")!;
   expect(state.controls.filter(item=>item.action === "stop")).toHaveLength(1);
@@ -46,7 +46,7 @@ test("lost ACK retains original request; recovery and reload do not resubmit wor
   expect(state.requests).toHaveLength(1);
   await page.getByRole("button",{name:"Check original request"}).click();
   await expect(page.getByTestId("command-delivery-unconfirmed")).toHaveCount(0);
-  await page.reload();await expect(page.getByTestId("command-execution-state")).toHaveAttribute("data-state","running");
+  await page.reload();await expect(page.getByTestId("task-header-status")).toContainText("Running");
   expect(state.requests).toHaveLength(1);expect(state.errors).toEqual([]);
 });
 
@@ -68,8 +68,8 @@ for(const theme of ["light","dark"]) test(`keyboard, context details and narrow 
   await input(page).fill("中文输入不会误发");await input(page).dispatchEvent("keydown",{key:"Enter",isComposing:true});expect(state.requests).toHaveLength(0);
   await page.getByTestId("native-command-send").click();
   await expect(page.locator('[data-turn-role="assistant"]')).toContainText("Verified fixture response.");
-  await page.getByTestId("turn-context").locator("summary").first().click();
-  await expect(page.getByTestId("turn-context")).toContainText("not a provider-verified limit");
+  await page.getByTestId("turn-context").first().click();
+  await expect(page.getByRole("dialog")).toContainText("not a provider-verified limit");await page.keyboard.press("Escape");
   expect(await page.evaluate(()=>document.documentElement.scrollWidth <= window.innerWidth+1)).toBe(true);
   await page.screenshot({path:info.outputPath(`mobile-${theme}.png`),fullPage:true});
   expect(state.errors).toEqual([]);
@@ -103,7 +103,8 @@ test("300-message history keeps input responsive and preserves the reading ancho
 test("Chinese run controls remain translated and fit a compact workspace",async({page},info)=>{
   const state=await parityFixture(page,{language:"zh",theme:"light"});await page.setViewportSize({width:820,height:900});await start(page);
   await input(page).fill("核对资料来源");await page.getByTestId("native-command-send").click();
-  await expect(page.getByTestId("command-execution-state")).toContainText("正在执行");
+  await expect(page.getByTestId("task-header-status")).toContainText("执行中");
+  await input(page).fill("追加说明");
   await expect(page.getByTestId("guide-current-turn")).toHaveText("指导本轮");
   await expect(page.getByTestId("native-command-send")).toHaveAttribute("aria-label","排队发送");
   expect(await page.evaluate(()=>document.documentElement.scrollWidth <= window.innerWidth+1)).toBe(true);

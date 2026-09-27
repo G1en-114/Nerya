@@ -33,11 +33,6 @@ const FLAG_COPY_KEYS: Record<string, string> = {
   "runtime.e2e_artifact_capture": "e2eArtifactCapture",
 };
 
-function formatPhase(raw: string) {
-  const match = raw.match(/^phase(\d+)$/i);
-  return match ? match[1] : raw;
-}
-
 export function RuntimeFlagsPanel() {
   const t = useTranslations("runtimeFlags");
   const tCommon = useTranslations("common");
@@ -173,7 +168,6 @@ export function RuntimeFlagsPanel() {
                         <Pill tone={f.enabled ? "ok" : "warn"}>
                           {f.enabled ? t("enabledStatus") : t("disabledStatus")}
                         </Pill>
-                        <Pill tone="brand">{t("phaseLabel", { phase: formatPhase(f.phase) })}</Pill>
                         {overridden ? (
                           <Pill tone="warn">{t("overridden")}</Pill>
                         ) : null}

@@ -43,12 +43,13 @@ import {
   deleteThreadLocally,
 } from "../../lib/chat";
 import { confirm as confirmDialog } from "../../lib/dialogs";
+import { ConversationActions } from "../chat/ChatHistoryActions";
 import {
   ChevronDownIcon,
   EvolutionIcon,
   MessagesIcon,
   PlusIcon,
-  StrategiesIcon,
+  FolderIcon,
   TrashIcon,
 } from "../icons";
 
@@ -241,27 +242,16 @@ export function SidebarStrategies() {
     router.push(`/chat?strategy=${encodeURIComponent(strategyId)}`);
   }
 
-  async function removeSession(strategyId: string, sessionId: string) {
-    const ok = await confirmDialog({
-      message: tChat("deleteConfirm"),
-      tone: "danger",
-    });
-    if (!ok) return;
-    deleteThreadLocally(sessionId); // tombstone + broadcast
-    setSessionsByStrategy((prev) => ({
-      ...prev,
-      [strategyId]: (prev[strategyId] ?? []).filter((s) => s.id !== sessionId),
-    }));
-    void clientApi.sessionDelete(sessionId).catch(() => {
-      /* keep the local tombstone even if the backend delete fails */
-    });
+  function removeSession(strategyId: string, sessionId: string) {
+    setSessionsByStrategy(previous => ({ ...previous,
+      [strategyId]: (previous[strategyId] ?? []).filter(session => session.id !== sessionId) }));
   }
 
   if (strategies.length === 0) return null;
 
   return (
     <div className="shrink-0 pb-2">
-      <div className="px-3 pb-1 pt-1 text-[11px] font-medium uppercase tracking-wide text-[color:var(--text-muted)]">
+      <div className="px-3 pb-2 pt-1 text-[12px] font-medium text-[color:var(--text-muted)]">
         {t("sectionStrategies")}
       </div>
       <div className="space-y-0.5">
@@ -294,7 +284,7 @@ export function SidebarStrategies() {
                   className="flex min-w-0 flex-1 items-center gap-2"
                   title={s.title || s.id}
                 >
-                  <StrategiesIcon
+                  <FolderIcon
                     size={14}
                     className={`shrink-0 ${strategyActive ? "text-brand-200" : "text-[color:var(--text-muted)]"}`}
                   />
@@ -320,7 +310,7 @@ export function SidebarStrategies() {
               </div>
 
               {open ? (
-                <div className="ml-4 space-y-0.5 border-l pl-1.5" style={{ borderColor: "var(--line)" }}>
+                <div className="ml-6 space-y-0.5">
                   {sessions.length === 0 ? (
                     <div className="px-2 py-1 text-[11px] italic text-[color:var(--text-muted)]">
                       {loadingIds.has(s.id)
@@ -394,19 +384,7 @@ function StrategySessionRow({
         />
         <span className="truncate text-[12px]">{session.title}</span>
       </Link>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onDelete();
-        }}
-        className="ml-1 shrink-0 rounded p-1 text-[color:var(--text-muted)] opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
-        title={deleteLabel}
-        aria-label={deleteLabel}
-      >
-        <TrashIcon size={12} />
-      </button>
+      <ConversationActions id={session.id} title={session.title} onDeleted={onDelete} />
     </div>
   );
 }

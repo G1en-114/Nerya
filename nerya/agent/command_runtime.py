@@ -6,17 +6,21 @@ explicit; ambiguous execution is reconciled, never automatically replayed.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
+import sqlite3
 import threading
 import time
 import uuid
 from typing import Callable
+from urllib.parse import urlencode
 
 from ..core.config import Config
 from ..db.sqlite import connect
 from ..harness.cancellation import signal_cancel, signal_steer
-from .command_store import CommandError, CommandStore, encode
+from .command_store import CommandError, CommandStore, command_id, encode, input_context, validate_command_request
+from .history_mutations import _session_id
 from .streaming import get_default_bus
 
 _LOG = logging.getLogger(__name__)
@@ -24,7 +28,7 @@ EPOCH = uuid.uuid4().hex
 _FIELDS = ("source", "kind", "payload", "strategy_id", "strategy_proposal_id", "reasoning_effort",
            "reasoning_summary", "permission_mode", "model_tier", "model_provider", "model_id",
            "model_context_window", "max_iterations", "max_total_tool_calls", "max_wall_seconds",
-           "evidence_contract", "resume_turn_id", "continuation_feedback", "work_mode", "interaction_id", "plan_id")
+           "evidence_contract", "resume_turn_id", "continuation_feedback", "work_mode", "interaction_id", "plan_id", "run_only")
 
 
 def outcome_state(result: dict) -> str:
@@ -37,7 +41,7 @@ def outcome_state(result: dict) -> str:
         return "awaiting_approval"
     if any(word in stop for word in ("cancel", "interrupt", "operator_stop")):
         return "interrupted"
-    if result.get("aborted") or stop not in ("", "end_turn", "completed", "stop"):
+    if result.get("aborted") or stop not in ("", "end_turn", "completed", "succeeded", "stop"):
         return "blocked"
     return "succeeded"
 
@@ -53,6 +57,24 @@ class CommandRuntime:
         raw = payload.get("request")
         if not isinstance(raw, dict):
             raise CommandError("invalid_command_request", 400)
+        if raw.get("source") == "approval_continue" or raw.get("kind") == "approval.continue":
+            # Old clients may still post after the callback. Resolve the durable
+            # decision instead of admitting their second continuation.
+            from ..approval_service import ApprovalService
+            service = ApprovalService(self.config)
+            message = raw.get("payload") or {}
+            approved = service.resolved(str(message.get("approval_id") or "")) if isinstance(message, dict) else None
+            if not approved or approved.get("state") != "approved":
+                raise CommandError("approval_not_resolved")
+            actor = str(payload.get("_auth_actor_id") or "local")
+            if not service.can_resolve(approved, actor, operator_authorized=service.trusted_operator(payload, actor, approved)):
+                raise CommandError("approval_owner_mismatch", 403)
+            if (approved.get("requester_session_id") or approved.get("session_id")) != payload.get("session_id"):
+                raise CommandError("approval_session_mismatch", 403)
+            receipt = self.resolve_approval(approved, start=start)
+            if not receipt or not receipt.get("command"):
+                raise CommandError("approval_continuation_unavailable")
+            return receipt
         kind = payload.get("command_type", "send")
         if kind not in ("send", "resume", "guide"):
             raise CommandError("invalid_command_type", 400)
@@ -62,58 +84,23 @@ class CommandRuntime:
             request[key] = copy.deepcopy(payload.get(key, "" if key != "_auth_scopes" else []))
         request["session_id"] = payload.get("session_id")
         request["target"] = "main"
-        if request.get("work_mode", "execute") not in ("execute", "plan"):
-            raise CommandError("invalid_work_mode", 400)
-        message = request.setdefault("payload", {})
-        if not isinstance(message, dict):
-            raise CommandError("invalid_command_request", 400)
-        text = message.get("text", "")
-        attachments = message.get("attachments", [])
-        if not isinstance(text, str) or len(text) > (4000 if kind == "guide" else 16000):
-            raise CommandError("invalid_message", 400)
-        if not isinstance(attachments, list) or len(attachments)>8:
-            raise CommandError("invalid_attachments", 400)
-        if kind == "guide" and (not text.strip() or attachments):
-            raise CommandError("guide_text_only", 400)
-        if kind != "resume" and not text.strip() and not attachments:
-            raise CommandError("message_required", 400)
-        if kind == "resume":
-            from .loop_state import validate_turn_checkpoint_resume_request
-            validate_turn_checkpoint_resume_request(resume_turn_id=request.get("resume_turn_id"),
-                continuation_feedback=request.get("continuation_feedback"), session_id=request["session_id"],
-                turn_id=None, has_attachments=bool(attachments))
-        elif request.get("resume_turn_id"):
-            raise CommandError("invalid_command_type", 400)
-        # The user's original request is the idempotency key payload; resolved
-        # defaults may change before an ACK retry and must not change its identity.
+        validate_command_request(kind, request)
+        # Keep the original request fingerprint even after operator edits.
         identity_request = copy.deepcopy(request)
         existing = self.store.existing_receipt(payload.get("command_id"),payload.get("session_id"),
             str(payload.get("_auth_actor_id") or "local"),kind,identity_request)
         if existing is not None:
             return existing
-        from ..llm.gateway import LLMGateway
-        accepted_model = None
-        try:
-            provider, model, metadata = LLMGateway(self.config).effective_model_metadata(
-                request.get("model_tier") or self.config.get("agent.native.tier"), provider_override=request.get("model_provider"),
-                model_override=request.get("model_id"))
-            if provider and model:
-                request["model_provider"], request["model_id"] = provider, model
-                accepted_model = {"provider": provider, "model": model,
-                    "context_limit": getattr(metadata, "context_window", None),
-                    "limit_source": "registry" if getattr(metadata, "context_window", None) else "unconfirmed"}
-        except Exception:
-            # Original runtime resolves configuration errors; admission does not
-            # substitute a model or silently enable mock execution.
-            pass
-        context = {"version":1, "captured_at":time.time(), "work_mode":request.get("work_mode", "execute"), "plan_id":request.get("plan_id"),
-                   "input_text":str(request.get("continuation_feedback") or text),
-                   "strategy_id":request.get("strategy_id"),
-                   "proposal_id":request.get("strategy_proposal_id"),
-                   "requested_model":{key:identity_request.get(key) for key in ("model_provider","model_id","model_tier","model_context_window","reasoning_effort")},
-                   "accepted_model":accepted_model,
-                   "references":[file.get("reference") for file in attachments if isinstance(file,dict) and file.get("reference")],
-                   "attachments":[{key:file.get(key) for key in ("id","name","artifact_uri","reference")} for file in attachments if isinstance(file,dict)]}
+        context = {"version": 1, **input_context(request), "plan_id": request.get("plan_id"),
+                   "strategy_id": request.get("strategy_id"), "proposal_id": request.get("strategy_proposal_id"),
+                   "accepted_model": self.accepted_model(request)}
+        if request.get("interaction_id"):
+            # UI text comes from the durable answer, never the generated execution prompt.
+            with self.store.transaction() as con:
+                answer = con.execute("SELECT kind,payload_json,response_json FROM agent_interactions WHERE interaction_id=? AND session_id=?", (request["interaction_id"], request["session_id"])).fetchone()
+                if answer:
+                    detail, response = json.loads(answer["payload_json"]), json.loads(answer["response_json"] or "{}")
+                    context["interaction_response"] = {"kind": answer["kind"], "title": detail.get("title", ""), "action": response.get("action", "answer"), "text": response.get("text", ""), "answers": response.get("answers", {})}
         if request.get("strategy_id"):
             from ..strategies.workflow_service import source_files
             from ..strategies.workflow_graph import package_revision
@@ -127,6 +114,22 @@ class CommandRuntime:
             self.kick(receipt["command"]["session_id"])
         return receipt
 
+    def accepted_model(self, request):
+        from ..llm.gateway import LLMGateway
+        try:
+            provider, model, metadata = LLMGateway(self.config).effective_model_metadata(
+                request.get("model_tier") or self.config.get("agent.native.tier"), provider_override=request.get("model_provider"),
+                model_override=request.get("model_id"))
+            if provider and model:
+                return {"provider": provider, "model": model,
+                    "context_limit": getattr(metadata, "context_window", None),
+                    "limit_source": "registry" if getattr(metadata, "context_window", None) else "unconfirmed"}
+        except Exception:
+            # Original runtime resolves configuration errors; admission does not
+            # substitute a model or silently enable mock execution.
+            pass
+        return None
+
     def kick(self, sid: str):
         with self._lock:
             if sid in self._workers:
@@ -138,15 +141,22 @@ class CommandRuntime:
     def _drain(self, sid: str):
         try:
             while True:
+                waiting = self.check_approvals(sid)
                 # Serialize idle handoff with kick so an accepted item cannot be
                 # stranded between the worker's final query and its exit.
                 with self._lock:
                     owner=uuid.uuid4().hex
                     row=self.store.claim(sid,owner)
                     if row is None:
-                        self._workers.pop(sid,None)
-                        return
-                self._run(row,owner)
+                        if not waiting:
+                            self._workers.pop(sid,None)
+                            return
+                if row is None:
+                    # Approval expiry and callbacks are runtime work even with
+                    # every browser closed. The lease is free while waiting.
+                    time.sleep(1)
+                else:
+                    self._run(row,owner)
         except Exception:
             _LOG.exception("conversation command worker failed; lease recovery will not replay work")
             with self._lock:
@@ -229,7 +239,68 @@ class CommandRuntime:
             done.set()
             watcher.join(timeout=5)
             unsubscribe()
+        self.store.save_outcome(cid,sid,tid,state,result,error)
         self.store.finish(cid,sid,owner,state,result,error)
+
+    def check_approvals(self, sid):
+        from ..approval_service import ApprovalService
+        return ApprovalService(self.config).reconcile_commands(self, sid)
+
+    def resolve_approval(self, record, *, start=True):
+        from ..approval_service import ApprovalService
+        if str(record.get("kind") or "") in ("trade_intent", "wallet_swap"):
+            return None  # Frozen financial actions keep their domain resume path.
+        sid = record.get("requester_session_id") or record.get("session_id")
+        tid = record.get("turn_id")
+        aid = str(record.get("approval_id") or record.get("id") or "")
+        state = record.get("state")
+        if not sid or not tid or not aid or state not in ("approved", "rejected", "expired", "cancelled"):
+            return None
+        cid = "approval_" + hashlib.sha256(aid.encode()).hexdigest()[:40]
+        with self.store.transaction() as con:
+            old = con.execute("SELECT * FROM agent_commands WHERE command_id=? AND session_id=?", (cid, sid)).fetchone()
+            original = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND turn_id=? AND kind!='guide' ORDER BY created_at DESC LIMIT 1", (sid, tid)).fetchone()
+            if old:
+                if original and original["state"] == "awaiting_approval":
+                    self.store.end_decision(con, original, "approval_continued", state="succeeded")
+                return {"ok": True, "duplicate": True, "command": self.store.public(old)}
+            if not original or original["state"] != "awaiting_approval":
+                return None
+            owner = ApprovalService.owner_actor_id(record)
+            # Kernel tool scopes use the existing local-owner identity domain
+            # (memory_actor); command admission retains the authenticated wire
+            # principal. Compare with that same projection, never a new alias
+            # table or an unconditional approval bypass. Remote principals stay
+            # distinct and strategy/session/turn checks below still apply.
+            from ..memory.scope import memory_actor
+            requester_matches = original["actor_id"] == owner or (
+                ApprovalService.is_native_tool(record) and memory_actor(original["actor_id"]) == owner)
+            if owner and not requester_matches:
+                return None
+            strategy = record.get("requester_strategy_id") or record.get("strategy_id") or ""
+            if str(strategy) != str(json.loads(original["request_json"]).get("strategy_id") or ""):
+                return None
+            if state != "approved":
+                self.store.end_decision(con, original, "approval_" + state)
+                return {"ok": True, "state": state, "command_id": original["command_id"]}
+            original = dict(original)
+        request = json.loads(original["request_json"])
+        for key in ("resume_turn_id", "continuation_feedback", "interaction_id", "run_only"):
+            request.pop(key, None)
+        request.update(source="approval_continue", kind="approval.continue", payload={
+            "text": "The requested permission was approved. Continue the original task within existing permissions.",
+            "approval_id": aid, "approval_state": "approved"})
+        context = {**json.loads(original["context_json"]), "approval_id": aid,
+                   "captured_at": time.time(), "input_text": request["payload"]["text"]}
+        receipt = self.store.accept(cid=cid, sid=sid, actor=original["actor_id"], kind="send",
+            request=request, context=context, turn_id="turn_"+uuid.uuid4().hex, continuation=True)
+        # Admission and closing the original decision are retryable with the
+        # same ID. A duplicate callback cannot release any other queued work.
+        with self.store.transaction() as con:
+            self.store.end_decision(con, original, "approval_continued", state="succeeded")
+        if start:
+            self.kick(sid)
+        return receipt
 
     def _guides(self,sid: str,tid: str):
         with self.store.transaction() as con:
@@ -251,8 +322,14 @@ class CommandRuntime:
         sid=payload.get("session_id")
         if payload.get("action")=="reconcile":
             return self.reconcile(sid,payload.get("command_id"))
+        if payload.get("action") == "edit":
+            allowed = {"session_id", "action", "command_id", "expected_revision", "request", "text",
+                       "_auth_actor_id", "_auth_scope", "_auth_scopes"}
+            if set(payload) - allowed or ("request" in payload and (not isinstance(payload["request"], dict) or "text" in payload)):
+                raise CommandError("invalid_command_edit", 400)
         response=self.store.control(sid,payload.get("action"),cid=payload.get("command_id"),
-            revision=payload.get("expected_revision"),text=payload.get("text"),before=payload.get("before_command_id"))
+            revision=payload.get("expected_revision"),text=payload.get("text"),before=payload.get("before_command_id"),
+            edit=payload.get("request"),prepare_context=self.accepted_model)
         if payload.get("action")=="stop":
             command=next(c for c in response["commands"] if c["command_id"]==payload["command_id"])
             response["signal_delivered"]=signal_cancel(command["turn_id"],reason="operator_cancel")
@@ -262,31 +339,75 @@ class CommandRuntime:
         return response
 
     def reconcile(self,sid: str,cid: str):
-        command=self.store.snapshot(sid,cid)["command"]
-        if command["state"]!="unconfirmed":
-            return {"ok":True,"command":command}
-        with self.store.transaction() as con:
-            row=con.execute("SELECT meta_json FROM agent_messages WHERE session_id=? AND turn_id=? AND role='assistant' AND deleted=0 ORDER BY ts DESC LIMIT 1",(sid,command["turn_id"])).fetchone()
-            meta=json.loads(row[0]) if row else {}
-            result=meta.get("turn")
-            # A resumed turn reuses turn_id; its older final answer is not proof
-            # that this command finished. Require exact persisted command identity.
-            if isinstance(result,dict) and result.get("stopped_reason") and meta.get("source_command_id")==cid:
-                con.execute("UPDATE agent_commands SET state=?,result_json=?,revision=revision+1,updated_at=? WHERE command_id=? AND state='unconfirmed'",
-                            (outcome_state(result),encode(result),time.time(),cid))
-        return self.store.snapshot(sid,cid)
+        sid, cid = _session_id(sid), command_id(cid)
+        diagnostic = {"status": "matched", "command_id": cid, "session_id": sid,
+                      "turn_id": None, "source": "command",
+                      "evidence_path": "/agent/commands/events?" + urlencode({"session_id": sid, "command_id": cid})}
+        try:
+            command=self.store.snapshot(sid,cid)["command"]
+        except (sqlite3.Error, OSError):
+            return {"ok": True, "reconciliation": {**diagnostic, "status": "lookup_failed", "source": None}}
+        diagnostic["turn_id"] = command["turn_id"]
+        if command["state"] == "awaiting_approval":
+            # Explicit reconciliation may recover a decision saved before a
+            # server restart/callback failure. Reuse the same approval-derived
+            # command id; never replay unconfirmed work or drain unrelated jobs.
+            self.check_approvals(sid)
+            command = self.store.snapshot(sid, cid)["command"]
+            if command["state"] != "awaiting_approval":
+                diagnostic.update(status="matched", source="durable_approval")
+                self.kick(sid)
+            else:
+                diagnostic.update(status="decision_pending", source="durable_approval")
+        if command["state"] == "unconfirmed":
+            diagnostic.update(status="insufficient_evidence", source=None)
+            try:
+                with self.store.transaction() as con:
+                    saved = con.execute("SELECT payload_json FROM agent_command_events WHERE command_id=? AND event_id=?", (cid, "outcome_"+cid)).fetchone()
+                    evidence = json.loads(saved[0]) if saved else {}
+                    result, state, error = evidence.get("result"), evidence.get("execution_status"), evidence.get("error")
+                    source = "command.outcome"
+                    exact = evidence.get("command_id") == cid and evidence.get("session_id") == sid and evidence.get("turn_id") == command["turn_id"]
+                    if not exact:
+                        row=con.execute("SELECT meta_json FROM agent_messages WHERE session_id=? AND turn_id=? AND role='assistant' AND deleted=0 ORDER BY ts DESC LIMIT 1", (sid,command["turn_id"])).fetchone()
+                        meta=json.loads(row[0]) if row else {}
+                        result=meta.get("turn")
+                        state=meta.get("execution_status")
+                        exact = isinstance(result,dict) and bool(result.get("stopped_reason")) and meta.get("source_command_id") == cid
+                        source = "assistant_message"
+                        if exact and not state:
+                            state = outcome_state(result)
+                    if exact and state in ("succeeded","failed","blocked","awaiting_approval","awaiting_input","interrupted"):
+                        if state == "succeeded" and command["context"].get("stop_requested"):
+                            state = "interrupted"
+                            result = {**(result or {}), "stopped_reason": "cancelled", "stop_requested": True}
+                        con.execute("UPDATE agent_commands SET state=?,result_json=?,error_json=?,revision=revision+1,updated_at=? WHERE command_id=? AND state='unconfirmed'",
+                            (state,encode(result) if result is not None else None,encode(error) if error else None,time.time(),cid))
+                        diagnostic.update(status="matched", source=source)
+                command = self.store.snapshot(sid,cid)["command"]
+            except Exception:
+                diagnostic.update(status="lookup_failed", source=None)
+                _LOG.warning("command outcome lookup failed for %s", cid)
+        return {"ok": True, "command": command, "reconciliation": diagnostic}
 
 
 _RUNTIMES: dict[str,CommandRuntime]={}
 _LOCK=threading.Lock()
 
-def runtime(config: Config,execute: Callable[[Config,dict],dict]) -> CommandRuntime:
+def runtime(config: Config,execute: Callable[[Config,dict],dict] | None = None) -> CommandRuntime:
     key=str(config.paths.db.resolve())
     with _LOCK:
         instance=_RUNTIMES.get(key)
         if instance is None:
-            instance=CommandRuntime(config,execute)
+            instance=CommandRuntime(config,execute or _execute_internal)
             _RUNTIMES[key]=instance
         else:
             instance.config=config
         return instance
+
+
+def _execute_internal(config, request):
+    from ..api.routes_agent import routes
+    from ..sdk.internal_client import InternalClient
+    handler = next(handler for method, path, handler in routes() if path == "/agent/run_turn_internal")
+    return handler(InternalClient.from_config(config), request)

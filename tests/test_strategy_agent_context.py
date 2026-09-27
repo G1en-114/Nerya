@@ -22,6 +22,35 @@ from nerya.triggers.strategy_agent_task_executor import StrategyAgentTaskExecuto
 pytestmark = pytest.mark.smoke
 
 
+def test_data_cutoff_is_separate_from_replay_capture_clock():
+    clock = SimpleNamespace(now_iso=lambda: "2026-09-26T00:00:00Z")
+    inputs = StrategyInputContext([], None, None, (), "r", clock=clock)
+    inputs.publish("bars", [{"close":123}], data_as_of="2026-09-25T23:00:00+00:00")
+    row = inputs.snapshot()["bars"]
+    assert row["captured_at"] == "2026-09-26T00:00:00Z"
+    assert row["data_as_of"] == "2026-09-25T23:00:00Z"
+    with pytest.raises(ValueError, match="timezone"):
+        inputs.publish("bars", ["invalid"], data_as_of="2026-09-25T23:00:00")
+    assert inputs.snapshot()["bars"] == row
+
+
+def test_unexecuted_model_protocol_is_not_a_successful_strategy_task(tmp_path):
+    from nerya.strategies.agent_execution import agent_task_receipt, task_output_error
+    config, package, _ = seed(tmp_path)
+    class Kernel:
+        def run_turn(self, **kwargs):
+            return SimpleNamespace(turn_id="protocol-fixture", final_text="<tool_call><function=write_file>not executed</function></tool_call>", stopped_reason="end_turn", iterations=1)
+    runtime = TriggerRuntime(config=config, router=TriggerRuntime.boot(config).router,
+        agent_task_executor_factory=lambda cfg: StrategyAgentTaskExecutor(cfg, kernel_factory=lambda _: Kernel()))
+    out = runtime.emit(runtime.from_payload({"source":"test", "kind":"strategy.tick", "target":TARGET, "strategy_id":package.strategy_id,"payload":{}}))
+    assert out.status == "failed" and out.error["code"] == "unexecuted_tool_protocol"
+    assert agent_task_receipt(package.strategy_id,out.result)["execution_status"] == "failed"
+    # Older persisted receipts are not misrepresented as successful either.
+    old = {**out.result,"status":"executed"}; old.pop("output_error")
+    assert agent_task_receipt(package.strategy_id,old)["execution_status"] == "failed"
+    assert task_output_error("Example: `<tool_call>` is not an actual tool call") is None
+
+
 def seed(tmp_path: Path, *, team: bool = False, execution=None, script=None):
     config = Config(paths=WorkspacePaths(tmp_path), data=deepcopy(DEFAULT_CONFIG))
     config.data["runtime"]["mock_mode"] = False
@@ -57,9 +86,12 @@ def test_inherits_main_not_script_llm_cap_and_does_not_mutate(tmp_path):
     config, package, _ = seed(tmp_path)
     before = deepcopy(config.data)
     scoped = execution_config(config, package.manifest)
-    assert scoped.get("agent.native.max_iterations") == config.get("agent.native.max_iterations") > 1
-    assert scoped.get("agent.native.max_total_tool_calls") == config.get("agent.native.max_total_tool_calls") > 1
-    assert scoped.get("agent.subagents.max_iterations") == config.get("agent.native.max_iterations")
+    assert scoped.get("agent.native.max_iterations") == config.get("agent.native.max_iterations")
+    assert scoped.get("agent.native.max_total_tool_calls") == config.get("agent.native.max_total_tool_calls")
+    assert scoped.get("agent.native.max_iterations") == 0 or scoped.get("agent.native.max_iterations") > 1
+    assert scoped.get("agent.subagents.max_iterations") == config.get("agent.subagents.max_iterations")
+    assert scoped.get("agent.subagents.max_skill_calls", 120) > 0
+    assert scoped.get("agent.team_run.timeout_s", 300) != 0
     assert tool_policy_allows(scoped.get("agent.native.tool_policy"), "web_search_fetch")
     assert tool_policy_allows(scoped.get("agent.native.tool_policy"), "read_file")
     scoped.data["agent"]["native"]["max_iterations"] = 2

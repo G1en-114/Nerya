@@ -1,0 +1,6 @@
+{
+  "extends":"./tsconfig.json",
+  "compilerOptions":{"tsBuildInfoFile":".next-agent-parity-build/typescript.tsbuildinfo","strictNullChecks":true},
+  "include":["next-env.d.ts","app/**/*.ts","app/**/*.tsx","components/**/*.ts","components/**/*.tsx","lib/**/*.ts","messages/**/*.ts",".next-agent-parity-build/types/**/*.ts"],
+  "exclude":["node_modules","tests"]
+}

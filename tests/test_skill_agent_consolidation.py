@@ -68,7 +68,7 @@ def test_builtin_catalog_and_native_catalog_agree_and_cover_finance_references()
     entries = registry.list()
     index = SkillIndex([], skill_files=[e.manifest.path / "SKILL.md" for e in entries])
     assert {e.manifest.id for e in registry.catalog()} == {r.skill_id for r in index.catalog()}
-    hubs = [e.manifest for e in registry.catalog() if e.manifest.id.startswith("finance.")]
+    hubs = [e.manifest for e in entries if e.manifest.id.startswith("finance.") and e.manifest.id.count(".") == 1]
     assert len(hubs) == 7
     for hub in hubs:
         methods = [e.manifest for e in entries if e.manifest.id.startswith(hub.id + ".")]

@@ -144,7 +144,7 @@
     "uploadingAttachment": "正在准备并上传附件…",
     "uploadFailed": "附件上传失败。请重新选择文件重试，或关闭此提示后不带该附件发送。",
     "attachmentNotReady": "此对话视图尚未接入附件上传。",
-    "cancelTurn": "取消当前请求（仅客户端，后端可能仍在处理）",
+    "cancelTurn": "请求停止当前任务（确认前可能仍在执行）",
     "planLabel": "方案：{value}",
     "tierLabel": "档位：{value}",
     "legacyHarness": "旧版引擎",
@@ -768,7 +768,9 @@
           "prompt": "先列出当前会话可复用的成员与已保存结果，确认我要继续的任务后，沿用原成员和上下文补充工作，不重复创建同名成员。"
         }
       }
-    }
+    },
+    "thinkLevelInherit": "继承配置",
+    "contextAutomatic": "自动（未确认时显示未知）"
   },
   "inbox": {
     "eyebrow": "",
@@ -964,7 +966,10 @@
     "advProvider": "提供商",
     "advModel": "模型",
     "advLockedTier": "锁定档位",
-    "advPromptExcerpt": "提示词摘录"
+    "advPromptExcerpt": "提示词摘录",
+    "inheritModel": "继承模型档位",
+    "toggleAgent": "启用 {name}",
+    "deleteNamed": "删除 {name}"
   },
   "turnBlocks": {
     "agentTeam": "Agent Team",

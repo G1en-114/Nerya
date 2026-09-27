@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Only the Nerya window. Dynamic loopback ports are narrowed again at the Rust command boundary.",
+  "windows": ["main"],
+  "local": true,
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-desktop"]
+}

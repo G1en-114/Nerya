@@ -49,7 +49,7 @@ from .models import (
     TeamGateSpec,
     TeamTemplate,
 )
-from .store import TeamStore
+from .store import TeamStore, _write_json_atomic
 from .templates import get_template
 
 
@@ -316,6 +316,8 @@ class TeamOrchestrator:
         tasks = self._materialise_tasks(run, tpl)
         for t in tasks:
             self.store.create_task(t)
+        for task in tasks:
+            self._member_state(run, task, tasks, request=request)
 
         run.status = "running"
         run.phase = "research"
@@ -405,7 +407,7 @@ class TeamOrchestrator:
                 status=run.status,
                 phase=run.phase,
                 final_context=final_context,
-                members=[m.asdict() for m in members],
+                members=[m.asdict() for m in self.store.read_members(run.id)],
                 tasks=[t.asdict() for t in tasks],
                 blackboard_size=len(bb.list()),
                 metrics=run.metrics,
@@ -415,6 +417,13 @@ class TeamOrchestrator:
         except Exception as exc:
             run.status = "failed"
             run.error = f"{type(exc).__name__}: {exc}"
+            for task in tasks:
+                if task.status in {"pending", "in_progress"}:
+                    task.status = "failed"
+                    task.error = run.error
+                    task.completed_at = now_iso()
+                    self.store.update_task(task)
+                    self._member_state(run, task, tasks, request=request)
             self.store.update_run(run)
             self.store.append_event(run.id, kind="run.failed", error=run.error)
             return TeamRunResult(
@@ -422,7 +431,7 @@ class TeamOrchestrator:
                 status=run.status, phase=run.phase,
                 final_context={"error": run.error}, error=run.error,
                 tasks=[t.asdict() for t in tasks],
-                members=[m.asdict() for m in members],
+                members=[m.asdict() for m in self.store.read_members(run.id)],
                 blackboard_size=len(bb.list()),
                 metrics=run.metrics,
             )
@@ -437,7 +446,7 @@ class TeamOrchestrator:
             final_context=final_context,
             final_report_path=str(self.store.synthesis_dir(run.id) / "final_report.md"),
             final_report_excerpt=report[:1200],
-            members=[m.asdict() for m in members],
+            members=[m.asdict() for m in self.store.read_members(run.id)],
             tasks=[t.asdict() for t in tasks],
             blackboard_size=len(bb.list()),
             metrics=run.metrics,
@@ -474,6 +483,54 @@ class TeamOrchestrator:
         return out
 
     # ------------------------------------------------------------------ exec
+    def _member_state(self, run: TeamRun, task: TeamTask, tasks: list[TeamTask], *,
+                      request: TeamRunRequest | None = None,
+                      result: SubAgentResult | None = None) -> None:
+        """Scheduler-owned member projection shared by events and HTTP refresh."""
+        index = {item.id: item for item in tasks}
+
+        def state(item: TeamTask) -> str:
+            if item.status == "in_progress":
+                return "running"
+            if item.status != "pending":
+                return item.status
+            return "blocked" if any(
+                dep not in index or index[dep].status != "completed" and (
+                    index[dep].required or index[dep].status not in {"failed", "blocked", "cancelled"})
+                for dep in item.depends_on) else "queued"
+
+        members = self.store.read_members(run.id)
+        for member in members:
+            owned = [item for item in tasks if item.owner == member.name]
+            if owned:
+                priority = {"running": 0, "queued": 1, "blocked": 2, "failed": 3, "cancelled": 4, "completed": 5}
+                active = min(owned, key=lambda item: priority.get(state(item), 6))
+                member.status, member.last_task_id = state(active), active.id
+        _write_json_atomic(self.store.run_dir(run.id) / "members.json", [m.asdict() for m in members])
+        status = state(task)
+        fields = {
+            "session_id": run.session_id, "strategy_id": run.strategy_id, "turn_id": run.turn_id,
+            "call_id": request.parent_call_id if request else None,
+            "subagent": task.subagent_name, "role": task.owner, "status": status,
+            "team_task_id": task.id, "team_task_owner": task.owner, "team_task_subject": task.subject,
+            "depends_on": task.depends_on, "error": task.error,
+            "wait_reason": "dependencies" if status == "blocked" and task.status == "pending" else
+                           "capacity" if status == "queued" else None,
+            "payload": (task.payload or {}).get("input_payload"),
+            "assignment_prompt": (task.payload or {}).get("assignment_prompt"),
+        }
+        if result is not None:
+            fields.update(ok=status == "completed", output=redact_display_dict(result.output),
+                          metrics=redact_display_dict(result.metrics), tokens=result.tokens,
+                          usd=result.usd, wall_ms=result.wall_ms, provider=result.provider, model=result.model,
+                          error_kind=result.error_kind)
+        self.store.append_event(run.id, kind="member.state", **fields)
+        if task.status != "pending":
+            from ..agent.streaming import get_default_bus
+            get_default_bus().publish(
+                "team.member.start" if status == "running" else "team.member.end",
+                team_run_id=run.id, **fields)
+
     def _execute_tasks(
         self,
         *,
@@ -516,6 +573,7 @@ class TeamOrchestrator:
                     task.error = reason
                     task.completed_at = now_iso()
                     self.store.update_task(task)
+                    self._member_state(run, task, tasks, request=request)
                 remaining.discard(tid)
             raise _TeamCancelled(reason)
 
@@ -524,6 +582,7 @@ class TeamOrchestrator:
             task.error = reason
             task.completed_at = now_iso()
             self.store.update_task(task)
+            self._member_state(run, task, tasks, request=request)
             remaining.discard(task.id)
 
         # One bounded pool per run: completed prerequisites release downstream
@@ -572,6 +631,7 @@ class TeamOrchestrator:
                         ),
                     }
                     self.store.update_task(task)
+                    self._member_state(run, task, tasks, request=request)
                     future = pool.submit(
                         self._run_task, task=task, payload=payload,
                         trigger_event_id=run.trigger_event_id,
@@ -603,6 +663,7 @@ class TeamOrchestrator:
                     self._integrate_result(
                         task=index[tid], result=result, blackboard=bb, mailbox=mailbox,
                     )
+                    self._member_state(run, index[tid], tasks, request=request, result=result)
                     remaining.discard(tid)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)

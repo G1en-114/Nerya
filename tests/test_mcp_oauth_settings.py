@@ -3,6 +3,7 @@ import base64
 import hashlib
 import html
 import json
+import os
 import re
 from copy import deepcopy
 from urllib.parse import parse_qs, urlsplit
@@ -170,6 +171,7 @@ def test_refresh_rotation_replay_revoke_and_disable(configured):
 def test_settings_revision_vault_and_no_secret_disclosure(configured, monkeypatch):
     _, tools, _ = configured
     config = tools.client.config
+    monkeypatch.delenv("NERYA_VAULT_PASSPHRASE", raising=False)
     before = routes_mcp.status(tools.client)
     assert routes_mcp.save(tools.client, {"revision": "stale", "enabled": False})["_status"] == 409
     monkeypatch.setattr("nerya.mcp.openai_tunnel.stop", lambda *a: {"ok": True})
@@ -181,4 +183,8 @@ def test_settings_revision_vault_and_no_secret_disclosure(configured, monkeypatc
     assert key not in json.dumps(result) and key not in config.paths.config.read_text()
     from nerya.security.secrets import SecretVault
     assert SecretVault.open(config.paths.vault_enc).resolve("mcp_openai_runtime_key", required_scope="mcp_tunnel") == key
+    key_path = config.paths.vault_keyring
+    assert key_path.is_file()
+    if os.name != "nt":
+        assert key_path.stat().st_mode & 0o077 == 0
     assert routes_mcp.save(tools.client, {"revision": result["revision"], "public_url": "http://evil.example"})["_status"] == 400

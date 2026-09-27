@@ -16,6 +16,7 @@ failing the agent turn.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
 from ..connectors.http import UrllibHttp
 from ..core.truth import (
@@ -88,6 +89,9 @@ def fetch_token_klines(
     limit: int = 100,
     http: UrllibHttp | None = None,
     timeout_s: float = 10.0,
+    start: int | None = None,
+    end: int | None = None,
+    token_mint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return ``limit`` most recent OHLCV bars for ``token_or_pool`` on ``chain``.
 
@@ -107,11 +111,16 @@ def fetch_token_klines(
                 venue=chain_l or "unknown",
             ),
         )
+    if interval.lower() not in _TIMEFRAMES:
+        raise ValueError(f"unsupported onchain interval: {interval}")
     tf, agg = _timeframe(interval)
     h = http or UrllibHttp()
+    if '@' in token_or_pool:
+        token_or_pool, selected_mint = token_or_pool.split('@', 1)
+        token_mint = token_mint or selected_mint
 
-    pool = _pool_for(h, slug, token_or_pool, timeout_s=timeout_s)
-    if not pool:
+    resolved = _pool_for(h, slug, token_or_pool, timeout_s=timeout_s)
+    if not resolved:
         return tag_list_envelope(
             [],
             degraded_envelope(
@@ -121,39 +130,37 @@ def fetch_token_klines(
             ),
         )
 
-    url = (
-        f"{_BASE}/networks/{slug}/pools/{pool}/ohlcv/{tf}"
-        f"?aggregate={agg}&limit={max(1, min(int(limit), 1000))}"
-    )
-    try:
-        status, doc = h.request("GET", url,
-                                 headers={"accept": "application/json"},
-                                 timeout=timeout_s)
-    except Exception as exc:
-        return tag_list_envelope(
-            [],
-            degraded_envelope(
-                "onchain_klines",
-                error=f"{type(exc).__name__}: {exc}",
-                venue=chain_l,
-            ),
-        )
-    if status >= 400 or not isinstance(doc, dict):
-        return tag_list_envelope(
-            [],
-            degraded_envelope(
-                "onchain_klines",
-                error=f"http_{status}",
-                venue=chain_l,
-            ),
-        )
-    ohlcv = (((doc.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
+    pool, side = resolved
+    target = max(1,min(int(limit),10000))
+    params = {"aggregate":agg, "limit":min(target,1000), "token":token_mint or side, "currency":"usd"}
+    if end is not None:
+        params["before_timestamp"] = int(end) + 1
+    ohlcv = []
+    seen = set()
+    for _ in range((target+999)//1000+1):
+        url = f"{_BASE}/networks/{slug}/pools/{pool}/ohlcv/{tf}?{urlencode(params)}"
+        try:
+            status,doc = h.request("GET",url,headers={"accept":"application/json"},timeout=timeout_s)
+        except Exception as exc:
+            return tag_list_envelope([],degraded_envelope("onchain_klines",error=type(exc).__name__,venue=chain_l))
+        if status>=400 or not isinstance(doc,dict):
+            return tag_list_envelope([],degraded_envelope("onchain_klines",error=f"http_{status}",venue=chain_l))
+        page=(((doc.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
+        fresh=[r for r in page if len(r)>=6 and int(r[0]) not in seen]
+        if not fresh:break
+        ohlcv.extend(fresh);seen.update(int(r[0]) for r in fresh)
+        oldest=min(int(r[0]) for r in fresh)
+        if len(ohlcv)>=target or len(page)<params["limit"] or (start is not None and oldest<=start):break
+        params["before_timestamp"]=oldest
+        params["limit"]=min(1000,target-len(ohlcv))
     out: list[dict[str, Any]] = []
     for row in ohlcv:
         if len(row) < 6:
             continue
         try:
             ts, o, hi, lo, c, v = row[:6]
+            if (start is not None and int(ts) < start) or (end is not None and int(ts) > end):
+                continue
             out.append({
                 "ts": int(ts),
                 "open": float(o),
@@ -161,10 +168,12 @@ def fetch_token_klines(
                 "low": float(lo),
                 "close": float(c),
                 "volume": float(v),
+                'price_currency':'USD',
             })
         except Exception:
             continue
     out.sort(key=lambda r: r["ts"])
+    out=out[-target:]
     if not out:
         return tag_list_envelope(
             [],
@@ -182,7 +191,7 @@ def fetch_token_klines(
 
 def _pool_for(
     http: UrllibHttp, slug: str, token_or_pool: str, *, timeout_s: float = 10.0,
-) -> str | None:
+) -> tuple[str, str] | None:
     """Return the pool address for ``token_or_pool`` on network ``slug``.
 
     Strategy:
@@ -199,7 +208,7 @@ def _pool_for(
             headers={"accept": "application/json"}, timeout=timeout_s,
         )
         if 200 <= status < 300:
-            return token_or_pool
+            return token_or_pool, "base"
     except Exception:
         pass
 
@@ -219,7 +228,11 @@ def _pool_for(
     attrs = (first or {}).get("attributes") or {}
     addr = (attrs.get("address")
             or (first or {}).get("id", "").split("_", 1)[-1])
-    return addr or None
+    relations = (first or {}).get("relationships") or {}
+    quote_id = str(((relations.get("quote_token") or {}).get("data") or {}).get("id") or "")
+    quoted_token = quote_id.split("_", 1)[-1]
+    same = quoted_token == token_or_pool if slug == "solana" else quoted_token.lower() == token_or_pool.lower()
+    return (addr, "quote" if same else "base") if addr else None
 
 
 __all__ = ["fetch_token_klines"]

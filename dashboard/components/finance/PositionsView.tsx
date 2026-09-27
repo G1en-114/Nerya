@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import { ChoiceSelect } from "../ChoiceSelect";
 
@@ -35,37 +36,37 @@ export function PositionsView({ positions, modes = {}, loading = false, error, t
     if (y === null) return -1;
     return sort === "profit" ? y - x : x - y;
   }), [positions, query, side, sort]);
-  const dir = (p: PortfolioPosition) => positionSide(p) === "long" ? (zh ? "多头" : "Long") : positionSide(p) === "short" ? (zh ? "空头" : "Short") : (zh ? "方向未提供" : "Side not provided");
-  return <section className={styles.surface} data-testid="positions-view" aria-label={title || (zh ? "持仓" : "Positions")}>
-    <div className={styles.header}><h2>{title || (zh ? "持仓" : "Positions")} <span className="ml-1 text-xs text-[color:var(--text-muted)]">{positions.length}</span></h2><span className={styles.note}>{zh ? "点开仓位查看明细" : "Open a position for details"}</span></div>
+  const dir = (p: PortfolioPosition) => positionSide(p) === "long" ? (i18nCopy(zh, "copy.components_finance_PositionsView.001")) : positionSide(p) === "short" ? (i18nCopy(zh, "copy.components_finance_PositionsView.002")) : (i18nCopy(zh, "copy.components_finance_PositionsView.003"));
+  return <section className={styles.surface} data-testid="positions-view" aria-label={title || (i18nCopy(zh, "copy.components_finance_PositionsView.004"))}>
+    <div className={styles.header}><h2>{title || (i18nCopy(zh, "copy.components_finance_PositionsView.005"))} <span className="ml-1 text-xs text-[color:var(--text-muted)]">{positions.length}</span></h2><span className={styles.note}>{i18nCopy(zh, "copy.components_finance_PositionsView.006")}</span></div>
     {error ? <p role="status" className="pb-2 text-xs text-warn">{error}</p> : null}
     {positions.length ? <div className={styles.filters}>
-      <input ref={searchRef} aria-label={zh ? "搜索仓位" : "Search positions"} placeholder={zh ? "搜索市场或账户" : "Search market or account"} value={query} onChange={(e) => setQuery(e.target.value)} />
-      <ChoiceSelect aria-label={zh ? "仓位方向" : "Position side"} value={side} onValueChange={setSide}><option value="all">{zh ? "全部方向" : "All sides"}</option><option value="long">{zh ? "多头" : "Long"}</option><option value="short">{zh ? "空头" : "Short"}</option><option value="unknown">{zh ? "未知方向" : "Unknown"}</option></ChoiceSelect>
-      <ChoiceSelect aria-label={zh ? "仓位排序" : "Sort positions"} value={sort} onValueChange={setSort}><option value="market">{zh ? "按市场" : "Market"}</option><option value="profit">{zh ? "浮盈优先" : "Highest P&L"}</option><option value="loss">{zh ? "浮亏优先" : "Lowest P&L"}</option></ChoiceSelect>
-      {query || side !== "all" ? <button type="button" onClick={() => { setQuery(""); setSide("all"); searchRef.current?.focus(); }}>{zh ? "清除筛选" : "Clear filters"}</button> : null}
+      <input ref={searchRef} aria-label={i18nCopy(zh, "copy.components_finance_PositionsView.007")} placeholder={i18nCopy(zh, "copy.components_finance_PositionsView.008")} value={query} onChange={(e) => setQuery(e.target.value)} />
+      <ChoiceSelect aria-label={i18nCopy(zh, "copy.components_finance_PositionsView.009")} value={side} onValueChange={setSide}><option value="all">{i18nCopy(zh, "copy.components_finance_PositionsView.010")}</option><option value="long">{i18nCopy(zh, "copy.components_finance_PositionsView.011")}</option><option value="short">{i18nCopy(zh, "copy.components_finance_PositionsView.012")}</option><option value="unknown">{i18nCopy(zh, "copy.components_finance_PositionsView.013")}</option></ChoiceSelect>
+      <ChoiceSelect aria-label={i18nCopy(zh, "copy.components_finance_PositionsView.014")} value={sort} onValueChange={setSort}><option value="market">{i18nCopy(zh, "copy.components_finance_PositionsView.015")}</option><option value="profit">{i18nCopy(zh, "copy.components_finance_PositionsView.016")}</option><option value="loss">{i18nCopy(zh, "copy.components_finance_PositionsView.017")}</option></ChoiceSelect>
+      {query || side !== "all" ? <button type="button" onClick={() => { setQuery(""); setSide("all"); searchRef.current?.focus(); }}>{i18nCopy(zh, "copy.components_finance_PositionsView.018")}</button> : null}
     </div> : null}
-    {loading && !positions.length ? <p className={styles.empty} role="status">{zh ? "正在加载仓位…" : "Loading positions…"}</p> : !rows.length ? <p className={styles.empty}>{query || side !== "all" ? (zh ? "没有匹配的仓位，请调整筛选。" : "No matching positions. Adjust your filters.") : error ? (zh ? "仓位暂不可用，不代表已清仓。" : "Positions unavailable, not a confirmed empty account.") : (zh ? "此范围没有已记录的持仓。" : "No positions recorded in this scope.")}</p> : <>
-      <div className={styles.columns} aria-hidden><span>{zh ? "市场 / 方向" : "Market / Side"}</span><span className="text-right">{zh ? "数量" : "Size"}</span><span className="text-right">{zh ? "开仓 / 标记价" : "Entry / Mark"}</span><span className="text-right">{zh ? "未实现盈亏 · USD" : "Unrealized P&L · USD"}</span></div>
+    {loading && !positions.length ? <p className={styles.empty} role="status">{i18nCopy(zh, "copy.components_finance_PositionsView.019")}</p> : !rows.length ? <p className={styles.empty}>{query || side !== "all" ? (i18nCopy(zh, "copy.components_finance_PositionsView.020")) : error ? (i18nCopy(zh, "copy.components_finance_PositionsView.021")) : (i18nCopy(zh, "copy.components_finance_PositionsView.022"))}</p> : <>
+      <div className={styles.columns} aria-hidden><span>{i18nCopy(zh, "copy.components_finance_PositionsView.023")}</span><span className="text-right">{i18nCopy(zh, "copy.components_finance_PositionsView.024")}</span><span className="text-right">{i18nCopy(zh, "copy.components_finance_PositionsView.025")}</span><span className="text-right">{i18nCopy(zh, "copy.components_finance_PositionsView.026")}</span></div>
       {rows.map((p, i) => <details className={styles.position} key={positionKeys.get(p)} data-testid="position-row">
-        <summary className={styles.row} aria-label={`${p.market || (zh ? "未知市场" : "Unknown market")} ${dir(p)}`}>
-          <span><strong>{p.market || (zh ? "市场未提供" : "Market not provided")}</strong><span className={styles.sub}>{dir(p)} <span className="ml-2">{p.account_id || (zh ? "账户未提供" : "Account not provided")}</span></span></span>
-          <span data-secondary>{financeNumber(p.size_base ?? p.size, locale)}<span className={styles.sub}>{zh ? "报告数量" : "Reported size"}</span></span>
+        <summary className={styles.row} aria-label={`${p.market || (i18nCopy(zh, "copy.components_finance_PositionsView.027"))} ${dir(p)}`}>
+          <span><strong>{p.market || (i18nCopy(zh, "copy.components_finance_PositionsView.028"))}</strong><span className={styles.sub}>{dir(p)} <span className="ml-2">{p.account_id || (i18nCopy(zh, "copy.components_finance_PositionsView.029"))}</span></span></span>
+          <span data-secondary>{financeNumber(p.size_base ?? p.size, locale)}<span className={styles.sub}>{i18nCopy(zh, "copy.components_finance_PositionsView.030")}</span></span>
           <span data-secondary>{financeNumber(p.avg_entry_price ?? p.avg_price, locale)}<span className={styles.sub}>{financeNumber(p.mark_price, locale)}</span></span>
-          <span className={financeTone(p.unrealized_pnl_usd)}>{financeMoney(p.unrealized_pnl_usd, locale, true)}<span className={styles.sub}>{zh ? "未实现盈亏" : "Unrealized P&L"}</span></span><ChevronRightIcon size={13} />
+          <span className={financeTone(p.unrealized_pnl_usd)}>{financeMoney(p.unrealized_pnl_usd, locale, true)}<span className={styles.sub}>{i18nCopy(zh, "copy.components_finance_PositionsView.031")}</span></span><ChevronRightIcon size={13} />
         </summary>
         <dl className={styles.detail}>{[
-          [zh ? "持仓数量" : "Position size", financeNumber(p.size_base ?? p.size, locale)],
-          [zh ? "开仓均价" : "Average entry", financeNumber(p.avg_entry_price ?? p.avg_price, locale)],
-          [zh ? "标记价格" : "Mark price", financeNumber(p.mark_price, locale)],
-          [zh ? "名义价值 · USD" : "Notional · USD", financeMoney(p.notional_usd, locale)],
-          [zh ? "市值 · USD" : "Market value · USD", financeMoney(p.market_value_usd, locale)],
-          [zh ? "该仓位已实现盈亏" : "Position realized P&L", financeMoney(p.realized_pnl_usd, locale, true)],
+          [i18nCopy(zh, "copy.components_finance_PositionsView.032"), financeNumber(p.size_base ?? p.size, locale)],
+          [i18nCopy(zh, "copy.components_finance_PositionsView.033"), financeNumber(p.avg_entry_price ?? p.avg_price, locale)],
+          [i18nCopy(zh, "copy.components_finance_PositionsView.034"), financeNumber(p.mark_price, locale)],
+          [i18nCopy(zh, "copy.components_finance_PositionsView.035"), financeMoney(p.notional_usd, locale)],
+          [i18nCopy(zh, "copy.components_finance_PositionsView.036"), financeMoney(p.market_value_usd, locale)],
+          [i18nCopy(zh, "copy.components_finance_PositionsView.037"), financeMoney(p.realized_pnl_usd, locale, true)],
         ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-          <div><dt>{zh ? "模式" : "Mode"}</dt><dd>{modes[p.account_id] === "live" || modes[p.account_id] === "paper" ? <ModePill mode={modes[p.account_id]} /> : modes[p.account_id] || (zh ? "未提供" : "Not provided")}</dd></div>
-          <div><dt>{zh ? "策略归属" : "Strategy attribution"}</dt><dd>{p.strategy_id || (zh ? "未提供，不能推断" : "Not provided")}</dd></div>
+          <div><dt>{i18nCopy(zh, "copy.components_finance_PositionsView.038")}</dt><dd>{modes[p.account_id] === "live" || modes[p.account_id] === "paper" ? <ModePill mode={modes[p.account_id]} /> : modes[p.account_id] || (i18nCopy(zh, "copy.components_finance_PositionsView.039"))}</dd></div>
+          <div><dt>{i18nCopy(zh, "copy.components_finance_PositionsView.040")}</dt><dd>{p.strategy_id || (i18nCopy(zh, "copy.components_finance_PositionsView.041"))}</dd></div>
         </dl>
-        <div className="flex flex-wrap items-center gap-2 px-3 pb-3"><FinanceReview position={p} mode={modes[p.account_id]} />{p.account_id ? <Link className={styles.action} href={`/accounts/${encodeURIComponent(p.account_id)}`}>{zh ? "查看账户" : "View account"}</Link> : null}</div>
+        <div className="flex flex-wrap items-center gap-2 px-3 pb-3"><FinanceReview position={p} mode={modes[p.account_id]} />{p.account_id ? <Link className={styles.action} href={`/accounts/${encodeURIComponent(p.account_id)}`}>{i18nCopy(zh, "copy.components_finance_PositionsView.042")}</Link> : null}</div>
       </details>)}
     </>}
   </section>;

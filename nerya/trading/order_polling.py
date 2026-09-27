@@ -177,6 +177,28 @@ def adopt_venue_order(
     from a lookup failure (a source raised — its answer was unknown).
     """
 
+    if callable(getattr(connector,'get_order_by_client_id',None)):
+        try:
+            ack=connector.get_order_by_client_id(market=order.market,client_order_id=order.client_order_id)
+            if ack.order_id:
+                tracker.mark_submitted(order.order_id,exchange_order_id=ack.order_id)
+                return ack
+        except Exception as exc:
+            if query_state is not None:query_state.update(errors=[str(exc)],queried=1)
+            return None
+    if (order.meta.get("order_query") or getattr(connector, "exchange_id", None) == "hyperliquid") and hasattr(connector, "get_order"):
+        try:
+            client_id = connector.venue_client_order_id(order.client_order_id) if hasattr(connector, "venue_client_order_id") else order.client_order_id
+            ack = connector.get_order(market=order.market, order_id=client_id,
+                query_params={**(order.meta.get("order_query") or {}), "clientOrderId": client_id})
+            if getattr(ack, "order_id", None):
+                tracker.mark_submitted(order.order_id, exchange_order_id=ack.order_id)
+                return ack
+        except Exception as exc:
+            if query_state is not None:
+                query_state.update({"errors": [str(exc)], "queried": 1})
+            return None
+
     def _sources() -> tuple[list[Any], list[Any]]:
         errors: list[str] = []
         open_orders = _fetch_list(connector, "fetch_open_orders", errors=errors)
@@ -189,7 +211,7 @@ def adopt_venue_order(
             )
         return (open_orders or []) + (closed_orders or []), trades or []
 
-    client_id = order.client_order_id
+    client_id = connector.venue_client_order_id(order.client_order_id) if hasattr(connector, "venue_client_order_id") else order.client_order_id
 
     # 1 + 2. Resting open orders first, then closed orders —
     # instantly-filled market orders never show up in open orders, so
@@ -410,6 +432,7 @@ def _safe_get_order(
     *,
     market: str,
     order_id: str,
+    query_params: dict[str, Any] | None = None,
 ):
     """Call ``connector.get_order`` with a tiny shim that returns
     ``(ack, error)`` instead of raising. Keeps the poll loop linear.
@@ -417,7 +440,8 @@ def _safe_get_order(
     definitive venue not-founds from transport noise."""
 
     try:
-        return connector.get_order(market=market, order_id=order_id), None
+        return connector.get_order(market=market, order_id=order_id,
+            **({"query_params": query_params} if query_params else {})), None
     except NotImplementedError as exc:
         return None, ("unsupported", str(exc))
     except Exception as exc:
@@ -541,6 +565,27 @@ def poll_active_live_orders(
                 out.per_order.append(per)
                 continue
 
+            if order.meta.get("protects_rule"):
+                # The owning protection executor polls siblings together and
+                # cancels the other leg before it issues any local fallback.
+                out.skipped += 1
+                per["state"] = "owned_by_protection_executor"
+                out.per_order.append(per)
+                continue
+
+            if (order.state == "cancel_requested"
+                    or "cancel_requested" in (order.meta or {}).get("notes", [])):
+                from .cancellation import cancel_tracked_order
+                canceled = cancel_tracked_order(config, order.order_id, connector=connector)
+                per["state"] = canceled.get("state", "cancel_requested")
+                updated = tracker.get(order.order_id)
+                if updated.filled_size > order.filled_size:
+                    out.fills_applied += 1
+                if updated.is_terminal:
+                    out.terminal += 1
+                out.per_order.append(per)
+                continue
+
             if order.exchange_order_id is None and is_place_unknown_order(order):
                 # B1: the place outcome was ambiguous — try to adopt the
                 # venue order by client id, otherwise wait for a later
@@ -592,6 +637,7 @@ def poll_active_live_orders(
                     connector,
                     market=order.market,
                     order_id=order.exchange_order_id or order.order_id,
+                    query_params=order.meta.get("order_query"),
                 )
                 if err is not None:
                     kind, detail = err
@@ -629,6 +675,8 @@ def poll_active_live_orders(
             new_filled_delta = ack_filled - float(order.filled_size or 0.0)
             if new_filled_delta > 1e-12:
                 price_for_fill = ack_avg or order.avg_price or order.price or 0.0
+                if (getattr(ack,'raw',{}) or {}).get('prediction_market'):
+                    price_for_fill=(float(ack.raw['cumulative_notional'])-float(order.avg_price or 0)*float(order.filled_size))/new_filled_delta
                 # B2: ``ack_fee`` is the venue's *cumulative* order fee —
                 # only the not-yet-recorded increment may be added.
                 incremental_fee = max(0.0, ack_fee - float(order.fee_usd or 0.0))
@@ -656,6 +704,7 @@ def poll_active_live_orders(
                             "via": "background_poller",
                             "intent_id": order.intent_id,
                             "exchange_order_id": order.exchange_order_id,
+                            'fee_status':(getattr(ack,'raw',{}) or {}).get('fee_status','reported'),
                         },
                     )
                     if fill is not None:
@@ -691,6 +740,13 @@ def poll_active_live_orders(
                     )
                     per["state"] = "fill_replay"
 
+            from .executors.market_order import ensure_order_protection
+            try:
+                ensure_order_protection(config, tracker.get(order.order_id))
+            except Exception as exc:
+                out.errors += 1
+                tracker.annotate(order.order_id, f"protection_activation_failed:{exc}")
+                log.exception("protection activation failed for %s", order.order_id)
             terminal_status = _normalize_ack_status(ack)
             if terminal_status in TERMINAL_STATES:
                 tracker.update_state(order.order_id, terminal_status, ts=now)
@@ -708,7 +764,7 @@ def poll_active_live_orders(
                     _settle_reservation(
                         paths,
                         order.reservation_id,
-                        filled=(terminal_status == "filled"),
+                        filled=(terminal_status == "filled" or ack_filled > 0 or order.filled_size > 0),
                     )
                     per["reservation_settled"] = order.reservation_id
 

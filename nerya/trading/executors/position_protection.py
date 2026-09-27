@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from contextlib import closing
 from typing import Any, Literal
 
 from ...core.errors import IntentValidationError
@@ -30,6 +31,7 @@ from ..order_intents import (
 from ..position_book import PositionBook
 from ..protection_store import (
     ProtectionStore,
+    ProtectionTrigger,
     evaluate,
     validate_supported_specs,
 )
@@ -78,9 +80,15 @@ class PositionProtectionExecutor(Executor):
             return True
 
         store = ProtectionStore(self.paths)
-        rule = store.get_for_position(self.run.position_id or "") or _rule_from_config(
-            self.run.config_json or {}
-        )
+        rule = store.get(self.run.protection_id or "")
+        if rule is None:
+            rule = _rule_from_config(self.run.config_json or {})
+        if self.run.result_json.get("cancel_native_pending") and rule is not None:
+            if not self._sync_native(rule, None, cancel=True):
+                return False
+            store.set_status(rule.protection_id, "released")
+            self.transition("canceled", close_type="manual_cancel")
+            return True
         flatten_executor_id = str(
             (self.run.result_json or {}).get("flatten_executor_id") or ""
         ).strip()
@@ -90,16 +98,48 @@ class PositionProtectionExecutor(Executor):
                 rule,
                 flatten_executor_id=flatten_executor_id,
             )
-        if rule is None:
+        if rule is None or rule.status in ("released", "triggered", "failed"):
+            if rule is not None and not self._sync_native(rule, None, cancel=True):
+                return False
             self.transition("done", close_type="filled")
             return True
+        if rule.status == "pending":
+            return False
 
         book = PositionBook(self.paths)
         position = book.get_by_id(self.run.position_id or "")
-        if position is None or not position.is_open:
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        if (position is None or not position.is_open or share is None
+                or not share.is_open or share.position_id != position.position_id
+                or share.side != rule.side):
+            if not self._sync_native(rule, share, cancel=True):
+                return False
+            if rule.native.get("exit_trigger") and not self._cancel_entries(rule):
+                return False
+            # A cancellation can discover a final entry fill after a native
+            # stop flattened the prior share. Re-read on the next tick.
+            remaining = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+            if rule.native.get("exit_trigger") and remaining is not None and remaining.is_open:
+                if remaining.side != rule.side:
+                    store.set_status(rule.protection_id, "failed")
+                    self.store_result({"reason": "position_side_changed_during_native_exit"})
+                    self.transition("failed", close_type="failed")
+                    return True
+                if remaining.side == rule.side and remaining.position_id != rule.position_id:
+                    rule.position_id = remaining.position_id
+                    self.run.position_id = remaining.position_id
+                    store.upsert(rule)
+                    book.attach_protection(remaining.position_id, rule.protection_id)
+                return False
             store.set_status(rule.protection_id, "released")
             self.transition("done", close_type="filled")
             return True
+        if not self._sync_native(rule, share):
+            self.transition("working")
+            return False
+        if rule.native.get("exit_trigger") and not self.run.result_json.get("pending_trigger"):
+            self.store_result({"pending_trigger": asdict(ProtectionTrigger(
+                fired=True, kind=rule.native["exit_trigger"], close_pct=1.0, reason="native_exit_filled"))})
 
         # Mark price source. Prefer a live connector mark; fall back to
         # the position's stored mark, then entry price. A stale mark is
@@ -139,17 +179,40 @@ class PositionProtectionExecutor(Executor):
         if new_high != prior_high:
             self.run.result_json["high_water_mark"] = new_high
 
-        trigger = evaluate(
+        pending_trigger = self.run.result_json.get("pending_trigger")
+        trigger = ProtectionTrigger(**pending_trigger) if pending_trigger else evaluate(
             rule,
-            entry_price=position.avg_entry_price,
+            entry_price=share.avg_entry_share_price,
             current_price=current_price,
             side=rule.side,
-            opened_at=position.opened_at,
+            opened_at=share.opened_at,
             high_water_mark=new_high,
         )
         if not trigger.fired:
             self.transition("working")
             return False
+        # Preserve the trigger while pending entry cancellation converges.
+        # Otherwise a price rebound could leave the original stop abandoned.
+        self.store_result({"pending_trigger": asdict(trigger)})
+        from ...core.config import load_config
+        runtime_config = load_config(self.paths.root)
+        if not self._cancel_entries(rule):
+            return False
+        # Cancellation may have observed additional fills. Exit the current
+        # strategy share, not the stale size from the start of this tick.
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        if share is None or not share.is_open or share.side != rule.side:
+            store.set_status(rule.protection_id, "released")
+            self.transition("done", close_type="filled")
+            return True
+        if not self._sync_native(rule, share, cancel=True):
+            self.store_result({"reason": "awaiting_native_protection_cancellation"})
+            return False
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        if share is None or not share.is_open:
+            store.set_status(rule.protection_id, "triggered", triggered_kind=trigger.kind)
+            self.transition("done", close_type=_trigger_to_close_type(trigger.kind))
+            return True
 
         # B8(a): remember which partial level fired so the flattener
         # monitor can re-arm the rule for the remaining position size
@@ -171,10 +234,10 @@ class PositionProtectionExecutor(Executor):
         from .orchestrator import ExecutorOrchestrator
 
         flatten_side = "sell" if rule.side == "long" else "buy"
-        close_size = abs(position.size_base) * float(trigger.close_pct or 1.0)
+        close_size = abs(share.size_share_base) * float(trigger.close_pct or 1.0)
         candidate = OrderCandidate(
             account_id=position.account_id,
-            strategy_id=position.strategy_id,
+            strategy_id=rule.strategy_id,
             market=position.market,
             side=flatten_side,
             order_type="market",
@@ -189,6 +252,7 @@ class PositionProtectionExecutor(Executor):
                 flattener = orchestrator.create_market_order(
                     candidate=candidate,
                     position_id=position.position_id,
+                    executor_id=f"exc_exit_{rule.protection_id}_{len(self.run.result_json.get('partial_exits_executed') or [])}",
                 )
                 orchestrator.step_executor(flattener)
             finally:
@@ -317,12 +381,13 @@ class PositionProtectionExecutor(Executor):
         self.store_result({
             "partial_exits_executed": executed,
             "pending_partial": None,
+            "pending_trigger": None,
             "flatten_executor_id": None,
         })
 
         book = PositionBook(self.paths)
-        position = book.get_by_id(self.run.position_id or "")
-        remaining = abs(float(position.size_base or 0.0)) if position is not None else 0.0
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        remaining = abs(share.size_share_base) if share is not None and share.is_open else 0.0
 
         # Drop the executed level from the rule so ``evaluate`` cannot
         # refire it against the remaining size.
@@ -356,6 +421,37 @@ class PositionProtectionExecutor(Executor):
         })
         self.transition("working")
         return False
+
+    def _cancel_entries(self, rule) -> bool:
+        from ...core.config import load_config
+        from ..cancellation import cancel_tracked_order
+        from ..order_tracker import OrderTracker
+        config = load_config(self.paths.root)
+        with closing(OrderTracker(self.paths)) as tracker:
+            entries = [order for order in tracker.active_orders(account_id=rule.account_id)
+                       if order.strategy_id == rule.strategy_id and order.market == rule.market
+                       and not order.reduce_only]
+            for order in entries:
+                cancel_tracked_order(config, order.order_id, strategy_id=rule.strategy_id)
+            if any(not tracker.get(order.order_id).is_terminal for order in entries):
+                self.store_result({"reason": "awaiting_entry_cancellation"})
+                self.transition("working")
+                return False
+        return True
+
+    def _sync_native(self, rule, share, *, cancel=False) -> bool:
+        if not rule.native.get("routes") and not rule.native.get("generations"):
+            return True
+        from ...core.config import load_config
+        from ..native_protection import sync_native
+        try:
+            ready = sync_native(load_config(self.paths.root), rule, share, cancel=cancel)
+            self.store_result({"native_protection": dict(rule.native)})
+            return ready
+        except Exception as exc:
+            self.store_result({"native_protection_error": str(exc)})
+            self._journal_degraded({"reason": "native_protection_error", "error": str(exc)})
+            return False
 
     def _journal_degraded(self, note: dict[str, Any]) -> None:
         """Best-effort degraded-mode note into the protection journal."""
@@ -401,6 +497,12 @@ class PositionProtectionExecutor(Executor):
             return 0.0
 
     def on_cancel(self) -> None:
+        store = ProtectionStore(self.paths)
+        rule = store.get(self.run.protection_id or "")
+        if rule is not None and not self._sync_native(rule, None, cancel=True):
+            self.transition("working")
+            self.store_result({"cancel_native_pending": True})
+            return
         flatten_executor_id = str(
             (self.run.result_json or {}).get("flatten_executor_id") or ""
         ).strip()
@@ -455,6 +557,7 @@ def _rule_from_config(config_json: dict[str, Any]) -> ProtectionRule | None:
         market=str(raw.get("market") or ""),
         side=str(raw.get("side") or "long"),  # type: ignore[arg-type]
         mode=str(raw.get("mode") or "soft_runtime"),  # type: ignore[arg-type]
+        native=dict(raw.get("native") or {}),
         stop_loss=StopLossSpec(**sl) if isinstance(sl, dict) else None,
         take_profit=TakeProfitSpec(**tp) if isinstance(tp, dict) else None,
         time_limit_sec=raw.get("time_limit_sec"),

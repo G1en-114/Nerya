@@ -242,6 +242,9 @@ def _callback(client, payload):
         return {"ok": False, "error": "ignored", "reason": "callback_data not recognized"}
 
     rec = _find_record(client, aid)
+    resolved_record = _service(client).resolved(aid) if rec is None else None
+    if resolved_record and str(resolved_record.get("kind") or "") not in {"trade_intent", "wallet_swap"}:
+        rec = resolved_record
     if rec is None:
         return {"ok": False, "error": "approval not found", "approval_id": aid}
 
@@ -264,6 +267,17 @@ def _callback(client, payload):
             req_actor,
             operator_authorized=operator_authorized,
         )
+
+    if resolved_record and action != "details":
+        if not actor_owns(actor_id, aid):
+            return {"ok": False, "error": "approval owner mismatch", "approval_id": aid}
+        state = resolved_record.get("state")
+        expected = {"approve": "approved", "reject": "rejected"}.get(action)
+        if state != expected:
+            return {"ok": False, "error": "approval already resolved or expired", "approval_id": aid, "state": state}
+        resume = _publish_approval_resolution(aid, state=state, record=resolved_record, config=client.config)
+        return {"ok": True, "duplicate": True, "approval_id": aid, "approval_ids": [aid],
+                "state": state, "action": action, "approval_kind": rec.get("kind"), "resume": resume}
 
     if action == "details":
         if not actor_owns(actor_id, aid):

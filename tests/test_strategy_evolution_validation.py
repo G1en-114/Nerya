@@ -461,6 +461,14 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
     paths = WorkspacePaths(tmp_path)
     config = Config(paths=paths, data={"runtime": {"mock_mode": True}})
     pkg = _seed_strategy(paths)
+    from nerya.memory.runtime import MemoryRuntime
+    MemoryRuntime(config, strategy_id="alpha", workflow_id="evolution").remember(
+        category="learning", content="Return review ALPHA_REVIEW_SECRET requires held-out validation.")
+    MemoryRuntime(config, strategy_id="alpha", workflow_id="execution").remember(
+        category="learning", content="Return review ALPHA_EXECUTION_SECRET must stay in execution.")
+    MemoryRuntime(config, strategy_id="beta", workflow_id="evolution").remember(
+        category="learning", content="Return review BETA_REVIEW_SECRET must never reach Alpha.")
+
     jsonl.append(
         paths.evolution_capsules,
         {
@@ -550,6 +558,10 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
 
     assert envelope["selected_assets"]["genes"][0]["id"] == "gene_nerya_strategy_drawdown_review"
     payload = captured["payload"]
+    assert "ALPHA_REVIEW_SECRET" in payload["memory_context"]
+    assert "ALPHA_EXECUTION_SECRET" not in payload["memory_context"]
+    assert "BETA_REVIEW_SECRET" not in payload["memory_context"]
+
     assert "Strategy tuning materialization contract" in payload["__team_instructions"]
     assert payload["materializable_output_contract"]["version"] == (
         "strategy_tuning_materializable_output_v1"

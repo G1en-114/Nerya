@@ -53,7 +53,7 @@ SnapshotHealth = Literal["ok", "degraded", "stale", "auth_error", "rate_limited"
 # threshold per account is read from
 # ``trading.snapshot.max_age_seconds`` in nerya.yml.
 DEFAULT_MAX_AGE_S = 60
-_USD_STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "USD", "TUSD", "DAI"}
+_USD_STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "USD", "TUSD", "DAI", "PUSD"}
 
 
 @dataclass
@@ -87,7 +87,7 @@ class AccountSnapshot:
         usd = 0.0
         for asset, amount in self.free_by_asset.items():
             a = (asset or "").upper()
-            if a in ("USDT", "USDC", "BUSD", "FDUSD", "USD", "TUSD", "DAI"):
+            if a in _USD_STABLES:
                 usd += float(amount or 0)
         return usd
 
@@ -570,7 +570,8 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
         error_meta = redact_dict({"error": str(exc)})
         balances = []
     except Exception as exc:  # pragma: no cover — defensive
-        log.warning("live snapshot for %s degraded: %s", profile.id, exc)
+        log.warning("live snapshot for %s degraded: %s", profile.id,
+                    redact_dict({"error": str(exc)})["error"])
         health = "degraded"
         error_meta = redact_dict({"error": str(exc)})
         balances = []
@@ -598,6 +599,11 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
 
     latency = int((time.perf_counter() - started) * 1000)
 
+    if health=='ok' and getattr(conn,'kind','')=='prediction_market':
+        try:nav_usd+=conn.get_positions_value()
+        except Exception as exc:
+            health='degraded';error_meta['positions_error']=str(exc)
+
     # Derivatives truth: pull real margin used, unrealised PnL, and open
     # order notional from the venue. Previously these were hardcoded to
     # 0, which silently hid all leveraged exposure. ``fetch_positions`` /
@@ -618,7 +624,8 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
                 if px > 0 and sz > 0:
                     open_order_notional_usd += px * sz
     except Exception as exc:  # pragma: no cover — defensive
-        log.warning("live snapshot derivatives fetch failed for %s: %s", profile.id, exc)
+        log.warning("live snapshot derivatives fetch failed for %s: %s", profile.id,
+                    redact_dict({"error": str(exc)})["error"])
 
     snap = AccountSnapshot(
         snapshot_id=_new_snapshot_id(),
@@ -758,6 +765,9 @@ def _wallet_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot
             else:
                 # Fallback: walk the operator-supplied address map
                 # one row at a time.
+                if not balance_specs:
+                    health='degraded'
+                    error_meta['reason']='wallet_balance_map_missing'
                 for spec in balance_specs:
                     if not isinstance(spec, dict):
                         continue
@@ -769,6 +779,8 @@ def _wallet_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot
                         or token.upper()
                     )
                     if not address:
+                        health='degraded'
+                        error_meta['reason']='wallet_balance_address_missing'
                         continue
                     try:
                         bal = provider.get_balance(

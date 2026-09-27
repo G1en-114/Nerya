@@ -29,25 +29,38 @@ test.describe("F — Self-evolution", () => {
     expect(newOnes).toHaveLength(0);
   });
 
-  test("F4 — skill scaffolding lands in pending, never live", async ({
+  test("F4 — skill save applies directly without creating a proposal", async ({
     page,
     openChat,
     chatSend,
     api,
   }) => {
+    const before = await api.get<{ proposals: { id: string }[] }>(
+      "/evolution/proposals?kind=skill_proposal&limit=50",
+    );
+    const beforeIds = new Set((before.proposals ?? []).map((p) => p.id));
     await openChat();
     await chatSend(
       page,
-      "我经常要查 Glassnode 链上数据，请帮我提案一个 quick-glassnode skill，先别 approve。",
+      "我经常要查 Glassnode 链上数据，请创建一个 quick-glassnode skill，直接保存并生效。",
       { timeoutMs: 180_000 },
     );
-    const r = await api.get<{ proposals: { id: string; kind: string }[] }>(
-      "/evolution/proposals?kind=skill_proposal&limit=10",
+    const catalog = await api.get<{
+      skills: { id: string; enabled: boolean }[];
+      enabled_revision: string;
+    }>(
+      "/skills/catalog?scope=workspace&query=glassnode&limit=50",
     );
-    const ours = (r.proposals ?? []).find((p) =>
-      JSON.stringify(p).toLowerCase().includes("glassnode"),
+    const ours = (catalog.skills ?? []).find((skill) =>
+      skill.id.toLowerCase().includes("glassnode"),
     );
-    expect(ours, "glassnode skill_proposal missing").toBeTruthy();
+    expect(ours, "saved glassnode Skill missing").toBeTruthy();
+    expect(ours?.enabled).toBe(true);
+
+    const after = await api.get<{ proposals: { id: string }[] }>(
+      "/evolution/proposals?kind=skill_proposal&limit=50",
+    );
+    expect((after.proposals ?? []).filter((p) => !beforeIds.has(p.id))).toHaveLength(0);
   });
 
   test("F7 — risk-limit edits are rejected (protected scope)", async ({

@@ -59,3 +59,4 @@ workspace/approvals/
 workspace/artifacts/
 .idea/
 .codegraph/
+/release-artifacts/

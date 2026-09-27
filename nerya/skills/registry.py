@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import hashlib
+import json
 from typing import Any, Callable
 
 from ..core import yaml_io
 from ..core.errors import SkillNotFoundError
-from .manifest import ActionSpec, SkillManifest
+from .manifest import ActionSpec, SkillManifest, _slugify
 from .discovery import catalog_ids, catalog_parent
 
 
@@ -37,9 +39,9 @@ def _enabled_ok(skill_id: str, enabled: set[str] | None) -> bool:
 
     if enabled is None:
         return True
-    if skill_id in enabled:
-        return True
-    return any(skill_id.startswith(f"{parent}.") for parent in enabled)
+    skill_id = _slugify(skill_id)
+    names = {_slugify(str(name)) for name in enabled if str(name).strip()}
+    return skill_id in names or any(skill_id.startswith(f"{parent}.") for parent in names)
 
 
 @dataclass
@@ -73,14 +75,19 @@ class SkillEntry:
 class SkillRegistry:
     def __init__(self) -> None:
         self.by_id: dict[str, SkillEntry] = {}
+        self.definitions: list[SkillEntry] = []
 
     def register(self, entry: SkillEntry) -> None:
         self.by_id[entry.manifest.id] = entry
 
     def get(self, skill_id: str) -> SkillEntry:
-        if skill_id not in self.by_id:
-            raise SkillNotFoundError(skill_id)
-        return self.by_id[skill_id]
+        if skill_id in self.by_id:
+            return self.by_id[skill_id]
+        canonical = _slugify(skill_id)
+        for entry in self.by_id.values():
+            if canonical == _slugify(entry.manifest.id):
+                return entry
+        raise SkillNotFoundError(skill_id)
 
     def list(self) -> list[SkillEntry]:
         """All enabled entries, including exact-name compatibility playbooks."""
@@ -95,139 +102,89 @@ class SkillRegistry:
         )
         return [e for e in entries if e.manifest.id in visible]
 
-    # --- loading ---
+    @property
+    def catalog_generation(self) -> str:
+        """Content token shared by management, Composer and live tool indexes."""
+        return catalog_generation(self.list())
+
     @classmethod
-    def load_builtin(cls, workspace_paths=None, *, config=None) -> "SkillRegistry":
-        """Load every shipped + user-installed skill into a fresh registry.
+    def load_builtin(cls, workspace_paths=None, *, config=None,
+                     include_disabled: bool = False) -> "SkillRegistry":
+        """One resolver: workspace > installed > home > builtin.
 
-        Order of discovery:
-
-        1. ``nerya/skills/builtin/**/SKILL.md`` — the Anthropic-spec
-           builtins shipped with the runtime, including grouped
-           namespaces such as ``builtin/finance/<vertical>/<skill>/``.
-        2. ``workspace/skills/installed/<id>/SKILL.md`` — user-installed
-           skills (managed by :mod:`nerya.skills.installer`).
-        3. ``workspace/skills/<id>/SKILL.md`` and ``~/.nerya/skills/<id>/
-           SKILL.md`` — out-of-tree user skills.
-        4. Top-level ``*.md`` under any of the user roots — single-file
-           procedural skills (one ``run`` action synthesised by
-           :mod:`nerya.skills.procedural`).
-
-        No skill directory is auto-imported: every skill carries a
-        markdown playbook the agent reads, and any executable scripts
-        are invoked through ``run_shell``. ``actions == {}`` for every
-        such skill; only procedural single-file skills register a
-        ``run`` handler.
-
-        Skill selection is based on the standard ``name`` and
-        ``description`` metadata. Integration availability is reported by
-        the selected skill or tool when it runs; it does not hide the skill
-        from discovery.
+        All candidates remain available to the operator catalog; only effective
+        enabled definitions enter the runtime. Loading never imports scripts.
         """
-
-        reg = cls()
-        skills_root = Path(__file__).parent
-        builtin_root = skills_root / "builtin"
-        enabled: set[str] | None = None
+        roots = [(Path(__file__).parent / "builtin", "builtin")]
         if workspace_paths is not None:
-            doc = yaml_io.load(workspace_paths.skills_enabled, default={}) or {}
-            if isinstance(doc.get("enabled"), list):
-                enabled = {
-                    str(item).strip()
-                    for item in doc["enabled"]
-                    if str(item).strip()
-                }
-
-        # 1. Shipped Anthropic-spec builtins.
-        if builtin_root.exists():
-            for _d, md in _walk_skill_dirs(builtin_root):
-                try:
-                    manifest = SkillManifest.from_skill_md(md)
-                except Exception:
-                    continue
-                manifest.source = "builtin"
-                if not _enabled_ok(manifest.id, enabled):
-                    continue
-                reg.register(SkillEntry(
-                    manifest=manifest, module=None, actions={},
-                ))
-
-        if workspace_paths is None:
-            return reg
-
-        # 2. User-installed skills under workspace/skills/installed/.
-        installed_root = workspace_paths.skills_installed
-        if installed_root.exists():
-            for d in sorted(installed_root.iterdir()):
-                if not d.is_dir():
-                    continue
-                md = d / "SKILL.md"
-                if md.exists():
-                    try:
-                        manifest = SkillManifest.from_skill_md(md)
-                    except Exception:
-                        # Fall through to a procedural single-file load
-                        # below if the structured manifest fails.
-                        manifest = None
-                    if manifest is not None:
-                        manifest.source = "workspace_installed"
-                        if _enabled_ok(manifest.id, enabled):
-                            reg.register(SkillEntry(
-                                manifest=manifest, module=None, actions={},
-                            ))
-                            continue
-                    _register_procedural(reg, md, enabled=enabled, source="workspace_installed")
-
-        # 3 + 4. Additional user roots (workspace/skills/ + ~/.nerya/skills/).
-        for extra_root in _user_skill_roots(workspace_paths):
-            if not extra_root.exists():
-                continue
-            # Top-level SKILL.md files = procedural single-file skills.
-            for md in sorted(extra_root.glob("*.md")):
-                if md.name.lower() == "skill.md":
-                    _register_procedural(
-                        reg,
-                        md,
-                        enabled=enabled,
-                        source=(
-                            "workspace" if extra_root == workspace_paths.skills else "user_home"
-                        ),
-                    )
-            # Each subfolder may carry SKILL.md at *any* nesting depth, so
-            # operators can group skills in namespaces such as
-            # ``workspace/skills/finance/private_equity/ic_memo/SKILL.md``.
-            # ``_walk_skill_dirs`` yields one ``(skill_dir, SKILL.md)`` per
-            # discovered skill and never descends into a skill's own asset
-            # subtree (``references/``, ``scripts/``, ``tests/``, …).
-            for _d, md in _walk_skill_dirs(extra_root):
-                try:
-                    manifest = SkillManifest.from_skill_md(md)
-                except Exception:
-                    manifest = None
-                if manifest is not None:
-                    manifest.source = (
-                        "workspace" if extra_root == workspace_paths.skills else "user_home"
-                    )
-                    if (
-                        manifest.source == "user_home"
-                        and manifest.id in reg.by_id
-                        and reg.by_id[manifest.id].manifest.source == "workspace"
-                    ):
-                        continue
-                    if _enabled_ok(manifest.id, enabled):
-                        reg.register(SkillEntry(
-                            manifest=manifest, module=None, actions={},
-                        ))
-                        continue
-                _register_procedural(
-                    reg,
-                    md,
-                    enabled=enabled,
-                    source=(
-                        "workspace" if extra_root == workspace_paths.skills else "user_home"
-                    ),
-                )
+            user_roots = _user_skill_roots(workspace_paths)
+            roots += [(root, "user_home") for root in user_roots[1:]]
+            roots += [(workspace_paths.skills_installed, "workspace_installed"),
+                      (workspace_paths.skills, "workspace")]
+        reg = cls()
+        for root, source in roots:
+            reg.definitions.extend(discover_entries(root, source=source))
+        enabled = None if include_disabled else enabled_skill_names(workspace_paths)
+        for entry in reg.definitions:
+            if _enabled_ok(entry.manifest.id, enabled):
+                reg.register(entry)
         return reg
+
+
+def enabled_skill_names(workspace_paths) -> set[str] | None:
+    if workspace_paths is None:
+        return None
+    doc = yaml_io.load(workspace_paths.skills_enabled, default={}) or {}
+    names = doc.get("enabled") if isinstance(doc, dict) else None
+    return {str(name).strip() for name in names if str(name).strip()} if isinstance(names, list) else None
+
+
+def catalog_generation(entries) -> str:
+    rows = sorted((e.manifest.id, e.manifest.source, str(e.manifest.path),
+                   e.manifest.entry_file, e.manifest.revision) for e in entries)
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
+
+
+def load_entry(md: Path, *, source: str = "workspace", procedural: bool = False) -> SkillEntry | None:
+    """Parse once for registry, standalone native callers and management."""
+    if not md.is_file() or md.is_symlink() or md.parent.is_symlink():
+        return None
+    try:
+        if md.name == "SKILL.md" and not procedural:
+            manifest = SkillManifest.from_skill_md(md)
+            manifest.source = source
+            return SkillEntry(manifest=manifest, module=None)
+    except Exception:
+        if source == "builtin":
+            return None
+    if source == "builtin":
+        return None
+    from .procedural import load_procedural_skill, make_run_handler
+    try:
+        skill = load_procedural_skill(md)
+        if skill is None:
+            return None
+        manifest = skill.manifest
+        manifest.id = _slugify(manifest.id)
+        manifest.source = source
+        manifest.entry_file = md.name
+        manifest.instructions = skill.body
+        manifest.revision = hashlib.sha256(md.read_bytes()).hexdigest()
+        return SkillEntry(manifest=manifest, module=None, actions={"run": make_run_handler(
+            skill.body, manifest.id, manifest.title, list(manifest.tags or []),
+        )})
+    except (OSError, UnicodeError):
+        return None
+
+
+def discover_entries(root: Path, *, source: str = "workspace") -> list[SkillEntry]:
+    if not root.is_dir() or root.is_symlink():
+        return []
+    files = ([(md, True) for md in sorted(root.glob("*.md"))]
+             if source != "builtin" else [])
+    files += [(md, False) for _, md in _walk_skill_dirs(root)]
+    return [entry for md, procedural in files
+            if (entry := load_entry(md, source=source, procedural=procedural)) is not None]
 
 
 def list_bundled_skill_names() -> list[str]:
@@ -304,7 +261,7 @@ def _walk_skill_dirs(root: Path):
     for entry in sorted(root.iterdir()):
         if not entry.is_dir() or entry.is_symlink():
             continue
-        if entry.name.startswith(".") or entry.name == "installed":
+        if entry.name.startswith(".") or entry.name in {"installed", "pending", "rejected"}:
             continue
         if entry.name in _SKILL_ASSET_DIRS:
             continue
@@ -314,39 +271,3 @@ def _walk_skill_dirs(root: Path):
         # Recurse either way: a skill directory may host nested
         # sub-skills in its non-asset subdirectories.
         yield from _walk_skill_dirs(entry)
-
-
-def _register_procedural(
-    reg: "SkillRegistry",
-    md_path: Path,
-    *,
-    enabled: set[str] | None,
-    source: str = "procedural",
-) -> None:
-    """Load a procedural ``SKILL.md`` and register it with a synthetic ``run`` handler."""
-
-    from .procedural import load_procedural_skill, make_run_handler
-
-    skill = load_procedural_skill(md_path)
-    if skill is None:
-        return
-    if enabled is not None and skill.manifest.id not in enabled:
-        return
-    skill.manifest.source = source
-    if (
-        source == "user_home"
-        and skill.manifest.id in reg.by_id
-        and reg.by_id[skill.manifest.id].manifest.source == "workspace"
-    ):
-        return
-    handler = make_run_handler(
-        skill.body,
-        skill.manifest.id,
-        skill.manifest.title,
-        list(skill.manifest.tags or []),
-    )
-    reg.register(SkillEntry(
-        manifest=skill.manifest,
-        module=None,
-        actions={"run": handler},
-    ))

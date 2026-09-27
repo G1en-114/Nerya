@@ -1,4 +1,5 @@
 "use client";
+import { ScriptExplanation } from "../../../components/workflows/ScriptExplanation";
 
 /**
  * Strategy detail page (`/strategies/[id]`).
@@ -31,7 +32,7 @@
  */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 
@@ -71,6 +72,8 @@ import { KeyValueEditor } from "../../../components/KeyValueEditor";
 import { StrategyBindCard } from "../../../components/strategies/StrategyBindCard";
 import { StrategyHistoryCard } from "../../../components/strategies/StrategyHistoryCard";
 import { StrategyPerformanceCard } from "../../../components/strategies/StrategyPerformanceCard";
+import { StrategyMarketChart } from "../../../components/strategies/StrategyMarketChart";
+import { strategyLanding } from "../../../lib/strategyLanding";
 import { StrategyEvolutionCard } from "../../../components/strategies/StrategyEvolutionCard";
 import { StrategyAgentSessionsCard } from "../../../components/strategies/StrategyAgentSessionsCard";
 import { StrategyPromotionCard } from "../../../components/strategies/StrategyPromotionCard";
@@ -136,6 +139,8 @@ export default function StrategyDetailPage({
   const [activeTab, setActiveTab] =
     useState<StrategyDetailTab>("workflow");
   const [workflowDirty, setWorkflowDirty] = useState(false);
+  const initializedStrategy = useRef("");
+  const refreshRequest = useRef(0);
   // Dirty tracking for the Files & Prompts editors — leaving the tab
   // (or the page) with unsaved edits asks for confirmation.
   const [promptsDirty, setPromptsDirty] = useState(false);
@@ -160,6 +165,7 @@ export default function StrategyDetailPage({
   }, []);
 
   async function refresh() {
+    const requestId = ++refreshRequest.current;
     setLoading(true);
     setError(null);
     try {
@@ -192,19 +198,28 @@ export default function StrategyDetailPage({
             }) as FilesEnvelope,
         ),
       ]);
+      if (requestId !== refreshRequest.current) return;
+      if (initializedStrategy.current !== strategyId) {
+        initializedStrategy.current = strategyId;
+        const requested = new URLSearchParams(window.location.search).get("tab");
+        setActiveTab(STRATEGY_DETAIL_TABS.includes(requested as StrategyDetailTab)
+          ? requested as StrategyDetailTab
+          : strategyLanding(d.strategy.status, !!w.runs?.runs?.length));
+      }
       setDetail(d);
       setWorkspace(w);
       setTuning(t);
       setFiles(f);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestId === refreshRequest.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (requestId === refreshRequest.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     void refresh();
+    return () => { refreshRequest.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyId]);
 
@@ -394,10 +409,10 @@ export default function StrategyDetailPage({
             ) : null}
 
             {activeTab === "performance" ? (
-              <StrategyPerformanceCard
-                strategyId={strategyId}
-                mode={detail.strategy.mode}
-              />
+              <div className="space-y-5" data-testid="strategy-runtime-details">
+                <StrategyPerformanceCard key={strategyId} strategyId={strategyId} mode={detail.strategy.mode} />
+                <StrategyMarketChart key={strategyId} markets={detail.strategy.markets || []} />
+              </div>
             ) : null}
 
             {activeTab === "agent_sessions" ? (
@@ -563,10 +578,10 @@ function StrategyDetailTabBar({
                   ? "border-brand-500/45 bg-brand-500/20 text-white"
                   : "border-transparent text-ink-300 hover:border-brand-500/15 hover:bg-brand-500/10",
               ].join(" ")}
-              title={tab === "workflow" ? text("编辑策略卡片、资源关系与复盘流程", "Edit strategy resources, connections and review workflows") : t(`tabs.${tab}.description`)}
+              title={tab === "workflow" ? text("copy.app_strategies_id_page.001") : t(`tabs.${tab}.description`)}
             >
               <div className="flex items-center gap-2">
-                <span className="text-[12px] font-semibold">{tab === "workflow" ? text("工作流", "Workflow") : t(`tabs.${tab}.label`)}</span>
+                <span className="text-[12px] font-semibold">{tab === "workflow" ? text("copy.app_strategies_id_page.002") : t(`tabs.${tab}.label`)}</span>
                 {badge !== null ? (
                   <span className="rounded-full border border-brand-500/20 px-1.5 py-0.5 text-[10px] text-ink-300">
                     {badge}
@@ -963,6 +978,7 @@ function StrategyFilesCard({
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const t = useTranslations("strategyDetail");
+  const wx = useTranslations("workflowExperience");
   const filtered = useMemo(
     () =>
       files.filter(
@@ -973,14 +989,14 @@ function StrategyFilesCard({
     [files],
   );
   const [activePath, setActivePath] = useState<string | null>(
-    filtered[0]?.rel_path ?? null,
+    filtered.find((file) => file.rel_path === "main.py")?.rel_path ?? filtered[0]?.rel_path ?? null,
   );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activePath && filtered.length) {
-      setActivePath(filtered[0].rel_path);
+      setActivePath(filtered.find((file) => file.rel_path === "main.py")?.rel_path ?? filtered[0].rel_path);
     }
     if (activePath && !filtered.some((f) => f.rel_path === activePath)) {
       setActivePath(filtered[0]?.rel_path ?? null);
@@ -1008,7 +1024,7 @@ function StrategyFilesCard({
     () => filtered.find((f) => f.rel_path === activePath) ?? null,
     [filtered, activePath],
   );
-  const draftBody = activePath ? (drafts[activePath] ?? "") : "";
+  const draftBody = activePath ? (drafts[activePath] ?? active?.content ?? "") : "";
   const original = active?.content ?? "";
   const dirty = activePath ? draftBody !== original : false;
 
@@ -1104,7 +1120,12 @@ function StrategyFilesCard({
             ) : active.error === "decode_failed" ? (
               <Empty label={t("unreadableFile")} />
             ) : (
+              <>
+              {active.rel_path.endsWith(".py") && <ScriptExplanation source={draftBody} />}
+              <details key={active.rel_path} open={active.rel_path.endsWith(".md")} className="mt-5">
+                <summary className="mb-3 cursor-pointer">{wx("code")}</summary>
               <textarea
+                aria-label={active.rel_path}
                 value={draftBody}
                 onChange={(e) =>
                   setDrafts((prev) => ({
@@ -1122,6 +1143,8 @@ function StrategyFilesCard({
                 rows={26}
                 spellCheck={false}
               />
+              </details>
+              </>
             )}
           </div>
         </div>

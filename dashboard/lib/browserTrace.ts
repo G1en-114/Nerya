@@ -1,7 +1,7 @@
 import type { LiveEvent, NativeBlockEnvelope } from './chat';
 
 export type BrowserCall = { id: string; operation: string; done: boolean; profileId?: string };
-export type BrowserVisual = { action?: string; url?: string; ts?: number; cursor?: { x: number; y: number } | null;
+export type BrowserVisual = { viewport?: { width: number; height: number }; action?: string; url?: string; ts?: number; cursor?: { x: number; y: number } | null;
   boxes?: { x: number; y: number; width: number; height: number }[] };
 export type BrowserTraceEvent = {
   seq: number; ts: number; kind: string; action?: string; index?: number;
@@ -14,7 +14,7 @@ export type BrowserTrace = {
   events: BrowserTraceEvent[]; cursor: number; storage_error?: boolean;
   frame_state?: string;
   visual?: BrowserVisual;
-  frame?: { frame_id: number; ts: number; image: string; url?: string; visual?: BrowserVisual; tabs?: BrowserTraceEvent['tabs'] } | null;
+  frame?: { frame_id: number; ts: number; image: string; viewport?: { width: number; height: number }; url?: string; visual?: BrowserVisual; tabs?: BrowserTraceEvent['tabs'] } | null;
 };
 
 const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -37,7 +37,7 @@ export function browserCalls(blocks: NativeBlockEnvelope[], events: LiveEvent[] 
     let command: Record<string, unknown> = {};
     const jsonIndex = args.indexOf('--json');
     try { if (jsonIndex >= 0 && typeof args[jsonIndex + 1] === 'string') command = object(JSON.parse(args[jsonIndex + 1])); } catch { /* Stream may still be partial. */ }
-    if (command.backend === 'research' || ['camofox', 'cloakbrowser', 'lightpanda', 'obscura'].includes(String(command.engine)) || String(command.session_id || '').startsWith('bs_')) continue;
+    if (command.backend === 'research' || (command.engine && command.engine !== 'chromium') || String(command.session_id || '').startsWith('bs_')) continue;
     calls.set(id, { id, operation: String(command.operation || 'browser'), done: false, profileId: String(command.profile_id || 'work') });
   }
   return [...calls.values()].map(call => ({ ...call, done: done.has(call.id) }));

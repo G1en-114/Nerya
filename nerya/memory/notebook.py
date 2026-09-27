@@ -252,6 +252,16 @@ class MemoryNotebook:
         """Return both snapshots (``agent`` and ``operator``) as a dict."""
         return dict(self._snapshot)
 
+    def revision(self, target: str) -> str:
+        """Content revision of the live file, including entry boundaries."""
+        self._require_target(target)
+        self._reload_target(target)
+        return hashlib.sha256(ENTRY_DELIMITER.join(self._entries[target]).encode()).hexdigest()
+
+    def service_lock(self):
+        """Serialize runtime/API file and record updates for this actor."""
+        return self._file_lock(self._root / "runtime")
+
     # -- mutations -----------------------------------------------------
 
     def add(self, target: str, content: str) -> NotebookResult:
@@ -318,7 +328,9 @@ class MemoryNotebook:
         with self._file_lock(self._path_for(target)):
             self._reload_target(target)
             entries = self._entries[target]
-            matches = [(i, e) for i, e in enumerate(entries) if needle in e]
+            matches = [(i, e) for i, e in enumerate(entries) if needle == e]
+            if not matches:
+                matches = [(i, e) for i, e in enumerate(entries) if needle in e]
             if not matches:
                 return self._error(target, f"No entry matched {needle!r}.")
             if len(matches) > 1 and len({e for _, e in matches}) > 1:
@@ -360,7 +372,9 @@ class MemoryNotebook:
         with self._file_lock(self._path_for(target)):
             self._reload_target(target)
             entries = self._entries[target]
-            matches = [(i, e) for i, e in enumerate(entries) if needle in e]
+            matches = [(i, e) for i, e in enumerate(entries) if needle == e]
+            if not matches:
+                matches = [(i, e) for i, e in enumerate(entries) if needle in e]
             if not matches:
                 return self._error(target, f"No entry matched {needle!r}.")
             if len(matches) > 1 and len({e for _, e in matches}) > 1:
@@ -486,7 +500,7 @@ class MemoryNotebook:
             raw = path.read_text(encoding="utf-8")
         except OSError:
             _LOG.debug("notebook read failed", exc_info=True)
-            return []
+            raise
         if not raw.strip():
             return []
         return [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]

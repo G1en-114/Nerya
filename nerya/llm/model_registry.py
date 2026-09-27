@@ -59,6 +59,37 @@ __all__ = [
 # --------------------------------------------------------------------- #
 
 
+def context_window_limit(*values: Any) -> int:
+    """Intersect known token limits without rounding decimal windows up."""
+    limits = []
+    for value in values:
+        try:
+            window = int(str(value).strip().replace("_", ""))
+        except (ValueError, TypeError):
+            continue
+        if window > 0:
+            limits.append(window)
+    return min(limits, default=0)
+
+
+def resolve_context_window(
+    provider: str, model: str, *limits: Any, workspace: Path | None = None,
+) -> int:
+    """Use existing registry/catalog evidence and caller limits, offline only."""
+    known = ModelRegistry(workspace=workspace).lookup(provider, model).context_window
+    catalog_window = 0
+    if workspace is not None:
+        from .model_catalog import ModelCatalog
+
+        for row in ModelCatalog(workspace=workspace).list(provider):
+            if isinstance(row, dict) and row.get("id") == model:
+                catalog_window = context_window_limit(
+                    row.get("context_window"), row.get("context_length"),
+                )
+                break
+    return context_window_limit(known, catalog_window, *limits)
+
+
 @dataclass(frozen=True)
 class ModelMetadata:
     """Frozen description of one *model* (not just a provider).

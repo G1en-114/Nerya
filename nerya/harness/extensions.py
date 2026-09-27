@@ -174,6 +174,13 @@ class PluginContext:
 
         return self._track(self._host._contribute_team_template(self.name, template))
 
+    def register_wallet_provider(self, name: str, factory: Callable[..., Any], *, metadata=None) -> Teardown:
+        """Register a wallet/DEX adapter in this workspace, with host teardown."""
+        from ..wallet.registry import register_wallet_provider
+        paths=self.get_service('paths')
+        if paths is None:raise PluginError('wallet adapter requires workspace paths service')
+        return self._track(register_wallet_provider(name,factory,workspace=paths.root,metadata=metadata))
+
 
 class ExtensionHost:
     """Owns plugin activation, contributions, and teardown for one kernel."""

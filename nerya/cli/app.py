@@ -43,6 +43,7 @@ from .commands import (
 
 
 from .commands import tools as external_tools
+from .commands import data as historical_data
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime.register(sub)
     external_tools.register(sub)
     wallet.register(sub)
+    historical_data.register(sub)
 
     return parser
 

@@ -1,0 +1,14 @@
+.card { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; background: var(--card); color: var(--text-base); overflow-wrap: anywhere; }
+.layout { display: flex; flex-direction: column; gap: 16px; }
+.identity { min-width: 0; width: 100%; }
+.heading { padding-right: 44px; }
+.kind { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; color: var(--text-muted); font-size: 12px; }
+.title { font-size: 16px; line-height: 1.5; font-weight: 600; margin: 0; text-wrap: balance; }
+.states { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-top: 12px; font-size: 11px; color: var(--text-muted); }
+.facts { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--text-muted); }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+.expand { position: absolute; right: 22px; top: 20px; width: 36px; height: 36px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-base); background: var(--panel-bg); }
+.expand:hover { background: var(--line); }
+.expand:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.review { font-size: 12px; min-height: 36px; }
+@media(max-width:600px) { .card { padding: 16px; } .expand { right: 16px; top: 16px; } .states { gap: 8px; } }

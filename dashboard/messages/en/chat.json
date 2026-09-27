@@ -144,7 +144,7 @@
     "uploadingAttachment": "Preparing and uploading attachments…",
     "uploadFailed": "The selected file could not be uploaded. Choose it again to retry, or close this notice to send without it.",
     "attachmentNotReady": "Attachment upload is not ready in this chat view.",
-    "cancelTurn": "Cancel in-flight turn (client-side only; the backend may still finish)",
+    "cancelTurn": "Request stop (execution may continue until confirmed)",
     "planLabel": "plan: {value}",
     "tierLabel": "tier: {value}",
     "legacyHarness": "Legacy engine",
@@ -768,7 +768,9 @@
           "prompt": "First list reusable collaborators and saved results in this conversation. Confirm the task to continue, then reuse the original collaborator and context rather than creating a duplicate."
         }
       }
-    }
+    },
+    "thinkLevelInherit": "Inherit configuration",
+    "contextAutomatic": "Automatic (unknown until resolved)"
   },
   "inbox": {
     "eyebrow": "",
@@ -964,7 +966,10 @@
     "advProvider": "Provider",
     "advModel": "Model",
     "advLockedTier": "Locked tier",
-    "advPromptExcerpt": "Prompt excerpt"
+    "advPromptExcerpt": "Prompt excerpt",
+    "inheritModel": "Inherit model tier",
+    "toggleAgent": "Enable {name}",
+    "deleteNamed": "Delete {name}"
   },
   "turnBlocks": {
     "agentTeam": "Agent Team",

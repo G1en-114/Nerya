@@ -68,12 +68,15 @@ import base64
 import json
 import logging
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
 from ..agent.prompt_sections import CACHE_BOUNDARY_MARKER
 from ..core.errors import LLMError
+from ..harness.cancellation import raise_if_cancelled
 from .adapters._base import (
     Transport,
     UrllibTransport,
@@ -81,8 +84,10 @@ from .adapters._base import (
     _estimate_tokens,
     _post_with_retry,
     _timeout_for_deadline,
+    io_control,
 )
 from .adapters.openai import _REASONING_MODEL_PREFIXES
+from .retry import is_quota_error, parse_retry_after, provider_retryable
 
 
 _LOG = logging.getLogger(__name__)
@@ -269,6 +274,7 @@ def _make_llm_error(
     * ``raw_body`` — body excerpt (≤600 chars)
     """
 
+    resp_headers = {str(k).lower(): str(v) for k, v in (resp_headers or {}).items()}
     body = _raw_body_excerpt(doc) or f"http_{status}"
     request_id = _extract_request_id(resp_headers)
     parts = [f"{provider} {operation} api error ({status}): {body}"]
@@ -279,12 +285,38 @@ def _make_llm_error(
     setattr(err, "request_id", request_id)
     setattr(err, "response_headers", dict(resp_headers or {}))
     setattr(err, "raw_body", _raw_body_excerpt(doc, limit=2000))
+    setattr(err, "provider", provider)
+    setattr(err, "retry_after_s", parse_retry_after(resp_headers))
+    setattr(err, "quota_exhausted", is_quota_error(doc))
+    # Compatibility gateways can surface a transient backend failure as 400.
+    transient_400 = status == 400 and "backend request failed" in body.lower()
+    retryable = provider_retryable(status, doc, resp_headers) or transient_400
+    if resp_headers.get("x-should-retry", "").strip().lower() in {"false", "0"}:
+        retryable = False
+    setattr(err, "retryable", retryable)
     return err
 
 
 # ---------------------------------------------------------------------------
 # Provider-shaped IO
 # ---------------------------------------------------------------------------
+
+
+def normalise_reasoning_effort(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"", "inherit", "default", "auto"}:
+        return None
+    return {
+        "off": "none", "disabled": "none", "min": "minimal", "normal": "medium",
+        "extra_high": "xhigh", "extra-high": "xhigh", "x-high": "xhigh", "ultra": "xhigh",
+    }.get(raw, raw)
+
+
+def _reasoning_off_unsupported(provider: str, model: str) -> LLMError:
+    return LLMError(
+        f"reasoning_off_unsupported: {provider}/{model}: this backend has no verified "
+        "mapping for explicit off; use inherit or a supported reasoning setting"
+    )
 
 
 @dataclass
@@ -306,6 +338,11 @@ class MessagesRequest:
     reasoning_summary: Optional[str] = None
     deadline: Optional[float] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    cancel_token: object | None = None
+    on_event: Callable[[dict[str, Any]], None] | None = None
+
+    def __post_init__(self) -> None:
+        self.reasoning_effort = normalise_reasoning_effort(self.reasoning_effort)
 
 
 @dataclass
@@ -320,6 +357,9 @@ class MessagesResponse:
     raw: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
     usd_cost: float = 0.0
+    context_window: int = 0
+    requested_context_window: int | None = None
+    stream_mode: str = "synchronous"
 
     def text(self) -> str:
         return "".join(b.get("text") or "" for b in self.content if b.get("type") == "text")
@@ -665,7 +705,9 @@ class AnthropicMessagesBackend:
                 choice = {"type": "auto"}
             body["tool_choice"] = choice
         effort = (request.reasoning_effort or "").strip().lower()
-        if effort and effort != "none":
+        if effort == "none":
+            body["thinking"] = {"type": "disabled"}
+        elif effort:
             adaptive_effort = _anthropic_adaptive_effort_for(self.model, effort)
             thinking_budget = _anthropic_thinking_budget_for(self.model, effort)
             if adaptive_effort:
@@ -1102,6 +1144,108 @@ def _split_visible_thinking(text: str) -> tuple[str, str]:
     return thinking, visible
 
 
+class _OpenAIStream:
+    """Accumulate transport deltas; only a complete response yields tool uses."""
+
+    def __init__(self, request):
+        self.request = request
+        self.message = {"content": "", "reasoning_content": "", "tool_calls": []}
+        self.tools = {}
+        self.usage = {}
+        self.finish_reason = None
+        self.pending = ""
+        self.content_mode = "prefix"
+
+    def emit(self, kind, **data):
+        raise_if_cancelled(self.request.cancel_token, self.request.deadline)
+        if self.request.on_event:
+            self.request.on_event({"type": kind, "stream_mode": "stream", **data})
+
+    def content(self, delta, *, final=False):
+        self.pending += delta
+        if self.content_mode == "prefix":
+            stripped = self.pending.lstrip()
+            if not final and (not stripped or "<think>".startswith(stripped.lower())):
+                return
+            if stripped.lower().startswith("<think>"):
+                self.pending = stripped[7:]
+                self.content_mode = "thinking"
+            else:
+                self.content_mode = "text"
+        if self.content_mode == "thinking":
+            end = self.pending.lower().find("</think>")
+            if end >= 0:
+                if self.pending[:end]:
+                    self.emit("thinking_delta", text=self.pending[:end])
+                self.pending = self.pending[end + 8:]
+                self.content_mode = "text"
+            else:
+                # Retain a possible split closing tag, not a whole response.
+                keep = 0 if final else next((n for n in range(7, 0, -1)
+                        if self.pending.lower().endswith("</think>"[:n])), 0)
+                ready = self.pending[:-keep] if keep else self.pending
+                self.pending = self.pending[-keep:] if keep else ""
+                if ready:
+                    self.emit("thinking_delta", text=ready)
+                return
+        if self.pending:
+            self.emit("text_delta", text=self.pending)
+            self.pending = ""
+
+    def feed(self, event):
+        raise_if_cancelled(self.request.cancel_token, self.request.deadline)
+        if event.get("error"):
+            raise LLMError(f"provider stream error: {_raw_body_excerpt(event)}")
+        if event.get("usage"):
+            self.usage = dict(event["usage"])
+            self.emit("usage", usage={
+                "input_tokens": int(self.usage.get("prompt_tokens") or 0),
+                "output_tokens": int(self.usage.get("completion_tokens") or 0),
+            })
+        for choice in event.get("choices") or []:
+            if choice.get("index", 0) != 0:
+                continue
+            delta = choice.get("delta") or {}
+            text = delta.get("content")
+            if isinstance(text, str) and text:
+                self.message["content"] += text
+                self.content(text)
+            thinking = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(thinking, str) and thinking:
+                self.message["reasoning_content"] += thinking
+                self.emit("thinking_delta", text=thinking)
+            for tool in delta.get("tool_calls") or []:
+                index = tool.get("index", 0)
+                target = self.tools.setdefault(index, {"id": "", "type": "function",
+                                                       "function": {"name": "", "arguments": ""}})
+                target["id"] += tool.get("id") or ""
+                function = tool.get("function") or {}
+                target["function"]["name"] += function.get("name") or ""
+                fragment = function.get("arguments") or ""
+                target["function"]["arguments"] += fragment
+                self.emit("tool_input_delta", index=index, call_id=target["id"],
+                          name=target["function"]["name"], partial_json=fragment)
+            if choice.get("finish_reason") is not None:
+                self.finish_reason = choice["finish_reason"]
+
+    def finish(self):
+        if self.finish_reason is None:
+            raise LLMError("provider stream missing finish_reason")
+        self.content("", final=True)
+        if self.tools and self.finish_reason not in {"tool_calls", "stop"}:
+            raise LLMError("provider stream truncated tool arguments")
+        for _, tool in sorted(self.tools.items()):
+            try:
+                arguments = json.loads(tool["function"]["arguments"])
+            except (TypeError, ValueError) as exc:
+                raise LLMError("provider stream invalid tool arguments") from exc
+            if not isinstance(arguments, dict) or not tool["id"] or not tool["function"]["name"]:
+                raise LLMError("provider stream incomplete tool call")
+            self.message["tool_calls"].append(tool)
+        return {"choices": [{"message": self.message, "finish_reason": self.finish_reason}],
+                "usage": self.usage}
+
+
 @dataclass
 class OpenAIMessagesBackend:
     """OpenAI Chat Completions backend with native ``tools`` support.
@@ -1139,20 +1283,16 @@ class OpenAIMessagesBackend:
             base_url=self.base_url,
             model=self.model,
         )
+        eff = normalise_reasoning_effort(
+            request.reasoning_effort if request.reasoning_effort is not None else self.reasoning_effort
+        )
+        if eff == "none" and not minimax_compat:
+            from .model_registry import lookup
+            meta = lookup(self.provider_name, self.model)
+            if _is_reasoning_model_id(self.model) or meta.source == "unknown" or meta.supports_reasoning:
+                raise _reasoning_off_unsupported(self.provider_name, self.model)
         if _is_reasoning_model_id(self.model):
             body["max_completion_tokens"] = request.max_tokens
-            eff = (
-                request.reasoning_effort
-                or self.reasoning_effort
-                or ""
-            ).strip().lower()
-            # OpenAI rejects reasoning_effort alongside function tools on
-            # /v1/chat/completions for gpt-5.5 ("Please use /v1/responses
-            # instead"), and OpenAI-compatible gateways (GMI Cloud) proxy
-            # that 400 straight through. Default effort still applies, so
-            # dropping the knob is strictly better than a dead request.
-            if request.tools:
-                eff = ""
             if eff and eff != "none":
                 body["reasoning_effort"] = eff
             summ = (
@@ -1160,7 +1300,7 @@ class OpenAIMessagesBackend:
                 or self.reasoning_summary
                 or ""
             ).strip().lower()
-            if summ in {"concise", "detailed", "auto"} and not request.tools:
+            if summ in {"concise", "detailed", "auto"}:
                 body["reasoning"] = {"summary": summ}
                 if eff and eff != "none":
                     body["reasoning"]["effort"] = eff
@@ -1208,17 +1348,53 @@ class OpenAIMessagesBackend:
             "Authorization": f"Bearer {self.api_key}",
         }
         started = time.time()
-        status, doc, resp_headers = _post_with_retry(
-            self.transport,
-            url,
-            headers=headers,
-            body=body,
-            timeout=self.timeout,
-            provider_name=self.provider_name,
-            api_key=self.api_key,
-            max_attempts=max(1, int(self.max_attempts or 1)),
-            deadline=request.deadline,
-        )
+        stream_mode = "synchronous"
+        def post(max_attempts=None):
+            nonlocal stream_mode
+            if request.stream and callable(getattr(self.transport, "stream_json", None)):
+                body["stream"] = True
+                body["stream_options"] = {"include_usage": True}
+                accumulator = _OpenAIStream(request)
+                try:
+                    with io_control(request.cancel_token, request.deadline):
+                        status, doc, response_headers = self.transport.stream_json(
+                            url, headers=headers, body=body,
+                            timeout=_timeout_for_deadline(self.timeout, request.deadline),
+                            on_event=accumulator.feed,
+                        )
+                    if status < 400 and doc.get("stream_complete"):
+                        stream_mode = "stream"
+                        doc = accumulator.finish()
+                    return status, doc, response_headers
+                except Exception as exc:
+                    # Submission/partial output is not safe to replay, even
+                    # when an upstream native capability had side effects.
+                    exc.stream_interrupted = True
+                    exc.retryable = False
+                    raise
+            with io_control(request.cancel_token, request.deadline):
+                return _post_with_retry(
+                    self.transport, url, headers=headers, body=body,
+                    timeout=self.timeout, provider_name=self.provider_name, api_key=self.api_key,
+                    max_attempts=max_attempts if max_attempts is not None else max(1, int(self.max_attempts or 1)),
+                    deadline=request.deadline,
+                )
+
+        status, doc, resp_headers = post()
+        # Only the observed gpt-5.5 chat-completions rejection justifies
+        # removing this knob. Tools alone never establish incompatibility.
+        error_text = json.dumps(doc).lower() if status == 400 else ""
+        if (
+            status == 400 and request.tools and body.get("reasoning_effort")
+            and self.model.lower().rsplit("/", 1)[-1] == "gpt-5.5"
+            and "reasoning_effort" in error_text and "tool" in error_text
+            and "/v1/responses" in error_text
+        ):
+            from .attempt_budget import claim_current_extra_attempt
+            if claim_current_extra_attempt("reasoning_tools_compat"):
+                body.pop("reasoning_effort", None)
+                body.pop("reasoning", None)
+                status, doc, resp_headers = post(max_attempts=1)
         latency_ms = int((time.time() - started) * 1000)
         if status >= 400:
             raise _make_llm_error(
@@ -1238,8 +1414,387 @@ class OpenAIMessagesBackend:
             model=self.model,
             raw=doc,
             latency_ms=latency_ms,
+            stream_mode=stream_mode,
         )
 
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Codex (ChatGPT OAuth) Responses backend
+# ---------------------------------------------------------------------------
+
+
+def _codex_render_input(
+    *, system: str, messages: list[dict[str, Any]]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Translate the canonical Nerya message shape into Responses input items."""
+
+    instructions: list[str] = []
+    if system:
+        instructions.append(_system_without_cache_boundary(system))
+    items: list[dict[str, Any]] = []
+
+    def append_message(role: str, parts: list[dict[str, Any]]) -> None:
+        if parts:
+            items.append({"role": role, "content": parts})
+
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        content = msg.get("content")
+        if role == "system":
+            text = _content_parts_to_text(content)
+            if text:
+                instructions.append(text)
+            continue
+
+        if role == "user":
+            if isinstance(content, str):
+                if content:
+                    append_message(
+                        "user", [{"type": "input_text", "text": content}]
+                    )
+                continue
+            if not isinstance(content, list):
+                continue
+            pending: list[dict[str, Any]] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = str(block.get("type") or "")
+                if btype == "tool_result":
+                    append_message("user", pending)
+                    pending = []
+                    items.append({
+                        "type": "function_call_output",
+                        "call_id": str(block.get("tool_use_id") or ""),
+                        "output": _content_parts_to_text(block.get("content")),
+                    })
+                    continue
+                if btype == "text":
+                    pending.append({
+                        "type": "input_text",
+                        "text": str(block.get("text") or ""),
+                    })
+                    continue
+                if btype == "image":
+                    source = (
+                        block.get("source")
+                        if isinstance(block.get("source"), dict)
+                        else {}
+                    )
+                    url = _source_to_data_url(source)
+                    if url:
+                        pending.append({"type": "input_image", "image_url": url})
+                    continue
+                if btype in {"document", "file", "attachment"}:
+                    fallback = _document_text_fallback(block)
+                    if fallback:
+                        pending.append({"type": "input_text", "text": fallback})
+            append_message("user", pending)
+            continue
+
+        if role == "assistant":
+            pending = []
+            if isinstance(content, str):
+                if content:
+                    pending.append({"type": "output_text", "text": content})
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = str(block.get("type") or "")
+                    if btype == "text":
+                        text = str(block.get("text") or "")
+                        if text:
+                            pending.append({"type": "output_text", "text": text})
+                    elif btype == "tool_use":
+                        append_message("assistant", pending)
+                        pending = []
+                        items.append({
+                            "type": "function_call",
+                            "call_id": str(block.get("id") or _new_tool_use_id()),
+                            "name": str(block.get("name") or ""),
+                            "arguments": json.dumps(
+                                block.get("input") or {},
+                                ensure_ascii=False,
+                            ),
+                        })
+                    elif btype in {"document", "file", "attachment", "image"}:
+                        fallback = _document_text_fallback(block)
+                        if fallback:
+                            pending.append({
+                                "type": "output_text",
+                                "text": fallback,
+                            })
+            append_message("assistant", pending)
+            continue
+
+        text = _content_parts_to_text(content)
+        if text:
+            append_message(role, [{"type": "input_text", "text": text}])
+
+    return "\n\n".join(x for x in instructions if x), items
+
+
+def _codex_render_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rendered: list[dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        schema = tool.get("input_schema") or tool.get("parameters") or {}
+        rendered.append({
+            "type": "function",
+            "name": str(tool.get("name") or ""),
+            "description": str(tool.get("description") or ""),
+            "parameters": schema if isinstance(schema, dict) else {},
+            "strict": False,
+        })
+    return rendered
+
+
+def _codex_tool_choice(tool_choice: Optional[dict[str, Any]]) -> Any:
+    if not tool_choice:
+        return "auto"
+    kind = str(tool_choice.get("type") or "").lower()
+    if kind == "auto":
+        return "auto"
+    if kind == "none":
+        return "none"
+    if kind in {"any", "required"}:
+        return "required"
+    if kind == "tool":
+        return {
+            "type": "function",
+            "name": str(tool_choice.get("name") or ""),
+        }
+    return tool_choice
+
+
+def _codex_reasoning_effort(value: str | None) -> str:
+    effort = str(value or "").strip().lower()
+    if effort == "ultra":
+        return "xhigh"
+    if effort in {"minimal", "low", "medium", "high", "xhigh"}:
+        return effort
+    return ""
+
+
+@dataclass
+class CodexResponsesMessagesBackend:
+    """ChatGPT-plan Codex Responses backend using the required SSE transport."""
+
+    api_key: str
+    account_id: str
+    model: str
+    base_url: str = "https://chatgpt.com/backend-api/codex"
+    timeout: float = 180.0
+    provider_name: str = "openai-codex"
+    reasoning_effort: Optional[str] = None
+    reasoning_summary: Optional[str] = None
+
+    def __call__(self, request: MessagesRequest) -> MessagesResponse:
+        if not self.api_key:
+            raise LLMError("openai-codex backend requires OAuth token")
+        if not self.account_id:
+            raise LLMError("openai-codex backend requires ChatGPT account id")
+        if normalise_reasoning_effort(request.reasoning_effort or self.reasoning_effort) == "none":
+            raise _reasoning_off_unsupported(self.provider_name, self.model)
+
+        instructions, input_items = _codex_render_input(
+            system=request.system,
+            messages=request.messages,
+        )
+        body: dict[str, Any] = {
+            "model": self.model,
+            "instructions": instructions,
+            "input": input_items,
+            "store": False,
+            "stream": True,
+        }
+        if request.tools:
+            body["tools"] = _codex_render_tools(request.tools)
+            body["tool_choice"] = _codex_tool_choice(request.tool_choice)
+            body["parallel_tool_calls"] = True
+
+        effort = _codex_reasoning_effort(
+            request.reasoning_effort or self.reasoning_effort
+        )
+        summary = str(
+            request.reasoning_summary or self.reasoning_summary or ""
+        ).strip().lower()
+        reasoning: dict[str, Any] = {}
+        if effort:
+            reasoning["effort"] = effort
+        if summary in {"auto", "concise", "detailed"}:
+            reasoning["summary"] = summary
+        if reasoning:
+            body["reasoning"] = reasoning
+
+        session_id = str(
+            request.metadata.get("session_id")
+            or request.metadata.get("turn_id")
+            or uuid.uuid4()
+        )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "ChatGPT-Account-ID": self.account_id,
+            "Content-Type": "application/json",
+            "OpenAI-Beta": "responses=v1",
+            "originator": "nerya",
+            "session_id": session_id,
+            "session-id": session_id,
+            "User-Agent": "nerya",
+        }
+        timeout = float(self.timeout or 180.0)
+        if request.deadline is not None:
+            remaining = float(request.deadline) - time.time()
+            if remaining <= 0:
+                raise LLMError("openai-codex request deadline exceeded")
+            timeout = min(timeout, max(0.1, remaining))
+
+        url = self.base_url.rstrip("/") + "/responses"
+        wire = urllib.request.Request(
+            url,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers=headers,
+        )
+        started = time.time()
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_blocks: list[dict[str, Any]] = []
+        event_types: list[str] = []
+        completed: dict[str, Any] = {}
+        failure: dict[str, Any] = {}
+
+        try:
+            with urllib.request.urlopen(wire, timeout=timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except Exception:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    etype = str(event.get("type") or "")
+                    if etype and (
+                        not event_types or event_types[-1] != etype
+                    ):
+                        event_types.append(etype)
+
+                    if etype == "response.output_text.delta":
+                        text_parts.append(str(event.get("delta") or ""))
+                    elif (
+                        "reasoning_summary" in etype
+                        and etype.endswith(".delta")
+                    ):
+                        reasoning_parts.append(str(event.get("delta") or ""))
+                    elif (
+                        etype == "response.output_item.done"
+                        and isinstance(event.get("item"), dict)
+                    ):
+                        item = event["item"]
+                        itype = str(item.get("type") or "")
+                        if itype == "function_call":
+                            raw_args = item.get("arguments") or "{}"
+                            try:
+                                args = json.loads(raw_args)
+                            except Exception:
+                                args = {"_raw": str(raw_args)}
+                            tool_blocks.append({
+                                "type": "tool_use",
+                                "id": str(
+                                    item.get("call_id")
+                                    or item.get("id")
+                                    or _new_tool_use_id()
+                                ),
+                                "name": str(item.get("name") or ""),
+                                "input": args if isinstance(args, dict) else {},
+                            })
+                        elif itype == "message" and not text_parts:
+                            for part in item.get("content") or []:
+                                if (
+                                    isinstance(part, dict)
+                                    and part.get("type") == "output_text"
+                                ):
+                                    text_parts.append(
+                                        str(part.get("text") or "")
+                                    )
+                    elif etype == "response.completed":
+                        if isinstance(event.get("response"), dict):
+                            completed = dict(event["response"])
+                    elif etype in {"response.failed", "error"}:
+                        failure = dict(event)
+
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                doc = json.loads(raw)
+                if not isinstance(doc, dict):
+                    doc = {"raw": raw}
+            except Exception:
+                doc = {"raw": raw}
+            resp_headers = {
+                str(k).lower(): str(v)
+                for k, v in (exc.headers.items() if exc.headers else [])
+            }
+            raise _make_llm_error(
+                provider=self.provider_name,
+                status=int(exc.code),
+                doc=doc,
+                resp_headers=resp_headers,
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise LLMError(
+                f"openai-codex transport error: {exc.reason or exc}"
+            ) from exc
+
+        latency_ms = int((time.time() - started) * 1000)
+        if failure:
+            detail = failure.get("error") or failure.get("message") or failure
+            raise LLMError(f"openai-codex responses failed: {detail}")
+
+        content: list[dict[str, Any]] = []
+        reasoning_text = "".join(reasoning_parts).strip()
+        if reasoning_text:
+            content.append({"type": "thinking", "thinking": reasoning_text})
+        visible_text = "".join(text_parts)
+        if visible_text:
+            content.append({"type": "text", "text": visible_text})
+        content.extend(tool_blocks)
+
+        usage = completed.get("usage") or {}
+        stop_reason = "tool_use" if tool_blocks else "end_turn"
+        status = str(completed.get("status") or "")
+        if status == "incomplete":
+            details = completed.get("incomplete_details") or {}
+            reason = str(
+                details.get("reason") if isinstance(details, dict) else details
+            )
+            if "max" in reason:
+                stop_reason = "max_tokens"
+
+        return MessagesResponse(
+            content=content,
+            stop_reason=stop_reason,
+            usage={
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+            },
+            provider=self.provider_name,
+            model=self.model,
+            raw={
+                "response": completed,
+                "event_types": event_types,
+            },
+            latency_ms=latency_ms,
+        )
 
 # _REASONING_MODEL_PREFIXES is imported from adapters/openai.py (single
 # source of truth). This module used to carry its own stale copy that was
@@ -1399,8 +1954,10 @@ _GEMINI_THINKING_BUDGETS: dict[str, int] = {
 
 
 def _gemini_thinking_config(model: str, effort: str | None) -> dict[str, Any] | None:
-    eff = (effort or "").strip().lower()
-    if not eff or eff == "none":
+    eff = normalise_reasoning_effort(effort)
+    if eff == "none":
+        raise _reasoning_off_unsupported("gemini", model)
+    if not eff:
         return None
     low = (model or "").lower()
     if not (
@@ -1573,6 +2130,8 @@ class OllamaMessagesBackend:
 
     def __call__(self, request: MessagesRequest) -> MessagesResponse:
         url = self.base_url.rstrip("/") + "/api/chat"
+        if request.reasoning_effort == "none":
+            raise _reasoning_off_unsupported(self.provider_name, self.model)
         rendered_messages = _openai_render_messages(
             system=request.system, messages=request.messages,
         )
@@ -1667,6 +2226,8 @@ class BedrockAnthropicMessagesBackend:
     provider_name: str = "bedrock"
 
     def __call__(self, request: MessagesRequest) -> MessagesResponse:
+        if request.reasoning_effort == "none":
+            raise _reasoning_off_unsupported(self.provider_name, self.model)
         try:
             import boto3  # type: ignore
             from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
@@ -1823,6 +2384,7 @@ _ = base64  # silence unused-import linters; future-use anchor
 __all__ = [
     "AnthropicMessagesBackend",
     "BedrockAnthropicMessagesBackend",
+    "CodexResponsesMessagesBackend",
     "GeminiMessagesBackend",
     "MessagesBackend",
     "MessagesRequest",

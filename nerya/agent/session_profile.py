@@ -20,11 +20,11 @@ def strategy_agent_session_id(
     *,
     strategy_id: str,
     session_key: dict[str, Any] | None = None,
-    policy: str = "per_strategy_market_timeframe",
+    policy: str = "per_strategy",
 ) -> str:
     key = canonical_json(
         {
-            "policy": policy or "per_strategy_market_timeframe",
+            "policy": policy or "per_strategy",
             "strategy_id": strategy_id,
             "session_key": dict(session_key or {}),
         }
@@ -124,6 +124,7 @@ def render_strategy_context_block(
     strategy_id: str | None,
     *,
     max_chars: int = 4000,
+    proposal_id: str | None = None,
 ) -> str:
     """Render the strategy file context for a strategy-bound session.
 
@@ -139,6 +140,21 @@ def render_strategy_context_block(
     sid = str(strategy_id or "").strip()
     if not sid:
         return ""
+    if proposal_id:
+        from ..strategies.workflow_service import source_files
+        from ..strategies.workflow_graph import WorkflowError
+        try:
+            files, source = source_files(paths, sid, proposal_id)
+        except (ValueError, OSError, WorkflowError) as exc:
+            return f"Referenced strategy candidate {proposal_id} is unavailable: {exc}. Do not substitute another version."
+        lines = [f"Referenced strategy candidate: strategy_id={sid}, proposal_id={proposal_id}, state={source['state']}.",
+                 "Edit this candidate through strategy_author proposals. It is not the installed strategy."]
+        for name in sorted(files, key=lambda n: (n != "strategy.yml", n != "main.py", n)):
+            lines.append(f"--- {name} ---\n{files[name]}")
+        block = "\n".join(lines)
+        if max_chars > 0 and len(block) > max_chars:
+            block = block[:max_chars] + "\n[truncated; read the proposal files for full content]"
+        return block
     try:
         from ..trading import strategy_crud
 

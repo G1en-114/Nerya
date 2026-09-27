@@ -262,6 +262,7 @@ class RiskGate:
         market_snapshot: dict[str, Any] | None = None,
         resume: bool = False,
         preview: bool = False,
+        wallet_swap: bool = False,
     ) -> RiskDecision:
         paths = self.config.paths
         reasons: list[str] = []
@@ -347,7 +348,8 @@ class RiskGate:
         # the dangerous direction (fake prefix on a live account) stays
         # fully enforced.
         if (
-            _venue_family(str(account_profile.venue or "")) != "mock"
+            not wallet_swap
+            and _venue_family(str(account_profile.venue or "")) != "mock"
             and not _venues_compatible(intent.market, str(account_profile.venue or ""))
         ):
             reasons.append(
@@ -387,6 +389,9 @@ class RiskGate:
                 fix_hints=derive_fix_hints(reasons, intent=intent),
             )
 
+        plan_action = str((intent.meta or {}).get("plan_action") or "").strip()
+        risk_reducing = plan_action in {"close_position", "reduce_position"}
+
         # 2. Execution-mode gates. Use AccountProfile rather than the
         # compatibility Account view: load_accounts intentionally collapses
         # canary to paper, which previously made canary orders pass paper-cash
@@ -404,7 +409,7 @@ class RiskGate:
         # if a caller supplies that account id and all global live flags are on.
         if account_profile.is_real_money and strategy.status not in {
             "shadow", "canary", "live",
-        }:
+        } and not (risk_reducing and strategy.status in {'paused','quarantined','archived'}):
             reasons.append(
                 f"strategy_status_{strategy.status}_cannot_use_real_money_account"
             )
@@ -412,9 +417,6 @@ class RiskGate:
         if strategy.limits.kill_switch:
             reasons.append("strategy_kill_switch_enabled")
             decision = "reject"
-
-        plan_action = str((intent.meta or {}).get("plan_action") or "").strip()
-        risk_reducing = plan_action in {"close_position", "reduce_position"}
 
         # 3. Strategy status. Operators still need to flatten exposure
         # after a pause/quarantine/archive, so risk-reducing close/reduce
@@ -430,10 +432,8 @@ class RiskGate:
         #       must NOT place orders. We mark the decision so the
         #       submit pipeline can short-circuit without losing the
         #       audit trail.
-        #     - ``canary`` must have a protection rule attached (the
-        #       caller threads this through via ``intent.meta``) and
-        #       the per-trade approval threshold is forced down so an
-        #       operator clicks every fill.
+        #     - ``canary`` requires per-trade operator approval. Optional
+        #       protection is governed by the strategy policy in every mode.
         #     - ``live``  cannot be reached from anything other than
         #       ``canary`` or ``paused`` per the lifecycle graph; that
         #       is enforced at promotion time, not here.
@@ -608,7 +608,7 @@ class RiskGate:
         snapshot_payload: dict[str, Any] = {}
         reservation_blocked_usd = 0.0
         max_age_s = float(self.config.get("trading.snapshot.max_age_seconds", 60))
-        snap = fresh_snapshot(self.config, intent.account_id, max_age_s=max_age_s)
+        snap = fresh_snapshot(self.config, intent.account_id, max_age_s=0.0 if wallet_swap and resume else max_age_s)
         if snap is not None:
             snapshot_payload = snap.asdict()
             # Position-reducing intents (close/reduce plan actions OR
@@ -766,23 +766,13 @@ class RiskGate:
                 )
                 decision = "escalate"
 
-        # 12b. canary state forces approval on every
-        # opening side regardless of notional, and rejects opens that
-        # don't carry a protection rule. ``intent.meta['protection_present']``
-        # is set by ``submit_trade_plan`` when a TradePlan declares one;
-        # legacy ``submit_trade_intent`` callers can opt in by passing
-        # ``meta={'protection_present': True}``.
-        if not risk_reducing and strategy.status == "canary":
-            meta = intent.meta or {}
-            protection_present = bool(
-                meta.get("protection_present")
-                or meta.get("plan_protection_attached")
-            )
-            # Both open sides need protection: a canary short without
-            # SL/TP is exactly as naked as a canary long.
-            if not protection_present:
-                reasons.append("canary_requires_protection_rule")
+        # Protection is opt-in. Only an explicit strategy requirement gates
+        # an otherwise valid opening order; never fabricate default TP/SL.
+        if not risk_reducing and strategy.limits.require_protection:
+            if not bool((intent.meta or {}).get("protection_present")):
+                reasons.append("strategy_requires_protection_rule")
                 decision = "reject"
+        if not risk_reducing and strategy.status == "canary":
             if decision != "reject":
                 reasons.append("canary_per_trade_approval_required")
                 decision = "escalate"
@@ -1079,12 +1069,20 @@ def _strategy_daily_notional(paths, strategy_id: str) -> float | None:
     corrupt ledger as an unlimited budget.
     """
     try:
-
+        # Wallet fills do not create CEX executor sessions/orders.jsonl. Read
+        # their durable fill ledger so swaps consume the same daily cap.
+        from contextlib import closing
+        with closing(connect(paths.db)) as con:
+            row=con.execute(
+                "SELECT COALESCE(SUM(f.notional_usd),0) FROM fills f JOIN orders o ON o.order_id=f.order_id "
+                "WHERE f.strategy_id=? AND f.ts>=? AND json_extract(o.meta_json,'$.wallet_swap')=1",
+                (strategy_id,time.time()-86400),
+            ).fetchone()
+        total=float(row[0])
         log_path = paths.strategy(strategy_id) / "orders.jsonl"
         if not log_path.exists():
-            return 0.0
+            return total
         cutoff = time.time() - 86_400.0
-        total = 0.0
         for line in log_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:

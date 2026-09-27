@@ -73,10 +73,8 @@ _CAPABILITIES = WalletCapabilities(
     quote=WalletCapability(
         supported=True, status="partial",
         note=(
-            "Python cdp-sdk has no standalone quote — quote() returns a "
-            "synthetic amount_in*(1-slippage) placeholder. The Node skill "
-            "path is real and is preferred whenever it is installed and "
-            "the python SDK is not fully functional."
+            "CDP v2 provides executable quotes. Legacy Python SDK refuses "
+            "unsupported quotes; an explicitly configured Node adapter may supply them."
         ),
     ),
     swap=WalletCapability(
@@ -152,6 +150,9 @@ class CoinbaseWallet(WalletProvider):
     def _have_creds(self) -> bool:
         return bool(self.api_key_name and self.api_private_key)
 
+    def _v2(self):
+        return self.config.get('backend')=='cdp_v2'
+
     def _configured_wallet_id(self) -> str:
         return str((self.config or {}).get("wallet_id") or "").strip()
 
@@ -190,10 +191,11 @@ class CoinbaseWallet(WalletProvider):
         """
         if not self.skill_path:
             return False
+        if self.config.get('backend')=='legacy' and self._python_full():return False
         node_ok, _missing = self._ref().skill_ready()
         if not node_ok:
             return False
-        return not self._python_full()
+        return not self._v2()
 
     def _ref(self) -> NodeSkillRef:
         return NodeSkillRef(
@@ -205,6 +207,13 @@ class CoinbaseWallet(WalletProvider):
             skill_path=self.skill_path,
         )
 
+    def get_execution_status(self,*,request,transaction):
+        if self._prefer_node_skill():
+            from ..adapter_contract import parse_result
+            return parse_result(self.id,request,self._ref().invoke('get_execution_status',{'request':request,'transaction':transaction}))
+        from ..confirmation import read_transaction
+        return read_transaction(self.id,self.config,request,transaction)
+
     # --------------------------------------------------------------
     def readiness(self) -> WalletReadiness:
         """Dependency readiness — only deps that back real code paths.
@@ -215,6 +224,14 @@ class CoinbaseWallet(WalletProvider):
         ``ready`` while every method would fail. Readiness now requires
         a usable Python SDK (or Node skill) *and* API credentials.
         """
+        if self._v2():
+            try:
+                from cdp import CdpClient
+                missing=[]
+            except ImportError:missing=['pip:cdp-sdk>=1']
+            if not self._have_creds():missing.append('cred:api_key_name/api_private_key')
+            if not self._configured_address():missing.append('config:wallet_address')
+            return WalletReadiness(provider=self.id,ready=not missing,missing=missing,install_hint='Install cdp-sdk>=1 and configure existing EOA, RPC and wallet secret')
         py_mod = self._probe_py()
         node_ok, node_missing = (False, [])
         if self.skill_path:
@@ -247,7 +264,14 @@ class CoinbaseWallet(WalletProvider):
         )
 
     def capabilities(self) -> WalletCapabilities:
-        return _CAPABILITIES
+        if self._v2():
+            from dataclasses import replace
+            return replace(_CAPABILITIES,quote=WalletCapability(True,'real','CDP v2 create_swap_quote'),
+                swap=WalletCapability(True,'partial','Execute checked quote; independently verify RPC receipt'),
+                swap_chains=('base','ethereum'),minimum_output='enforced',receipt_polling=True)
+        from dataclasses import replace
+        return replace(_CAPABILITIES,minimum_output='adapter_contract' if self.skill_path else 'unknown',
+                       receipt_polling=bool(self.skill_path))
 
     # --------------------------------------------------------------
     def get_market_klines(
@@ -271,7 +295,9 @@ class CoinbaseWallet(WalletProvider):
 
         from ...connectors.http import UrllibHttp
 
-        params = urlencode({"granularity": str(granularity)})
+        from datetime import datetime,timezone
+        params = urlencode({"granularity": str(granularity),**{
+            k:datetime.fromtimestamp(int(_kw[k]),timezone.utc).isoformat() for k in ('start','end') if _kw.get(k) is not None}})
         url = f"{_COINBASE_PRODUCTS_URL}/{quote(product, safe='')}/candles?{params}"
         status, doc = UrllibHttp().request("GET", url, timeout=20.0)
         if status >= 400:
@@ -309,6 +335,8 @@ class CoinbaseWallet(WalletProvider):
             except (TypeError, ValueError):
                 continue
         out.sort(key=lambda r: r["ts"])
+        out=[r for r in out if (_kw.get('start') is None or r['ts']>=int(_kw['start'])) and
+             (_kw.get('end') is None or r['ts']<=int(_kw['end']))]
         return out[-max(1, min(int(limit or 100), 300)):]
 
     @staticmethod
@@ -452,6 +480,13 @@ class CoinbaseWallet(WalletProvider):
     def get_balance(
         self, *, chain: str, address: str, token: str, **kw: Any,
     ) -> WalletBalance:
+        if self._v2():
+            from .self_custody import SelfCustodyWallet
+            expected=self._configured_address()
+            if address and address.lower()!=expected.lower():raise WalletPolicyDenied('CDP balance address mismatch')
+            result=SelfCustodyWallet(rpc_urls=self.config.get('rpc_urls') or {}).get_balance(chain=chain,address=expected,token=token,**kw)
+            result.provider=self.id
+            return result
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
@@ -500,6 +535,9 @@ class CoinbaseWallet(WalletProvider):
         self, *, chain: str, token_in: str, token_out: str,
         amount_in: float, slippage_bps: int = 50, **kw: Any,
     ) -> WalletQuote:
+        if self._v2():
+            from .coinbase_v2 import quote_or_swap
+            return quote_or_swap(self,chain=chain,token_in=token_in,token_out=token_out,amount_in=amount_in,slippage_bps=slippage_bps,**kw)
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
@@ -508,31 +546,9 @@ class CoinbaseWallet(WalletProvider):
                 "chain": chain, "token_in": token_in, "token_out": token_out,
                 "amount_in": amount_in, "slippage_bps": slippage_bps,
             })
-            expected = float(doc.get("expected_out") or 0.0)
-            if expected <= 0:
-                raise WalletQuoteError(
-                    f"coinbase skill quote has no positive expected_out: {doc.get('expected_out')!r}"
-                )
-            return WalletQuote(
-                provider=self.id, chain=chain,
-                token_in=token_in, token_out=token_out,
-                amount_in=float(amount_in),
-                expected_out=expected,
-                min_out=float(doc.get("min_out") or _slippage_floor(expected, slippage_bps)),
-                slippage_bps=slippage_bps,
-                extra={"raw": doc},
-            )
-        expected = float(amount_in) * (1.0 - slippage_bps / 10_000)
-        return WalletQuote(
-            provider=self.id, chain=chain,
-            token_in=token_in, token_out=token_out,
-            amount_in=float(amount_in),
-            expected_out=expected,
-            min_out=_slippage_floor(expected, slippage_bps),
-            slippage_bps=slippage_bps,
-            extra={"note": "CDP Python SDK does not expose a standalone "
-                            "quote; use Wallet.trade for real pricing."},
-        )
+            from ..adapter_contract import parse_quote
+            return parse_quote(self.id,dict(chain=chain,token_in=token_in,token_out=token_out,amount_in=amount_in,slippage_bps=slippage_bps),doc)
+        raise WalletQuoteError("CDP legacy SDK has no executable quote; configure a quote-capable wallet skill")
 
     def swap(
         self, *, chain: str, token_in: str, token_out: str,
@@ -545,6 +561,10 @@ class CoinbaseWallet(WalletProvider):
                 reason="live=False; enable runtime.live_trading_enabled",
                 amount_in=float(amount_in),
             )
+        if self._v2():
+            from .coinbase_v2 import quote_or_swap
+            return quote_or_swap(self,chain=chain,token_in=token_in,token_out=token_out,amount_in=amount_in,
+                slippage_bps=slippage_bps,execute=True,receiver=receiver,**kw)
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
@@ -554,19 +574,15 @@ class CoinbaseWallet(WalletProvider):
                 "chain": chain, "token_in": token_in, "token_out": token_out,
                 "amount_in": amount_in, "slippage_bps": slippage_bps,
                 "receiver": receiver,
+                **{k:v for k,v in kw.items() if k != 'on_broadcast'},
             })
-            return WalletSwapResult(
-                provider=self.id, chain=chain,
-                ok=bool(doc.get("ok")),
-                tx_hash=str(doc.get("tx_hash") or ""),
-                amount_in=float(amount_in),
-                amount_out=float(doc.get("amount_out") or 0.0),
-                reason=str(doc.get("reason") or ""),
-                extra={"raw": doc},
-            )
+            from ..adapter_contract import parse_result
+            return parse_result(self.id,dict(chain=chain,token_out=token_out,amount_in=amount_in,receiver=receiver),doc,on_broadcast=kw.get('on_broadcast'))
         try:
             wallet, kind = self._py_wallet()
             if kind == "cdp":
+                if kw.get('min_out') is not None or receiver:
+                    raise WalletPolicyDenied('CDP legacy trade cannot enforce approved minimum/receiver; configure a compatible swap skill')
                 trade = wallet.trade(
                     amount=amount_in, from_asset_id=token_in,
                     to_asset_id=token_out,

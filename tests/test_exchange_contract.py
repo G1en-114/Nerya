@@ -82,6 +82,11 @@ class FakeCcxtClient:
         self.calls.append(("load_markets", (), {}))
         return self._markets
 
+    id = "bybit"
+
+    def feature_value(self, symbol, method, param):
+        return {} if param in ("stopLoss", "takeProfit") else True
+
     def set_leverage(self, leverage, symbol):
         self.calls.append(("set_leverage", (leverage, symbol), {}))
 
@@ -164,8 +169,8 @@ def test_place_order_forwards_reduce_only_leverage_and_bracket():
         for c in fake.calls
     )
     # Bracket + reduce flags forwarded into params.
-    assert params.get("stopLossPrice") == "140.00"
-    assert params.get("takeProfitPrice") == "170.00"
+    assert params.get("stopLoss") == {"triggerPrice": "140.00"}
+    assert params.get("takeProfit") == {"triggerPrice": "170.00"}
     assert params.get("positionIdx") == 1
     # reduce_only=False on an open, so reduceOnly must NOT be set.
     assert "reduceOnly" not in params
@@ -249,6 +254,7 @@ def test_place_order_spot_does_not_forward_derivatives_params():
         reduce_only=True,
         leverage=5.0,
         stop_loss=40000.0,
+        managed_protection=True,
     )
     create_calls = [c for c in fake.calls if c[0] == "create_order"]
     _method, _args, params = create_calls[0]

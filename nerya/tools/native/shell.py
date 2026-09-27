@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any
 
 from ...core.sandbox import sandbox_exec
+from ...harness.cancellation import CancelledError
+from ...subagents.tasks import TaskStore
 from ...security.runtime_env import build_process_env
 from ..tool_errors import schema_validation_result
 from ..types import (
@@ -505,6 +507,7 @@ def run_shell_handler(
     *,
     root: Path,
     session_id: str | None = None,
+    store: TaskStore | None = None,
 ) -> ToolResult:
     args = call.arguments or {}
     cmd = args.get("command")
@@ -640,6 +643,15 @@ def run_shell_handler(
     except Exception:
         timeout_s = _DEFAULT_TIMEOUT_S
     timeout_s = max(1.0, min(timeout_s, float(_MAX_TIMEOUT_S)))
+    deadline = (call.metadata or {}).get("turn_deadline_epoch")
+    if deadline is not None:
+        timeout_s = min(timeout_s, max(0.0, float(deadline) - time.time()))
+        if timeout_s <= 0:
+            return ToolResult.from_error(
+                tool_use_id=call.id, name=call.name,
+                error=ToolError(kind=ToolErrorKind.TIMEOUT, message="turn deadline expired before launch",
+                                retryable=False),
+            )
 
     try:
         cwd = resolve_workspace_path(str(cwd_arg), root=root, default=".")
@@ -676,8 +688,18 @@ def run_shell_handler(
     if conversation_dir is not None:
         env["NERYA_CONVERSATION_DIR"] = str(conversation_dir)
     started = time.monotonic()
+    cancel_token = (call.metadata or {}).get("cancel_token")
+    record = None
     try:
         if background:
+            if store is None:
+                return ToolResult.from_error(
+                    tool_use_id=call.id, name=call.name,
+                    error=ToolError(kind=ToolErrorKind.EXECUTION_ERROR,
+                                    message="background shell requires TaskStore", retryable=False),
+                )
+            record = store.create(name="run_shell", payload={"command": cmd},
+                                  parent_turn_id=call.turn_id, parent_session_id=session_id)
             proc = sandbox_exec(
                 cmd,
                 shell=True,
@@ -687,7 +709,10 @@ def run_shell_handler(
                 capture_output=True,
                 text=True,
                 background=True,
+                timeout=timeout_s, cancel_token=cancel_token, output_limit=output_limit,
             )
+            store.attach_process(record.task_id, proc.process)
+            current = store.load(record.task_id)
             elapsed_ms = proc.elapsed_ms
             pid = proc.pid
             return ToolResult(
@@ -696,13 +721,17 @@ def run_shell_handler(
                 elapsed_ms=elapsed_ms,
                 content=[
                     ToolResultPart.text_part(
-                        f"$ {cmd}\n[backgrounded; pid={pid}]"
+                        f"$ {cmd}\n[backgrounded; task_id={record.task_id}; pid={pid}]"
                     ),
                     ToolResultPart.json_part(
                         {
                             "command": cmd,
                             "cwd": to_workspace_relative(cwd, root),
                             "pid": pid,
+                            "task_id": record.task_id,
+                            "state": current.state,
+                            "output": current.output,
+                            "hint": "task_output reads live output; task_stop requests termination; confirm process_exited/process_group_stopped",
                             "background": True,
                             "description": description,
                             "placement": shell_placement,
@@ -716,6 +745,7 @@ def run_shell_handler(
                 ],
                 metadata={
                     "pid": pid,
+                    "task_id": record.task_id,
                     "background": True,
                     "placement": shell_placement,
                     **(
@@ -735,6 +765,16 @@ def run_shell_handler(
             timeout=timeout_s,
             capture_output=True,
             text=True,
+            cancel_token=cancel_token, output_limit=output_limit,
+        )
+    except CancelledError as exc:
+        if record is not None:
+            store.finish(record.task_id, error="cancelled before launch", error_kind="cancelled")
+        result = getattr(exc, "result", None)
+        return ToolResult.from_error(
+            tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=ToolErrorKind.ABORTED, message=str(exc), retryable=False,
+                            detail=TaskStore._process_output(result) if result else {}),
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
@@ -746,15 +786,19 @@ def run_shell_handler(
             error=ToolError(
                 kind=ToolErrorKind.TIMEOUT,
                 message=f"command exceeded timeout of {timeout_s}s",
+                retryable=False,
                 detail={
                     "command": cmd,
                     "cwd": to_workspace_relative(cwd, root),
                     "stdout_preview": str(stdout)[:1024],
                     "stderr_preview": str(stderr)[:1024],
+                    **(TaskStore._process_output(exc.result) if hasattr(exc, "result") else {}),
                 },
             ),
         )
     except OSError as exc:
+        if record is not None:
+            store.finish(record.task_id, error=str(exc), error_kind="execution_error")
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -791,13 +835,15 @@ def run_shell_handler(
                 stderr=stderr,
                 exit_code=exit_code,
                 duration_ms=elapsed_ms,
-                truncated=stdout_truncated or stderr_truncated,
+                truncated=stdout_truncated or stderr_truncated or getattr(proc, "truncated", False),
             ),
             ToolResultPart.text_part(text),
         ],
         metadata={
             "command": cmd,
             "exit_code": exit_code,
+            "process_exited": getattr(proc, "process_exited", False),
+            "process_group_stopped": getattr(proc, "process_group_stopped", False),
             "cwd": to_workspace_relative(cwd, root),
             "description": description,
             "placement": shell_placement,

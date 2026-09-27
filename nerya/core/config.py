@@ -170,40 +170,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "memory": {
         "legacy_owner_actor": "default",
-        "external": {
-            "enabled": False,
-            "provider": "",
-            "agentmemory": {
-                "base_url": "http://127.0.0.1:3111",
-                "secret_ref": "",
-                "secret_env": "AGENTMEMORY_SECRET",
-                "project": "",
-                "session_id": "",
-                "context_budget": 2000,
-                "timeout_s": 1.5,
-                "install_command": "npx @agentmemory/agentmemory",
-                "mcp_command": "npx -y @agentmemory/mcp",
-                "viewer_url": "http://127.0.0.1:3113",
-            },
-        },
-        "vector_search": {
-            "enabled": False,
-            "backend": "memsearch",
-            "install_package": "memsearch",
-            "watch_enabled": False,
-            "paths": ["memory", "strategies"],
-            "embedding": {
-                "provider": "openai",
-                "model": "text-embedding-3-small",
-                "base_url": "",
-                "api_key_ref": "",
-            },
-            "milvus": {
-                "uri": "~/.memsearch/milvus.db",
-                "token": "",
-                "collection": "memsearch_chunks",
-            },
-        },
+        "backend": "builtin",
     },
     "workspace_preferences": {
         # Runtime-facing defaults that used to be hardcoded to
@@ -224,9 +191,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "agent": {
         "native": {
             # Match the Workspace chat budget for SDK/API callers too.
-            "max_iterations": 120,
-            "max_total_tool_calls": 400,
-            "max_wall_seconds": 1800.0,
+            "max_iterations": 0,
+            "max_total_tool_calls": 0,
+            "max_wall_seconds": 0.0,
             "max_tokens": 16384,
             "wall_time_final_synthesis_seconds": 30.0,
             "action_tool_wall_reserve_seconds": 15.0,
@@ -376,50 +343,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "token_env": "NERYA_MCP_TOKEN",
         "allowed_hosts": [],
         "allowed_origins": [],
-        "allow_mutating": False,  # legacy strategy generation / trigger emission
-        "allow_tools": None,  # public names, applied after every layer's safety policy
-        "deny_tools": [],
+        # Authenticated MCP / Tunnel clients share the workspace tool surface.
+        # Execution still uses runtime.permission_mode and agent.native.tool_policy.
         "include_legacy": True,
-        "native_tools": {
-            "enabled": True,
-            "mode": "default",
-            "allow_mutating": False,
-            "allow_exec": False,
-            # Management only. Enabling writes must not also expose shell,
-            # trade execution, approval or live-promotion endpoints.
-            "allow_tools": [
-                "role_list", "role_get", "role_save", "role_delete", "subagent_list",
-                "strategy_list", "strategy_view", "strategy_history",
-                "strategy_draft_proposal", "strategy_submit_proposal", "strategy_validate",
-                "strategy_run_history", "strategy_tuning_generate",
-                "strategy_tuning_status", "strategy_tuning_snapshot",
-                "evolve_core_config_patch", "evolve_proposals",
-                "workspace_ui_inspect", "workspace_ui_propose",
-            ],
-            "deny_tools": [],
-        },
-        "dynamic_tools": {
-            "enabled": True,
-            # Defaults to the workspace's active operator preset (see
-            # ``agent.operator.preset``). Set to a specific value to
-            # decouple MCP exposure from the planner preset.
-            "preset": None,
-            # Read-only by default — only actions whose name pattern
-            # looks like a query (see
-            # :func:`nerya.skills.manifest.action_is_read_only`) are
-            # exposed. Set ``allow_mutating: true`` to expose
-            # risk-gated mutating actions (they still go through the
-            # runtime's risk / approval / availability gates).
-            "allow_mutating": False,
-            "include_unimplemented": False,
-            # Skill / action allow-deny lists. Allow-lists are nullable
-            # ("None" = no restriction); deny-lists are simple sequences
-            # of ``"skill_id"`` or ``"skill_id.action"`` strings.
-            "allow_skills": None,
-            "deny_skills": [],
-            "allow_actions": None,
-            "deny_actions": [],
-        },
+        "native_tools": {"enabled": True},
+        "dynamic_tools": {"enabled": True, "include_unimplemented": False},
     },
 }
 

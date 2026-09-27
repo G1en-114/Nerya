@@ -78,13 +78,13 @@ from .evolve import (
     EVOLVE_PROVIDER_PROPOSAL_SCHEMA,
     EVOLVE_PROPOSALS_SCHEMA,
     EVOLVE_REFLECT_SCHEMA,
-    EVOLVE_SKILL_PROPOSAL_SCHEMA,
+    SKILL_MANAGE_SCHEMA,
     evolve_core_config_patch_handler,
     evolve_post_apply_observation_handler,
     evolve_provider_proposal_handler,
     evolve_proposals_handler,
     evolve_reflect_handler,
-    evolve_skill_proposal_handler,
+    skill_manage_handler,
 )
 from .workspace_ui import (
     WORKSPACE_UI_INSPECT_SCHEMA,
@@ -572,6 +572,7 @@ def _wrap_run_shell(deps: NativeToolDeps):
             call,
             root=deps.workspace_root,
             session_id=deps.active_conversation_id or deps.active_session_id,
+            store=deps.task_store,
         )
 
     return handler
@@ -579,6 +580,7 @@ def _wrap_run_shell(deps: NativeToolDeps):
 
 def _wrap_todo_write(deps: NativeToolDeps):
     def handler(call: ToolCall):
+        call.metadata = {**call.metadata, "session_id": deps.active_session_id}
         return todo_write_handler(call, task_state=deps.task_state)
 
     return handler
@@ -1037,9 +1039,14 @@ def _wrap_evolve_proposals(deps: NativeToolDeps):
     return handler
 
 
-def _wrap_evolve_skill_proposal(deps: NativeToolDeps):
+def _wrap_skill_manage(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return evolve_skill_proposal_handler(call, config=deps.config)
+        return skill_manage_handler(
+            call,
+            config=deps.config,
+            skill_index=deps.skill_index,
+            skill_kernel=deps.skills,
+        )
 
     return handler
 
@@ -1657,14 +1664,11 @@ def build_native_tool_deps(
     fs = file_state if file_state is not None else FileStateCache()
     ts = task_state if task_state is not None else TaskState()
     skill_roots_list = [Path(r) for r in skill_roots]
-    skill_files = None
-    if skills is not None:
-        skill_files = [
-            Path(entry.manifest.path) / "SKILL.md"
-            for entry in skills.registry.list()
-            if entry.manifest.path is not None
-        ]
-    si = SkillIndex(skill_roots_list, skill_files=skill_files)
+    si = SkillIndex(
+        skill_roots_list,
+        registry_provider=(lambda: skills.registry) if skills is not None else None,
+        refresh_registry=skills.reload if skills is not None else None,
+    )
     # Default to a paths layout rooted at the workspace so memory tools
     # have somewhere to land even when the caller hasn't passed an
     # explicit ``paths`` (e.g. CLI ad-hoc invocation).
@@ -1823,7 +1827,7 @@ def register_native_tools(
                 "role_list or subagent_list (not find subagents); run a "
                 "backtest -> strategy_backtest (not python -m ...backtest_run); "
                 "strategy / connector / wallet / on-chain / market data -> "
-                "skill_view (strategy_author), connector_list / connector_view, "
+                "Skill (strategy_author), connector_list / connector_view, "
                 "data_api, market_data; author strategy code -> "
                 "strategy_draft_proposal followed by edit_file / write_file "
                 "on the staged proposal files to author SDK code. "
@@ -1850,7 +1854,7 @@ def register_native_tools(
             result_kind="shell",
             risk_classifier=classify_shell_risk,
         ),
-        make_native_descriptor(name="request_user_input", description="Ask the user a question and pause durably. Use choices for single or multiple selection, or omit choices for free text. Only the lead conversation can ask.",
+        make_native_descriptor(name="request_user_input", description="Ask optional clarification questions and pause durably. Put each independent question in questions with a unique id, question text, and optional answer options. Options must be actual answers, never questions or missing parameters. Omit options for free text; each question also allows custom input. Use multiple only for multiple answers to the SAME question. Users may skip questions; omitted answers are unknown, not consent or permission. Only the lead conversation can ask.",
             input_schema=QUESTION_SCHEMA, handler=lambda call: interaction_handler(call,deps=deps,kind="question"),
             risk=RiskLevel.READ, read_only=True, is_concurrency_safe=False, auto_approve=True),
         make_native_descriptor(name="propose_plan", description="Save a plan with steps, deliverables and constraints for user acceptance. This pauses; acceptance never grants financial or tool permissions.",
@@ -1878,7 +1882,7 @@ def register_native_tools(
             name="skill_index",
             description=(
                 "List installed SKILL.md playbooks (id and description). "
-                "Read a playbook with skill_view or Skill."
+                "Read a playbook with the canonical Skill tool."
             ),
             input_schema=_SKILL_INDEX_SCHEMA,
             handler=_wrap_skill_index(deps),
@@ -2359,6 +2363,8 @@ def register_native_tools(
                 ),
             ])
     if deps.config is not None:
+        from .historical_data import historical_data_descriptors
+        descriptors.extend(historical_data_descriptors(deps.config))
         # ----- conversational workspace customization -----
         descriptors.extend([
             make_native_descriptor(
@@ -2433,7 +2439,7 @@ def register_native_tools(
                     "exact read-only lookup instead of using shell, glob, "
                     "or workspace directory searches. This tool is read-only "
                     "and cannot create or apply a proposal; do not use it as "
-                    "a substitute for evolve_reflect, evolve_skill_proposal, "
+                    "a substitute for evolve_reflect, skill_manage, "
                     "workspace_ui_propose, evolve_core_config_patch, "
                     "strategy_draft_proposal, or "
                     "strategy_tuning_generate when the task asks for new "
@@ -2448,21 +2454,17 @@ def register_native_tools(
                 auto_approve=True,
             ),
             make_native_descriptor(
-                name="evolve_skill_proposal",
+                name="skill_manage",
                 description=(
-                    "Capture a repeated or newly discovered workflow as a "
-                    "reviewable SKILL.md proposal. Writes only under "
-                    "evolution/proposals/<id>/after/skills/<skill_id>/; "
-                    "does not activate or mutate live skills. If the operator "
-                    "asks Nerya to learn, add, or create a reusable skill or "
-                    "workflow, call this tool after the minimum necessary "
-                    "research instead of ending with a prose promise. Do not "
-                    "use this for ambiguous bug reports or targetful operations "
-                    "like promote/apply/approve unless the operator explicitly "
-                    "asks to turn that workflow into a reusable skill."
+                    "Manage Workspace Skills directly: save creates or updates "
+                    "a reusable workflow, while enable/disable/delete act on an "
+                    "existing skill id. Changes take effect immediately and the "
+                    "live Skill registry is reloaded. Newly created Skills are "
+                    "enabled automatically. No proposal or Action Inbox approval "
+                    "is created."
                 ),
-                input_schema=EVOLVE_SKILL_PROPOSAL_SCHEMA,
-                handler=_wrap_evolve_skill_proposal(deps),
+                input_schema=SKILL_MANAGE_SCHEMA,
+                handler=_wrap_skill_manage(deps),
                 risk=RiskLevel.WRITE,
                 permission_scope=PermissionScope.WORKSPACE,
                 read_only=False,
@@ -3168,14 +3170,15 @@ def register_native_tools(
             make_native_descriptor(
                 name="strategy_draft_proposal",
                 description=(
-                    "Scaffold a NEW strategy package as a DRAFT proposal, or "
+                    "Save and validate a NEW authored strategy bundle using files, or scaffold a DRAFT proposal. "
                     "seed a draft from an existing promoted strategy via "
                     "from_strategy_id to iterate on it. Returns the "
                     "proposal_id plus `proposal_paths` (the "
                     "after/strategies/<id>/ files: strategy.yml, strategy.md, "
                     "main.py, tests/...) and `next_steps`. This does NOT enter "
-                        "the pending-review queue and writes NO inline code — you "
-                        "then author the logic by editing the staged files with "
+                        "the pending-review queue. For fully specified new work, pass complete main.py, strategy.yml, strategy.md and tests in files. "
+                        "Successful inline validation needs no redundant read/edit/validate calls; submit the same candidate, then backtest. "
+                        "When files are omitted, author the scaffold by editing the staged files with "
                         "read_file + edit_file / write_file (they live under "
                         "evolution/proposals/<id>/ which the workspace mutation "
                         "guard allows), run strategy_validate, and finish with "
@@ -3185,8 +3188,8 @@ def register_native_tools(
                         "submission keeps the authored draft unsubmitted. A ban "
                         "on running, promotion or trading does NOT ban implementing "
                         "and validating an observation-only strategy. Read the "
-                        "strategy_author skill and references/workflows.md "
-                    "(skill_view) for the exact per-file format. Only for "
+                        "strategy_author skill; read references/workflows.md only for nontrivial mixed-node strategies "
+                    "through the canonical Skill tool for the exact per-file format. Only for "
                     "requests that actually ask for a strategy: never reroute "
                     "'enable live trading' or an immediate buy/sell order into "
                     "a strategy package. Author main.py inside the "
@@ -3318,6 +3321,22 @@ def register_native_tools(
                     "the operator gives a prp_* proposal id, call this with "
                     "proposal_id and do not substitute a similarly named "
                     "promoted strategy_id. "
+                    "When the target strategy.yml declares a backtest block, "
+                    "proposal_id/strategy_id alone is sufficient for those replay "
+                    "assumptions: strategy_backtest reads them internally. Do NOT "
+                    "call evolve_proposals, read_file, run_shell/cat, grep, or memory "
+                    "just to discover candidate backtest defaults. Normal verification "
+                    "keeps those candidate assumptions authoritative; only use "
+                    "override_candidate_backtest_defaults=true when the operator "
+                    "explicitly requested a different replay assumption. "
+                    "If the operator requested a non-default duration, "
+                    "timeframe, warmup, capital, costs or position limit, "
+                    "pass settings on the FIRST replay (or an existing advanced "
+                    "config_path); no separate config file is needed. The tool "
+                    "owns preflight, data reuse/download, coverage validation, "
+                    "isolated execution and report creation. Do not manually "
+                    "orchestrate separate data/preflight calls unless a failed "
+                    "preparation requires recovery or download-only was requested. "
                     "The default preset requests roughly six months of "
                     "history for general CEX strategies; meme/on-chain/DEX "
                     "pool strategies use a one-week requested window unless "
@@ -3325,10 +3344,10 @@ def register_native_tools(
                     "window is a 45-day window when real data coverage allows. "
                     "Treat a returned recommended_coverage_ok flag as the "
                     "short-window backtest coverage signal for those markets. "
-                    "In both cases, use the "
-                    "maximum real-data window the source can return. Shorter "
-                    "windows are valid for new/short-lived markets when the "
-                    "package/result explains the data coverage. "
+                    "Strict coverage is the default. Preserve an explicit "
+                    "requested year and timeframe. A partial download is not "
+                    "proof the venue has no older data. Partial-window research "
+                    "requires an explicit allow_partial choice, not a silent fallback. "
                     "Writes backtest artifacts under the package's "
                     "backtests/<timestamp>/ directory and returns the verdict "
                     "plus key metrics, `strategy_root`, and artifact paths. "
@@ -3360,7 +3379,10 @@ def register_native_tools(
                     "dumps, or any 'copy these values' style notes verbatim. "
                     "Raw *_pct metric values are already percentage points; "
                     "display 0.15 as 0.15%, not 15%. Never multiply them "
-                    "by 100. The model-facing `metrics` "
+                    "by 100. Use operator_summary.benchmark_comparison (or the "
+                    "sign of alpha_vs_benchmark_pct) for relative-performance "
+                    "wording: positive alpha means outperformed even if both "
+                    "returns are negative. The model-facing `metrics` "
                     "object contains display strings; read `raw_metrics_file` "
                     "only for machine verification."
                 ),

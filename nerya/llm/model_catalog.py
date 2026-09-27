@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.time import now_iso
+from .model_registry import context_window_limit
 from .providers import (
     DEFAULT_BASE_URLS,
     ModelInfo,
@@ -106,7 +107,8 @@ class ModelCatalog:
             cleaned.append({
                 "id": mid,
                 "owned_by": str(row.get("owned_by") or row.get("owner") or provider_id),
-                "context_length": row.get("context_length"),
+                "context_length": context_window_limit(row.get("context_window"), row.get("context_length")) or None,
+                "context_window": context_window_limit(row.get("context_window"), row.get("context_length")) or None,
                 "capabilities": [str(c) for c in caps if str(c)],
             })
 
@@ -225,6 +227,7 @@ def _model_info_to_dict(m: ModelInfo) -> dict[str, Any]:
         "id": m.id,
         "owned_by": m.owned_by,
         "context_length": m.context_length,
+        "context_window": m.context_length,
         "capabilities": m.capabilities,
     }
 

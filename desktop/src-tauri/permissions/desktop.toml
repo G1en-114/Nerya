@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-desktop"
+description = "Read desktop status, configure sharing and notifications, drag the trusted Nerya window, and quit. Each command also verifies the active window origin."
+commands.allow = ["desktop_status", "desktop_configure", "desktop_test_notification", "desktop_notification_settings", "desktop_start_dragging", "desktop_quit"]

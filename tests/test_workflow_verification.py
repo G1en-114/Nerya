@@ -146,14 +146,16 @@ def test_real_standard_replay_writes_provenance(tmp_path,monkeypatch):
     cfg,pkg=seed(tmp_path)
     raw=yaml_io.load(pkg.root/"strategy.yml"); raw["evaluation"]={"mode":"observation"}
     yaml_io.dump(pkg.root/"strategy.yml",raw)
-    (pkg.root/"main.py").write_text('def run(ctx):\n    return {"status":"ok","reason":"controlled engine check"}\n')
+    (pkg.root/"main.py").write_text('from nerya.strategies import StrategyAgentTask\ndef run(ctx):\n    return StrategyAgentTask.skip("controlled engine check")\n')
     monkeypatch.setattr(replay,"load_workspace_config",lambda *_:cfg)
     def series(config,**_):
         config.tf="15m"; config.timeframes=["15m"]
-        rows=[{"ts":1700000000+i*900,"open":100,"high":101,"low":99,"close":100,"volume":0,"fixture":"controlled"} for i in range(240)]
+        rows=[{"ts":1700000100+i*900,"open":100,"high":101,"low":99,"close":100,"volume":0,"fixture":"controlled"} for i in range(240)]
         return {m:{"15m":deepcopy(rows)} for m in config.markets},["15m"],{}
     monkeypatch.setattr(replay,"_load_candles_with_timeframe_fallback",series)
-    out=replay.run_strategy_backtest(strategy_id=pkg.strategy_id,workspace=tmp_path,allow_mock=True)
+    out=replay.run_strategy_backtest(strategy_id=pkg.strategy_id,workspace=tmp_path,allow_mock=True,
+        settings={"tf":"15m", "timeframes":["15m"], "warmup_bars":0,
+                  "start_utc":"2023-11-14T22:15:00Z", "end_utc":"2023-11-17T10:15:00Z"})
     stored=json.loads(Path(out["metrics_path"]).read_text())
     assert stored["provenance"] == out["provenance"]
     assert out["provenance"]["data_kind"] == "sample"

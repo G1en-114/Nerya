@@ -94,6 +94,130 @@ def test_backtest_incompatible_strategy_context_surfaces_are_blocked() -> None:
     assert "ctx.config.accounts[0]" in message
 
 
+def test_strategy_config_mapping_and_parameter_accessors_are_supported() -> None:
+    result = validate_proposal_files(
+        strategy_id="no_subagent_required",
+        files=_files_with_main(
+            "\n".join(
+                [
+                    "def run(ctx):",
+                    "    params = ctx.config.get('params') or {}",
+                    "    tf = ctx.config.timeframe",
+                    "    p2 = ctx.config.params",
+                    "    return ctx.result.hold(reason=str((params, tf, p2)))",
+                ]
+            )
+        ),
+    )
+
+    assert result.ok, [issue.message for issue in result.blockers]
+
+
+def test_mock_facade_configuration_is_not_misclassified_as_runtime_code():
+    from nerya.strategies.validator import _walk_ast
+    import ast
+    source = "ctx.portfolio.positions.return_value = []\nctx.market.features.return_value = {}\n"
+    assert not _walk_ast(ast.parse(source), where="tests/test_contract.py")
+    assert _walk_ast(ast.parse(source), where="main.py")
+    unsafe = _walk_ast(ast.parse("import requests\n"), where="tests/test_contract.py")
+    assert any(issue.code == "forbidden_import" for issue in unsafe)
+
+
+def test_self_relative_stop_that_cannot_trigger_is_blocked() -> None:
+    result = validate_proposal_files(
+        strategy_id="no_subagent_required",
+        files=_files_with_main(
+            "\n".join(
+                [
+                    "def run(ctx):",
+                    "    last_close = 100.0",
+                    "    atr_now = 2.0",
+                    "    atr_stop = last_close - 1.5 * atr_now",
+                    "    if last_close <= atr_stop:",
+                    "        return ctx.result.ok(reason='stop')",
+                    "    return ctx.result.hold(reason='wait')",
+                ]
+            )
+        ),
+    )
+
+    assert not result.ok
+    issue = next(i for i in result.blockers if i.code == "self_relative_stop_condition")
+    assert "can never trigger" in issue.message
+    assert "entry price or persisted high-water" in issue.message
+
+
+def test_generated_backtest_source_snapshots_do_not_revalidate_as_current_source() -> None:
+    files = _files_with_main(
+        "def run(ctx):\n"
+        "    return ctx.result.hold(reason='current-source-ok')\n"
+    )
+    files[
+        "backtests/20260927_060241/source/no_subagent_required/main.py"
+    ] = (
+        "def run(ctx):\n"
+        "    params = ctx.config.get('params') or {}\n"
+        "    last_close = 100.0\n"
+        "    atr_stop = last_close - 2.0\n"
+        "    if last_close <= atr_stop:\n"
+        "        return ctx.result.ok(reason=str(params))\n"
+        "    return ctx.result.hold(reason='old-broken-snapshot')\n"
+    )
+
+    result = validate_proposal_files(
+        strategy_id="no_subagent_required",
+        files=files,
+    )
+
+    assert result.ok
+    assert not any("backtests/20260927_060241" in issue.where for issue in result.issues)
+
+
+def test_authored_freeform_backtest_script_is_still_static_scanned() -> None:
+    files = _files_with_main(
+        "def run(ctx):\n"
+        "    return ctx.result.hold(reason='current-source-ok')\n"
+    )
+    files["backtests/research_backtest.py"] = (
+        "import subprocess\n"
+        "subprocess.run(['echo', 'bad'])\n"
+    )
+
+    result = validate_proposal_files(
+        strategy_id="no_subagent_required",
+        files=files,
+    )
+
+    assert not result.ok
+    assert any(
+        issue.code in {"forbidden_import", "subprocess"}
+        and issue.where == "backtests/research_backtest.py"
+        for issue in result.blockers
+    )
+
+
+def test_invalid_candidate_backtest_defaults_fail_strategy_validation() -> None:
+    files = _files_with_main(
+        "def run(ctx):\n"
+        "    return ctx.result.hold(reason='fixture')\n"
+    )
+    files["strategy.yml"] += """
+backtest:
+  warmup_bars: -1
+  unknown_replay_knob: 42
+"""
+
+    result = validate_proposal_files(
+        strategy_id="no_subagent_required",
+        files=files,
+    )
+
+    assert not result.ok
+    issues = [issue for issue in result.blockers if issue.code == "backtest_config_invalid"]
+    assert len(issues) == 1
+    assert "unknown backtest setting" in issues[0].message
+
+
 def test_backtest_incompatible_candle_facade_aliases_are_blocked() -> None:
     result = validate_proposal_files(
         strategy_id="no_subagent_required",

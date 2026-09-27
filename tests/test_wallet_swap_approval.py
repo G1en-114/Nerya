@@ -99,6 +99,7 @@ class FakeProvider:
             tx_hash="tx-wallet-1",
             amount_in=kwargs["amount_in"],
             amount_out=99.5,
+            extra={"confirmed":True,"amount_out_source":"transaction_meta"},
         )
 
 
@@ -158,7 +159,10 @@ def test_wallet_swap_request_is_frozen_with_full_quote_and_no_side_effect(
     assert record["actor_id"] == "token:wallet-operator"
     assert record["approval_actor_id"] == "token:wallet-operator"
     assert record["execution_mode"] == "live"
-    assert record["wallet_swap"] == {
+    frozen = dict(record["wallet_swap"])
+    assert frozen.pop("wallet_id") == "byreal"
+    assert frozen.pop("wallet_fingerprint")
+    assert frozen == {
         "provider": "byreal",
         "chain": "solana",
         "token_in": "SOL",
@@ -326,5 +330,5 @@ def test_wallet_swap_resume_payload_is_auditable_json(tmp_path, monkeypatch):
     row = _db_approval(cfg, requested["approval_id"])
     payload = json.loads(row["payload"])
     assert payload["resume_attempts"] == 1
-    assert payload["resume_status"] == "executed"
+    assert payload["resume_status"] == "confirmed"
     assert payload["resume_error"] is None

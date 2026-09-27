@@ -2,11 +2,9 @@
 
 Each case pins one Round-3 finding:
 
-* R3S1 — the backtest ``MockTrading`` answers with a terminal
-  paper-equivalent ``filled`` envelope (order summary included), the
-  only status the compat adapters treat as executed, so imported
-  Freqtrade/VNpy strategies register positions and manage exits in
-  replay instead of degenerating into engine forced_close.
+* R3S1 — replay submissions stay pending until settlement; estimates are
+  separated from actual fill fields. Compat position reconciliation is
+  covered by test_compat_frameworks, including managed exits.
 * R3S2 — ``_summarise_trades`` reads the D6 fill mirror's
   ``realized_pnl_usd`` key (falling back to ``realized_usd``).
 * R3S3 — ``_closed_trade_pairs`` keeps the unconsumed residual of a
@@ -82,20 +80,20 @@ def _fake_ctx(candles: list[dict], trading: EnvelopeTrading) -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
-# R3S1 — MockTrading terminal filled envelope
+# R3S1 — MockTrading truthful queued envelope
 # ---------------------------------------------------------------------------
 
 
-def test_mock_trading_submit_returns_terminal_filled_envelope() -> None:
+def test_mock_trading_submit_returns_queued_envelope_with_separate_estimates() -> None:
     trading = MockTrading([], "s1", state=MockState(), mark_price=50.0)
     env = trading.submit_intent(market=MARKET, side="buy", size=100.0, size_unit="usd", order_type="market")
-    assert env["status"] == "filled"
+    assert env["status"] == "submitted"
     order = env["order"]
-    assert order["status"] == "filled"
-    assert order["order_id"]
-    assert order["filled_size"] == pytest.approx(100.0 / 50.0)
-    assert order["avg_price"] == pytest.approx(50.0)
-    assert order["notional_usd"] == pytest.approx(100.0)
+    assert order["status"] == "submitted"
+    assert order["order_id"] is None
+    assert order["filled_size"] == 0
+    assert order["avg_price"] is None
+    assert env["execution_estimate"] == {"size": 2.0, "price": 50.0, "notional_usd": 100.0}
     assert env["intent_id"]
 
 
@@ -105,15 +103,18 @@ def test_mock_trading_base_size_passes_through_and_close_uses_book() -> None:
     trading = MockTrading([], "s1", state=state, mark_price=110.0)
 
     env = trading.submit_intent(market=MARKET, side="buy", size=2.0, size_unit="base", order_type="market")
-    assert env["order"]["filled_size"] == pytest.approx(2.0)
+    assert env["execution_estimate"]["size"] == pytest.approx(2.0)
+    assert env["order"]["filled_size"] == 0
 
     close_env = trading.close_position(market=MARKET, side="long")
-    assert close_env["status"] == "filled"
-    assert close_env["order"]["filled_size"] == pytest.approx(1.5)
+    assert close_env["status"] == "submitted"
+    assert close_env["execution_estimate"]["size"] == pytest.approx(1.5)
+    assert close_env["order"]["filled_size"] == 0
 
     reduce_env = trading.reduce_position(market=MARKET, side="long", reduce_pct=0.5)
-    assert reduce_env["status"] == "filled"
-    assert reduce_env["order"]["filled_size"] == pytest.approx(0.75)
+    assert reduce_env["status"] == "submitted"
+    assert reduce_env["execution_estimate"]["size"] == pytest.approx(0.75)
+    assert reduce_env["order"]["filled_size"] == 0
 
 
 def test_mock_trading_legacy_bare_exit_estimates_book_qty() -> None:
@@ -121,7 +122,8 @@ def test_mock_trading_legacy_bare_exit_estimates_book_qty() -> None:
     state.set(f"position:{MARKET}", {"qty": 2.0, "avg_price": 100.0})
     trading = MockTrading([], "s1", state=state, mark_price=105.0)
     env = trading.submit_intent(market=MARKET, side="sell", size=0, size_unit="usd", order_type="market")
-    assert env["order"]["filled_size"] == pytest.approx(2.0)
+    assert env["execution_estimate"]["size"] == pytest.approx(2.0)
+    assert env["order"]["filled_size"] == 0
 
 
 # ---------------------------------------------------------------------------

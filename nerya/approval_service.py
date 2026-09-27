@@ -119,6 +119,54 @@ class ApprovalService:
             and not self.expired(record, now=now)
         ]
 
+    def resolved(self, approval_id: str) -> dict[str, Any] | None:
+        for path in (self.config.paths.approvals_approved, self.config.paths.approvals_rejected):
+            if path.exists():
+                for record in reversed(jsonl.read_all(path)):
+                    if str(record.get("approval_id") or record.get("id") or "") == approval_id:
+                        return record
+        return None
+
+    def resolution_states(self, session_id: str) -> list[dict[str, Any]]:
+        """Read-only terminal decision labels, not executable payloads."""
+        records = {}
+        for path in (self.config.paths.approvals_approved, self.config.paths.approvals_rejected):
+            for row in jsonl.read_all(path) if path.exists() else []:
+                if str(row.get("requester_session_id") or row.get("session_id") or "") != session_id:
+                    continue
+                state = row.get("state")
+                aid = str(row.get("approval_id") or row.get("id") or "")
+                if aid and state in {"approved", "rejected", "expired", "cancelled"}:
+                    records[aid] = {"id":aid,"state":state,"kind":row.get("kind"),"turn_id":row.get("turn_id")}
+        return list(records.values())[-100:]
+
+    def reconcile_commands(self, manager, sid):
+        """Observe durable decisions and expiry independently of any browser."""
+        with manager.store.transaction() as con:
+            turns = {row[0] for row in con.execute(
+                "SELECT turn_id FROM agent_commands WHERE session_id=? AND state='awaiting_approval'", (sid,))}
+        if not turns:
+            return False
+        waiting = False
+        paths = self.config.paths
+        for path in (paths.approvals_pending, paths.approvals_approved, paths.approvals_rejected):
+            if not path.exists():
+                continue
+            for record in jsonl.read_all(path):
+                if ((record.get("requester_session_id") or record.get("session_id")) != sid
+                        or record.get("turn_id") not in turns
+                        or record.get("kind") in _FINANCIAL_KINDS):
+                    continue
+                aid = str(record.get("approval_id") or record.get("id") or "")
+                if record.get("state", "pending") == "pending":
+                    if not self.expired(record):
+                        waiting = True
+                        continue
+                    record = self.move(aid, state="expired") or self.resolved(aid)
+                if record:
+                    manager.resolve_approval(record, start=False)
+        return waiting
+
     def find(self, approval_id: str) -> dict[str, Any] | None:
         approval_id = str(approval_id or "").strip()
         for record in self.pending():
@@ -138,7 +186,7 @@ class ApprovalService:
         resolver_actor_id: str = "",
         operator_authorized: bool = False,
     ) -> dict[str, Any] | None:
-        if state not in {"approved", "rejected"}:
+        if state not in {"approved", "rejected", "expired", "cancelled"}:
             raise ValueError(f"unsupported approval state: {state}")
         paths = self.config.paths
         source = paths.approvals_pending
@@ -154,9 +202,11 @@ class ApprovalService:
                     or str(record.get("id") or "") == approval_id
                 )
                 if moved is None and matches:
-                    if self.expired(record):
+                    if state == "expired" and not self.expired(record):
                         return None
-                    if not self.can_resolve(
+                    if state != "expired" and self.expired(record):
+                        return None
+                    if state != "expired" and not self.can_resolve(
                         record,
                         resolver_actor_id,
                         operator_authorized=operator_authorized,
@@ -174,6 +224,10 @@ class ApprovalService:
                     continue
                 kept.append(record)
             if moved is None:
+                old = self.resolved(approval_id)
+                if (old and old.get("kind") not in _FINANCIAL_KINDS and old.get("state") == state
+                        and self.can_resolve(old, resolver_actor_id, operator_authorized=operator_authorized)):
+                    return old
                 return None
             jsonl.write_all(source, kept)
             target = (
@@ -221,6 +275,23 @@ class ApprovalService:
             pass
 
         kind = str(resolved.get("kind") or "").strip()
+        if kind not in _FINANCIAL_KINDS:
+            try:
+                from .agent.command_runtime import runtime
+                manager = runtime(self.config)
+                # Use the persisted resolution, never callback-supplied state.
+                saved = self.resolved(approval_id)
+                if not saved or saved.get("state") != state:
+                    return None
+                resume_result = manager.resolve_approval(saved)
+                sid = saved.get("requester_session_id") or saved.get("session_id")
+                if sid:
+                    manager.kick(sid)
+                return resume_result
+            except Exception:
+                # The runtime rechecks the same durable record after finish;
+                # callbacks can arrive while the original turn still owns its lease.
+                return {"ok": False, "approval_id": approval_id, "error": "approval_continuation_pending"}
         if str(state or "").lower() != "approved":
             return None
         try:

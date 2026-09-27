@@ -1,5 +1,8 @@
 ---
 name: finance.private_equity
+metadata:
+  nerya:
+    catalog_group: professional
 description: "Private investment lifecycle: sourcing, screening, diligence, IC memos, returns, unit economics, AI readiness, portfolio monitoring and value creation."
 version: 0.2.0
 license: MIT

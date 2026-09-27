@@ -236,12 +236,11 @@ test('real Chromium viewport and Network are live, inspectable and compact',asyn
 });
 
 test('browser settings have one switch and no engine installer',async({page})=>{
-  const state=await fixture(page);await page.goto('/browsers?tab=engines');
+  const state=await fixture(page);await page.goto('/browsers');
   const prefs=page.getByTestId('browser-preferences');await expect(prefs).toBeVisible();
   await expect(prefs.getByRole('switch')).toBeChecked();
   await prefs.getByRole('switch').uncheck();await expect(prefs.getByRole('switch')).not.toBeChecked();
   await expect(page.getByRole('button',{name:/install|select engine|probe/i})).toHaveCount(0);
-  await expect(page.getByText(/camofox|cloakbrowser|lightpanda|obscura/i)).toHaveCount(0);
   await page.screenshot({path:'test-results/browser-simple-settings.png'});
   expect(state.requests.filter(r=>r.operation==='preferences'&&r.automatic===false)).toHaveLength(1);
   expect(state.errors).toEqual([]);

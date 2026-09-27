@@ -200,7 +200,7 @@ def test_normal_turn_cannot_replace_another_workers_live_lease(
     assert current["claim_id"] == "tcp_live_worker"
 
 
-def test_failed_durable_resume_leaves_checkpoint_claimed_and_unreplayable(
+def test_failed_durable_resume_discards_checkpoint_and_prevents_replay(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -232,12 +232,11 @@ def test_failed_durable_resume_leaves_checkpoint_claimed_and_unreplayable(
         )
     finally:
         con.close()
-    assert claimed is not None
-    assert str(claimed["claim_id"] or "").startswith("tcp_")
+    assert claimed is None
 
     with pytest.raises(
         TurnCheckpointResumeError,
-        match="already being resumed",
+        match="No durable checkpoint",
     ) as exc_info:
         AgentKernel(config=cfg, skills=None).run_turn(  # type: ignore[arg-type]
             trigger=_trigger("event-3"),
@@ -245,5 +244,59 @@ def test_failed_durable_resume_leaves_checkpoint_claimed_and_unreplayable(
             resume_turn_id="turn-failed-resume",
             continuation_feedback="retry the same checkpoint",
         )
-    assert exc_info.value.code == "turn_checkpoint_already_claimed"
-    assert exc_info.value.status == 409
+    assert exc_info.value.code == "turn_checkpoint_not_found"
+    assert exc_info.value.status == 404
+
+def test_large_checkpoint_persists_and_resumes_across_instances(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    cfg.data['agent']['native']['turn_checkpoint_max_bytes'] = 1024
+    answer = '研究证据' * 200000
+    calls = _install_scripted_gateway(monkeypatch, [_text_response(answer), _text_response('next')])
+    kernel = AgentKernel(config=cfg, skills=None)
+    first = kernel.run_turn(trigger=_trigger('large', 'research'), session_id='overflow', turn_id='large-turn')
+    assert first.final_text == answer
+    assert first.budget['checkpoint']['persisted'] is True
+    assert first.budget['checkpoint']['resumable'] is True
+    assert first.budget['checkpoint']['bytes'] > 2 * 1024 * 1024
+    second = AgentKernel(config=cfg, skills=None).run_turn(
+        trigger=_trigger('next'), session_id='overflow', resume_turn_id='large-turn',
+        continuation_feedback='continue from the complete evidence')
+    assert second.final_text == 'next'
+    assert second.budget['checkpoint']['resume_count'] == 1
+    assert answer in str(calls[-1])
+
+
+def test_failed_turn_releases_only_its_own_lease(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    kernel = AgentKernel(config=cfg, skills=None)
+    original = kernel._run
+    def fail(**kwargs):
+        raise RuntimeError('injected failure after lease acquisition')
+    monkeypatch.setattr(kernel, '_run', fail)
+    with pytest.raises(RuntimeError, match='injected failure'):
+        kernel.run_turn(trigger=_trigger('fail'), session_id='failed-lease')
+    monkeypatch.setattr(kernel, '_run', original)
+    _install_scripted_gateway(monkeypatch, [_text_response('recovered')])
+    result = kernel.run_turn(trigger=_trigger('recover'), session_id='failed-lease')
+    assert result.final_text == 'recovered'
+
+
+def test_provider_skill_load_compatibility_uses_canonical_tool(tmp_path, monkeypatch):
+    from nerya.tools.native.skill import SkillIndex
+    from nerya.tools.native.skill_tool import register_skill_tool
+    skill = tmp_path / 'skills' / 'fixture'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('---\nname: fixture\ndescription: fixture\n---\nRead-only fixture instructions.')
+    kernel = AgentKernel(config=_config(tmp_path), skills=None)
+    kernel._ensure_registry()
+    register_skill_tool(kernel._registry, skill_index=SkillIndex([skill.parent]), replace=True)
+    calls = _install_scripted_gateway(monkeypatch, [
+        MessagesResponse(content=[{'type': 'tool_use', 'id': 'skill-call', 'name': 'skill_load', 'input': {'skill': 'fixture'}}], stop_reason='tool_use'),
+        _text_response('loaded'),
+    ])
+    result = kernel.run_turn(trigger=_trigger('skill', 'load fixture'), session_id='skill-alias')
+    assert result.final_text == 'loaded'
+    import json
+    transcript = json.dumps(calls[-1])
+    assert 'Read-only fixture instructions.' in transcript
+    assert 'permission_denied' not in transcript

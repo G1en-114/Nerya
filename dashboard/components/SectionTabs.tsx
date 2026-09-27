@@ -40,7 +40,6 @@ const SECTIONS: Record<
     tabs: [
       { labelKey: "agents", href: "/agents" },
       { labelKey: "skills", href: "/skills" },
-      { labelKey: "tasks", href: "/tasks" },
     ],
   },
 };

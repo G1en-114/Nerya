@@ -141,6 +141,7 @@ class ExecutorOrchestrator:
         plan_id: str | None = None,
         protection: ProtectionRule | None = None,
         position_id: str | None = None,
+        executor_id: str | None = None,
     ) -> Executor:
         from .market_order import MarketOrderConfig, MarketOrderExecutor
 
@@ -166,6 +167,11 @@ class ExecutorOrchestrator:
             position_id=position_id,
             paths=self.paths,
         )
+        if executor_id:
+            executor.run.executor_id = executor_id
+            existing = self._load(executor_id)
+            if existing is not None:
+                return MarketOrderExecutor(existing, self.paths)
         self._persist(executor.run)
         return executor
 
@@ -198,7 +204,25 @@ class ExecutorOrchestrator:
             protection_id=rule.protection_id,
             paths=self.paths,
         )
-        self._persist(executor.run)
+        # A fill, its background poller and restart recovery may all arm
+        # the same rule. One durable executor per rule prevents duplicate exits.
+        executor.run.executor_id = f"exc_{rule.protection_id}"
+        con = self._con_lazy()
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            prior = con.execute(
+                "SELECT * FROM executor_runs WHERE kind = 'position_protection' AND protection_id = ? "
+                "ORDER BY created_at LIMIT 1", (rule.protection_id,),
+            ).fetchone()
+            existing = _row_to_run(prior) if prior is not None else None
+            if existing is not None:
+                executor = PositionProtectionExecutor(existing, self.paths)
+            else:
+                self._persist(executor.run)
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
         return executor
 
     # -- driving ---------------------------------------------------------------
@@ -227,6 +251,18 @@ class ExecutorOrchestrator:
 
     def step_executor(self, executor: Executor) -> bool:
         """Drive a single tick of one executor. Returns True if terminal."""
+        from ..locks import trading_lock
+        with trading_lock(self.paths, executor.run.executor_id) as acquired:
+            if not acquired:
+                return False
+            latest = self._load(executor.run.executor_id)
+            if latest is not None:
+                executor.run = latest
+            if executor.run.is_terminal:
+                return True
+            return self._step_locked(executor)
+
+    def _step_locked(self, executor: Executor) -> bool:
         try:
             executor.heartbeat()
             if executor.run.state == "created":
@@ -269,6 +305,8 @@ class ExecutorOrchestrator:
         registry = _registry()
         touched = 0
         for run in self.list_active():
+            if (run.config_json.get("candidate") or {}).get("meta", {}).get("protects_rule"):
+                continue  # the owning protection executor drives both legs
             cls = registry.get(run.kind)
             if cls is None:
                 continue
@@ -279,6 +317,13 @@ class ExecutorOrchestrator:
 
     # -- operator hooks --------------------------------------------------------
     def cancel(self, executor_id: str, *, reason: str = "manual_cancel") -> ExecutorRun | None:
+        from ..locks import trading_lock
+        with trading_lock(self.paths, executor_id) as acquired:
+            if not acquired:
+                return self._load(executor_id)
+            return self._cancel_locked(executor_id, reason=reason)
+
+    def _cancel_locked(self, executor_id: str, *, reason: str) -> ExecutorRun | None:
         run = self._load(executor_id)
         if run is None or run.is_terminal:
             return run
@@ -291,8 +336,19 @@ class ExecutorOrchestrator:
         try:
             executor.on_cancel()
         finally:
-            if not executor.run.is_terminal:
-                executor.transition("canceled", close_type=reason)  # type: ignore[arg-type]
+            if not executor.run.is_terminal and not executor.run.result_json.get("cancel_native_pending"):
+                from ..order_tracker import OrderTracker
+                from contextlib import closing
+                with closing(OrderTracker(self.paths)) as tracker:
+                    orders = [tracker.get(oid) for oid in executor.run.order_ids]
+                if any(order is not None and not order.is_terminal for order in orders):
+                    executor.transition("canceling", close_type=reason)
+                elif executor.run.kind == "market_order" and any(
+                    order is not None and order.state == "filled" for order in orders
+                ):
+                    executor.step()
+                else:
+                    executor.transition("canceled", close_type=reason)  # type: ignore[arg-type]
             self._persist(executor.run)
         return executor.run
 

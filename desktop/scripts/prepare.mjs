@@ -60,7 +60,7 @@ async function main() {
     throw new Error("Build on the target OS and architecture; cross-target runtime packaging is unsupported.");
   const stage = path.join(desktop, `.runtime-build-${randomUUID()}`);
   await fs.mkdir(stage, { recursive: true });
-  const pythonVersion = process.env.NERYA_PYTHON_VERSION || "3.12.13";
+  const pythonVersion = process.env.NERYA_PYTHON_VERSION || (await fs.readFile(path.join(root, ".python-version"), "utf8")).trim();
   const uv = process.env.UV || "uv";
   // Build-owned cache avoids changing or relying on the user's global cache permissions.
   const uvOptions = { env: { ...process.env, UV_CACHE_DIR: path.join(desktop, ".runtime-build-uv-cache") } };
@@ -82,11 +82,15 @@ async function main() {
   // modules from a developer's stale build/lib directory. No tests or workspaces ship.
   const source = path.join(desktop, `.runtime-build-source-${randomUUID()}`);
   await fs.mkdir(source, { recursive: true });
-  for (const name of ["pyproject.toml", "README.md", "nerya", "sdk/python"]) {
+  for (const name of ["pyproject.toml", "README.md", "LICENSE", "nerya", "sdk/python"]) {
     await fs.cp(path.join(root, name), path.join(source, name), { recursive: true, filter: copyFilter });
   }
+  // Install the exact same dependency graph on all native runners. The application
+  // wheel is built separately so a local source path never enters the lock file.
+  run(uv, ["pip", "sync", "--python", python, "--target", path.join(stage, "packages"),
+    "--require-hashes", path.join(desktop, "requirements.lock")], uvOptions);
   run(uv, ["pip", "install", "--python", python, "--target", path.join(stage, "packages"),
-    `${source}[mcp,trading,prediction,browser]`], uvOptions);
+    "--no-deps", source], uvOptions);
   const browser = path.join(stage, "browser");
   run(python, ["-m", "playwright", "install", "chromium"], { env: {
     ...process.env, PYTHONPATH: path.join(stage, "packages"), PYTHONNOUSERSITE: "1",
@@ -100,7 +104,7 @@ async function main() {
 
   // Do NOT copy Homebrew's Node executable: it depends on Homebrew dylibs.
   // Fetch the portable official distribution and verify its published checksum.
-  const nodeVersion = process.env.NERYA_NODE_VERSION || process.versions.node;
+  const nodeVersion = process.env.NERYA_NODE_VERSION || (await fs.readFile(path.join(root, ".node-version"), "utf8")).trim();
   if (!/^\d+\.\d+\.\d+$/.test(nodeVersion)) throw new Error("NERYA_NODE_VERSION must be an exact x.y.z version.");
   const nodePlatform = { darwin: "darwin", linux: "linux", win32: "win" }[process.platform];
   if (!nodePlatform) throw new Error("Unsupported desktop OS.");
@@ -132,10 +136,13 @@ async function main() {
   await fs.cp(path.join(dashboard, distDir, "static"), path.join(stage, webRel, distDir, "static"), { recursive: true });
   await fs.cp(path.join(dashboard, "public"), path.join(stage, webRel, "public"), { recursive: true, filter: copyFilter });
   await fs.copyFile(path.join(desktop, "runtime_host.py"), path.join(stage, "runtime_host.py"));
+  await fs.copyFile(path.join(root, "LICENSE"), path.join(stage, "LICENSE"));
+  await fs.copyFile(path.join(desktop, "requirements.lock"), path.join(stage, "requirements.lock"));
   await fs.writeFile(path.join(stage, "manifest.json"), JSON.stringify({
     dev: false, python: pythonRel, node: nodeRel, dashboard: webRel, browser: "browser", python_paths: ["app", "packages"],
     python_version: pythonVersion, node_version: nodeVersion, node_sha256: expected,
     platform: process.platform, arch: process.arch,
+    app_version: (await fs.readFile(path.join(root, "VERSION"), "utf8")).trim(),
   }, null, 2));
   // Keep licenses shipped by the Python, Node and dependency distributions.
   // Only these build-owned directories are replaced; no workspace/user data is touched.

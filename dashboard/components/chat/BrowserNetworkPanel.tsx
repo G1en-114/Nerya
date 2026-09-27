@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy, type ResourceTranslator } from "../../lib/i18n";
 import { useEffect, useRef, useState } from 'react';
 import { useLocale } from 'next-intl';
 import { clientApi } from '../../lib/clientApi';
@@ -8,7 +9,8 @@ import styles from './BrowserWorkspacePanel.module.css';
 export function BrowserNetworkPanel({profile, active=true}:{profile:string;active?:boolean}) {
   const activeRef=useRef(active);
   activeRef.current=active;
-  const zh=useLocale().startsWith('zh'), t=(cn:string,en:string)=>zh?cn:en;
+  const zh=useLocale().startsWith('zh');
+  const t = ((key: string, values?: Record<string, unknown>) => i18nCopy(zh, key, values)) as ResourceTranslator;
   const [rows,setRows]=useState<BrowserNetworkRequest[]>([]);
   const [query,setQuery]=useState(''),[kind,setKind]=useState('');
   const [error,setError]=useState(''),[listening,setListening]=useState(false);
@@ -34,7 +36,7 @@ export function BrowserNetworkPanel({profile, active=true}:{profile:string;activ
         cursor=data.cursor??0;
         setRows(old=>[...new Map([...(reset?[]:old),...(data.requests||[])].map(r=>[r.id,r])).values()].sort((a,b)=>a.seq-b.seq).slice(-500));
         setListening(data.listening===true);setDropped(data.dropped||0);setError('');
-        if(data.attach_errors)setError(t('部分标签监听不可用','Some tabs could not be monitored'));
+        if(data.attach_errors)setError(t("copy.components_chat_BrowserNetworkPanel.001"));
         if(data.has_more)delay=40;
       }catch(e){if(alive){setError(e instanceof Error?e.message:'network_unavailable');setListening(false);}delay=1500;}
       finally{clearTimeout(deadline);if(alive)timer=setTimeout(poll,delay);}
@@ -55,28 +57,28 @@ export function BrowserNetworkPanel({profile, active=true}:{profile:string;activ
   },[profile,selected,detailTab,offset]);
   const choose=(id:string)=>{setSelected(id);setOffset(0);setDetailTab('headers');};
   return <section className={styles.network} data-testid="browser-network">
-    <div className={styles.networkStatus}><span role="status">{listening?t('● 实时监听','● Listening live'):t('监听未连接','Listener disconnected')}</span><span>{rows.length}{dropped?` · ${t('旧记录已淘汰','older entries evicted')}`:''}</span></div>
+    <div className={styles.networkStatus}><span role="status">{listening?t("copy.components_chat_BrowserNetworkPanel.002"):t("copy.components_chat_BrowserNetworkPanel.003")}</span><span>{rows.length}{dropped?` · ${t("copy.components_chat_BrowserNetworkPanel.004")}`:''}</span></div>
     <div className={styles.networkFilters}>
-      <input aria-label={t('筛选请求','Filter requests')} value={query} onChange={e=>setQuery(e.target.value)} placeholder={t('筛选网址','Filter by URL')}/>
-      <select aria-label={t('请求类型','Request type')} value={kind} onChange={e=>setKind(e.target.value)}><option value="">{t('全部','All')}</option><option value="fetch">Fetch</option><option value="xhr">XHR</option><option value="document">Document</option><option value="script">Script</option></select>
+      <input aria-label={t("copy.components_chat_BrowserNetworkPanel.005")} value={query} onChange={e=>setQuery(e.target.value)} placeholder={t("copy.components_chat_BrowserNetworkPanel.006")}/>
+      <select aria-label={t("copy.components_chat_BrowserNetworkPanel.007")} value={kind} onChange={e=>setKind(e.target.value)}><option value="">{t("copy.components_chat_BrowserNetworkPanel.008")}</option><option value="fetch">{t("copy.components_chat_BrowserNetworkPanel.020")}</option><option value="xhr">{t("copy.components_chat_BrowserNetworkPanel.021")}</option><option value="document">{t("copy.components_chat_BrowserNetworkPanel.022")}</option><option value="script">{t("copy.components_chat_BrowserNetworkPanel.023")}</option></select>
     </div>
     {error&&<p role="alert" className="text-xs text-danger">{error}</p>}
-    <div className={styles.networkList} role="list" aria-label={t('网络请求','Network requests')}>
+    <div className={styles.networkList} role="list" aria-label={t("copy.components_chat_BrowserNetworkPanel.009")}>
       {rows.slice().reverse().map(row=><button key={row.id} type="button" role="listitem" className={styles.networkRow} data-selected={selected===row.id} onClick={()=>choose(row.id)}>
         <span className={row.state==='failed'||(row.status||0)>=400?'text-danger':''}>{row.status??'…'}</span>
         <span>{row.method}</span><span className="min-w-0 truncate" title={row.url}>{row.url.replace(/^https?:\/\//,'')}</span><span>{Math.round(row.duration_ms)}ms</span>
       </button>)}
-      {!rows.length&&<p className={styles.muted}>{t('请求会自动出现在这里，不需要开始录制。','Requests appear automatically. No recording step is required.')}</p>}
+      {!rows.length&&<p className={styles.muted}>{t("copy.components_chat_BrowserNetworkPanel.010")}</p>}
     </div>
     {selected&&<div className={styles.networkDetail}>
-      <nav aria-label={t('请求详情','Request details')} className={styles.networkDetailTabs}>{[['headers',t('标头','Headers')],['payload',t('请求内容','Payload')],['response',t('响应','Response')]].map(([id,label])=><button key={id} aria-pressed={detailTab===id} onClick={()=>{setDetailTab(id);setOffset(0);}}>{label}</button>)}</nav>
-      {loading&&<p className={styles.muted}>{t('读取已捕获内容…','Reading captured data…')}</p>}
+      <nav aria-label={t("copy.components_chat_BrowserNetworkPanel.011")} className={styles.networkDetailTabs}>{[['headers',t("copy.components_chat_BrowserNetworkPanel.012")],['payload',t("copy.components_chat_BrowserNetworkPanel.013")],['response',t("copy.components_chat_BrowserNetworkPanel.014")]].map(([id,label])=><button key={id} aria-pressed={detailTab===id} onClick={()=>{setDetailTab(id);setOffset(0);}}>{label}</button>)}</nav>
+      {loading&&<p className={styles.muted}>{t("copy.components_chat_BrowserNetworkPanel.015")}</p>}
       {detailError&&<p role="alert" className="text-xs text-danger">{detailError}</p>}
       {detail&&<><p className={`${styles.muted} break-all`}>{detail.method} {detail.url}</p>
-        <pre>{detailTab==='headers'?JSON.stringify({request:detail.request_headers,response:detail.response_headers},null,2):detailTab==='payload'?(detail.request_body||t('无已捕获的文本内容','No captured text payload')):(detail.body??detail.body_state??t('无响应内容','No response body'))}</pre>
-        {detailTab==='response'&&detail.next_offset!=null&&<button className="btn btn-ghost text-xs" onClick={()=>setOffset(detail.next_offset!)}>{t('下一段','Next section')}</button>}
+        <pre>{detailTab==='headers'?JSON.stringify({request:detail.request_headers,response:detail.response_headers},null,2):detailTab==='payload'?(detail.request_body||t("copy.components_chat_BrowserNetworkPanel.016")):(detail.body??detail.body_state??t("copy.components_chat_BrowserNetworkPanel.017"))}</pre>
+        {detailTab==='response'&&detail.next_offset!=null&&<button className="btn btn-ghost text-xs" onClick={()=>setOffset(detail.next_offset!)}>{t("copy.components_chat_BrowserNetworkPanel.018")}</button>}
       </>}
     </div>}
-    <p className={styles.muted}>{t('仅观察，不重发请求。认证标头与 Cookie 不展示；正文按需读取。','Observation only, no request replay. Auth headers and cookies are omitted; bodies load on demand.')}</p>
+    <p className={styles.muted}>{t("copy.components_chat_BrowserNetworkPanel.019")}</p>
   </section>;
 }

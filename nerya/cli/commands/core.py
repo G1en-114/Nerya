@@ -335,7 +335,10 @@ def cmd_certify(args) -> int:
 
 def cmd_service_install(args) -> int:
     from ...install import service as svc
-    return svc.install(workspace=args.workspace, port=args.port, force=args.force)
+    from ...core.paths import resolve_workspace
+    # 与普通 CLI 使用同一解析器，避免安装时丢失 profile 而启动另一工作区。
+    paths = resolve_workspace(args.workspace, profile=getattr(args, "profile", None))
+    return svc.install(workspace=str(paths.root), port=args.port, force=args.force)
 
 
 def cmd_service_uninstall(args) -> int:

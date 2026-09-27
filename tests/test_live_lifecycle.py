@@ -513,7 +513,7 @@ def test_canary_approve_resume_places_order(tmp_path, monkeypatch):
     fake = FakeLiveConnector()
     monkeypatch.setattr(ConnectorRegistry, "get", lambda self, aid, acfg: fake)
 
-    # Canary opens require a protection rule.
+    # This strategy chooses TP/SL; canary approval is independent of that choice.
     protection = ProtectionRule(
         strategy_id="s1",
         account_id="live_acct",

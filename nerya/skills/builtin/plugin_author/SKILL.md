@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: plugin_author
+metadata:
+  nerya:
+    catalog_parent: evolve
 description: "Use when the operator asks Nerya to add a runtime capability that is not a skill, strategy, or config change: author a workspace plugin (new native tool, tool-call audit/transform listener, LLM provider adapter, team template) that plugs into the nerya.harness extension skeleton. Covers the full loop: draft plugin.py against the Plugin ABI, syntax-validate without executing, stage a plugin_proposal under evolution/proposals/ with after/plugins/<id>/, attach an executable validation plan, and hand off to operator approval. Never installs executable code without approval; disabled plugins and rollback paths included."
 version: 0.1.0
 license: MIT
@@ -10,10 +13,13 @@ author: Nerya
 
 # Plugin Author
 
+For wallet/DEX adapters, first load `adapter`. Its provider factory
+registers through `ctx.register_wallet_provider` and the same proposal lane.
+
 Author workspace plugins that extend the Nerya runtime itself — new
 native tools, tool-pipeline listeners, LLM providers, team templates.
 Plugins are the right surface when the capability must live *inside*
-the agent loop; use `evolve_skill_proposal` for playbook-shaped
+the agent loop; use `skill_manage` for playbook-shaped
 behaviour and `self_modify` for config/prompt changes.
 
 ## Flow — proposal-first, always

@@ -1,18 +1,10 @@
 """Native web research tools backed by the research skill scripts.
 
-Surfaces the *multi-engine* + *progressive-fallback* fetch chain the
-agent has access to. The search side walks
-:mod:`nerya.skills.builtin.research.scripts.web_search` (Exa → Tavily →
-Perplexity → LangSearch → Brave → Serper → Firecrawl → SearXNG → Bing →
-DuckDuckGo) with per-engine multi-key rotation. The fetch side walks
-:mod:`...research.scripts.fetch_url` (direct → Jina Reader → headless
-browser engine → Scrapling).
-
-These tools intentionally accept the *high-level* knobs (``engines``,
-``keys``, ``base_urls``, ``use_browser_fallback``,
-``use_scrapling_fallback``) so the LLM can override the chain when a
-specific source is preferred while still inheriting workspace defaults
-when the kwargs are omitted.
+Surfaces the research search engines and progressive document-fetch fallback
+chain. Search uses configured search providers with key rotation. Fetching uses
+direct HTTP extraction, Jina Reader, then an optional bounded extraction
+fallback. Interactive browsing is handled only by Nerya's managed Chromium
+browser Skill.
 """
 
 from __future__ import annotations
@@ -184,22 +176,12 @@ WEB_FETCH_SCHEMA: dict[str, Any] = {
             "default": False,
             "description": "Skip the direct fetch and start with Jina Reader.",
         },
-        "use_browser_fallback": {
-            "type": "boolean",
-            "default": True,
-            "description": (
-                "Allow the configured headless browser engine "
-                "(Lightpanda / CloakBrowser / Obscura) to render the page "
-                "if Jina Reader also fails or yields low-quality output. "
-                "Engine is selected via the dashboard Browsers tab."
-            ),
-        },
         "use_scrapling_fallback": {
             "type": "boolean",
             "default": True,
             "description": (
-                "Final tier — use Scrapling (Camoufox / Playwright stealth) "
-                "when every other tier failed. Requires ``pip install "
+                "Use the optional extraction fallback when direct/Jina parsing fails. "
+                "Requires ``pip install "
                 "'scrapling[fetchers]' && scrapling install`` on the host."
             ),
         },
@@ -218,21 +200,12 @@ WEB_SEARCH_FETCH_SCHEMA: dict[str, Any] = {
         "timeout_s": {"type": "number", "minimum": 1, "default": 15},
         "use_jina_fallback": {"type": "boolean", "default": True},
         "prefer_jina": {"type": "boolean", "default": False},
-        "use_browser_fallback": {
-            "type": "boolean",
-            "default": True,
-            "description": (
-                "Allow the configured browser engine to render fetched "
-                "search results when direct/Jina output is blocked or too "
-                "thin. Search-fetch still caps fetch_top_n and total budget."
-            ),
-        },
         "use_scrapling_fallback": {
             "type": "boolean",
             "default": True,
             "description": (
-                "Allow Scrapling stealth fetch as the final tier for fetched "
-                "search results when direct/Jina/browser tiers fail."
+                "Allow the optional extraction fallback for fetched "
+                "search results when direct/Jina parsing fails."
             ),
         },
         "min_content_chars": {"type": "integer", "minimum": 0, "default": 160},
@@ -321,7 +294,6 @@ def web_fetch_handler(
         timeout_s=float(args.get("timeout_s") or 15),
         use_jina_fallback=bool(args.get("use_jina_fallback", True)),
         prefer_jina=bool(args.get("prefer_jina", False)),
-        use_browser_fallback=bool(args.get("use_browser_fallback", True)),
         use_scrapling_fallback=bool(args.get("use_scrapling_fallback", True)),
         min_content_chars=int(args.get("min_content_chars") or 160),
     )
@@ -354,7 +326,6 @@ def web_search_fetch_handler(
         timeout_s=float(args.get("timeout_s") or 15),
         use_jina_fallback=bool(args.get("use_jina_fallback", True)),
         prefer_jina=bool(args.get("prefer_jina", False)),
-        use_browser_fallback=bool(args.get("use_browser_fallback", True)),
         use_scrapling_fallback=bool(args.get("use_scrapling_fallback", True)),
         min_content_chars=int(args.get("min_content_chars") or 160),
     )

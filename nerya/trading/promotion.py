@@ -8,9 +8,9 @@ graph requires concrete evidence:
 |-----------------|----------------------------------------------------|
 | ``static_review`` | static-analysis pass (no connector / vault / net) |
 | ``backtested``    | accepted backtest/custom replay/waiver evidence  |
-| ``paper``         | paper account binding + protection rule presence |
+| ``paper``         | static review + backtest evidence                 |
 | ``shadow``        | non-trivial paper PnL window (configurable)      |
-| ``canary``        | shadow window + protection + signoff if waived   |
+| ``canary``        | shadow window + signoff if backtest waived       |
 | ``live``          | clean canary window + operator approval          |
 
 The gate is *cooperative*: ``request_promotion`` returns a typed
@@ -309,6 +309,7 @@ def _row_to_promotion(row: Any) -> PromotionRecord:
 
 # Required evidence per target state. A bare ``EvidenceKind`` means the
 # latest matching evidence row must be ``passed=True`` and unexpired.
+# Protection evidence is conditional on the strategy's require_protection policy.
 REQUIRED_EVIDENCE: dict[str, tuple[EvidenceKind, ...]] = {
     "static_review": ("static_review",),
     "backtested":    ("static_review", "backtest"),
@@ -416,6 +417,8 @@ def evaluate_promotion(
     reasons: list[str] = []
     waiver_used = False
     for kind in required:
+        if kind == "protection_check" and not strategy.limits.require_protection:
+            continue
         if kind == "backtest":
             ev = _latest_backtest_equivalent(store, strategy_id)
             if ev is not None:

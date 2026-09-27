@@ -393,7 +393,7 @@ def test_binance_perp_aliases_do_not_resolve_to_spot() -> None:
 # F9 — polymarket extras + spec honesty
 
 
-def test_polymarket_reads_extras_signed_order() -> None:
+def test_polymarket_static_signed_payload_is_not_an_execution_path() -> None:
     from nerya.connectors.polymarket import PolymarketConnector
 
     class _T:
@@ -415,12 +415,9 @@ def test_polymarket_reads_extras_signed_order() -> None:
         ),
         live=True, transport=transport,
     )
-    ack = conn.place_order(
-        market="POLYMARKET:some-slug", side="buy", order_type="limit",
-        size=5.0, price=0.5,
-    )
-    assert ack.order_id == "pm-1"
-    assert any(m == "POST" for m, _ in transport.calls)
+    with pytest.raises(TradingError):
+        conn.place_order(market='POLYMARKET:12345678901234567890',side='buy',order_type='limit',size=5,price=.5)
+    assert not any(m=='POST' for m,_ in transport.calls)
 
     # A signed order in the misspelled ``extra`` field must not work —
     # the spec no longer advertises writes either (F9).
@@ -428,7 +425,8 @@ def test_polymarket_reads_extras_signed_order() -> None:
 
     spec = get_registry().find("polymarket")
     assert spec is not None
-    assert spec.supports.get("place_order") is False
+    assert spec.supports.get("place_order") is True
+    assert {f.name for f in spec.credential_fields if f.required}=={'api_key','api_secret','api_passphrase','private_key'}
 
 
 # ---------------------------------------------------------------------------

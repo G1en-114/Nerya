@@ -136,21 +136,18 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
                 "when files are supplied, and put runnable logic in SDK files."
             ),
         },
-        "schedule_cron": {"type": "string"},
-        "schedule_every_seconds": {"type": "integer", "minimum": 1},
+        "schedule_cron": {"type": "string", "description": "Cron schedule. Mutually exclusive with schedule_every_seconds; set only one schedule form."},
+        "schedule_every_seconds": {"type": "integer", "minimum": 1, "description": "Interval schedule in seconds. Mutually exclusive with schedule_cron; set only one schedule form."},
         "news_sources": {"type": "array", "items": {"type": "string"}},
         "subagents": {"type": "array", "items": {"type": "string"}},
         "policy_overrides": {"type": "object"},
         "llm_policy_overrides": {"type": "object"},
         "create_tuning": {
             "type": "boolean",
-            "default": True,
+            "default": False,
             "description": (
-                "When true (the default), the package ships a per-strategy "
-                "self-evolution lane: a strategy_tuner subagent prompt, a "
-                "tuning cron row, and a strategy.yml `tuning` block. Only "
-                "set this to false if the operator explicitly wants a "
-                "static strategy."
+                "Opt in only when the operator explicitly requests automatic "
+                "tuning. Ordinary authoring/backtesting never authorizes a tuner."
             ),
         },
         "tuning_prompt": {
@@ -318,6 +315,10 @@ STRATEGY_DELETE_PROPOSAL_SCHEMA: dict[str, Any] = {
 STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "files": {
+            "type": "object", "additionalProperties": {"type": "string"},
+            "description": "Complete authored files keyed by safe package-relative paths (main.py, strategy.yml, strategy.md, tests/test_contract.py). Prefer this for a fully specified new strategy: the existing generator saves and validates the bundle; no scaffold/read/rewrite cycle is needed. Never put code in prompt. Omit files only for an intentionally incomplete scaffold."
+        },
         "strategy_id": {
             "type": "string",
             "description": "Lowercase identifier; matches ^[a-z][a-z0-9_]+$.",
@@ -362,13 +363,13 @@ STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
             ),
         },
         "accounts": {"type": "array", "items": {"type": "string"}},
-        "schedule_cron": {"type": "string"},
-        "schedule_every_seconds": {"type": "integer", "minimum": 1},
+        "schedule_cron": {"type": "string", "description": "Cron schedule. Mutually exclusive with schedule_every_seconds; set only one schedule form."},
+        "schedule_every_seconds": {"type": "integer", "minimum": 1, "description": "Interval schedule in seconds. Mutually exclusive with schedule_cron; set only one schedule form."},
         "news_sources": {"type": "array", "items": {"type": "string"}},
         "subagents": {"type": "array", "items": {"type": "string"}},
         "policy_overrides": {"type": "object"},
         "llm_policy_overrides": {"type": "object"},
-        "create_tuning": {"type": "boolean", "default": True},
+        "create_tuning": {"type": "boolean", "default": False, "description": "Opt in only on explicit operator request; no automatic tuning for ordinary creation/backtesting."},
         "tuning_prompt": {"type": "string"},
         "tuning_cron": {"type": "string"},
         "tuning_objectives": {"type": "array", "items": {"type": "string"}},
@@ -425,7 +426,49 @@ STRATEGY_BACKTEST_SCHEMA: dict[str, Any] = {
             ),
         },
         "preset": {"type": "string", "default": "default"},
-        "config_path": {"type": "string"},
+        "preflight_only": {"type": "boolean", "default": False,
+            "description": "Validate configuration, Python syntax, dependencies and known replay surfaces without downloading data or executing the strategy."},
+        "data_mode": {"type": "string", "enum": ["download", "local"],
+            "description": "local reads prepared historical data without network. download prepares missing local ranges before replay."},
+        "engine": {"type": "string", "enum": ["auto", "native", "freeform"], "default": "auto",
+            "description": "Select replay explicitly. native runs the saved strategy entrypoint even if a custom replay file exists; freeform runs the strategy-local replay. Never switch engines to change the strategy thesis."},
+        "config_path": {"type": "string", "description": "Optional existing advanced config. For a normal replay use settings directly; no separate config file is required."},
+        "override_candidate_backtest_defaults": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Keep false for normal proposal/strategy verification. When strategy.yml "
+                "declares backtest defaults, those assumptions are authoritative and "
+                "conflicting generated settings are ignored. Set true only when the "
+                "operator explicitly asked to evaluate a different replay assumption."
+            ),
+        },
+        "settings": {
+            "type": "object", "additionalProperties": False,
+            "description": (
+                "Replay settings. Candidate strategy.yml backtest defaults remain "
+                "authoritative on normal verification; omit fields already declared by "
+                "the candidate. Explicitly changing those assumptions requires "
+                "override_candidate_backtest_defaults=true. One call preflights, "
+                "reuses/downloads history, checks coverage and runs the strategy."
+            ),
+            "properties": {
+                "window_days": {"type": "integer", "minimum": 1},
+                "start_utc": {"type": "string"}, "end_utc": {"type": "string"},
+                "tf": {"type": "string"},
+                "timeframes": {"type": "array", "items": {"type": "string"}},
+                "warmup_bars": {"type": "integer", "minimum": 0},
+                "initial_capital_usd": {"type": "number", "exclusiveMinimum": 0},
+                "max_open_trades": {"type": "integer", "minimum": 1},
+                "allow_short": {"type": "boolean"},
+                "data_mode": {"type": "string", "enum": ["download", "local"]},
+                "coverage_policy": {"type": "string", "enum": ["strict", "allow_partial"]},
+                "allow_timeframe_fallback": {"type": "boolean"},
+                "max_run_seconds": {"type": "number", "exclusiveMinimum": 0},
+                "fee_bps_by_venue": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
+                "slip_bps_by_venue": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}}
+            }
+        },
         "allow_mock": {
             "type": "boolean",
             "default": False,
@@ -592,6 +635,28 @@ def _execution_error(call: ToolCall, message: str) -> ToolResult:
         name=call.name,
         error=ToolError(kind=ToolErrorKind.EXECUTION_ERROR, message=message),
     )
+
+
+def _backtest_error(call: ToolCall, exc: Exception, *, reason: str, strategy_id: str | None, proposal_id: str | None) -> ToolResult:
+    """Keep diagnostics and target identity even when no report was produced."""
+    message = f"backtest failed: {type(exc).__name__}: {exc}"
+    result = ToolResult.from_json(tool_use_id=call.id, name=call.name,
+        semantic_success=False,
+        data={"result_type": "backtest_result", "ok": False,
+            "backtest_status": "blocked" if reason in {"backtest_sdk_unsupported", "backtest_dependency_missing", "backtest_preflight_failed", "backtest_data_incomplete", "backtest_data_invalid", "backtest_invalid_input"} else "failed",
+            "strategy_id": strategy_id, "proposal_id": proposal_id,
+            "reason": reason, "message": message,
+            "surface": getattr(exc, "surface", None),
+            "phase": getattr(exc, "replay_phase", None),
+            "run_receipt": getattr(exc, "run_receipt", None),
+            "failure_path": getattr(exc, "failure_path", None),
+            "diagnostics": getattr(exc, "receipt", None),
+            "missing_module": getattr(exc, "module", None),
+            "next_required_action": {"type": "repair_replay_contract" if reason == "backtest_sdk_unsupported" else "inspect_backtest_error",
+                "message": "Do not retry the unchanged call or invent performance. Preserve the strategy thesis and risk controls; fix the indicated contract or use a documented historical execution model, then rerun."}})
+    result.is_error = True
+    result.error = ToolError(kind=ToolErrorKind.EXECUTION_ERROR, message=message)
+    return result
 
 
 def _strategy_validation_blockers_error(
@@ -772,7 +837,7 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
         subagents=tuple(str(s) for s in (args.get("subagents") or ())),
         policy_overrides=dict(args.get("policy_overrides") or {}),
         llm_policy_overrides=dict(args.get("llm_policy_overrides") or {}),
-        create_tuning=bool(args.get("create_tuning", True)),
+        create_tuning=bool(args.get("create_tuning", False)),
         tuning_prompt=str(args.get("tuning_prompt") or ""),
         tuning_cron=str(args.get("tuning_cron") or "0 */6 * * *"),
         tuning_objectives=tuple(
@@ -1306,6 +1371,53 @@ def _proposal_backtest_next_action(proposal_id: str) -> dict[str, Any]:
     }
 
 
+def _target_backtest_defaults(paths, *, strategy_id: str | None, proposal_id: str | None) -> dict[str, Any]:
+    """Read candidate-owned backtest assumptions for native Agent calls."""
+    manifest: dict[str, Any] = {}
+    try:
+        if proposal_id:
+            _sid, files = _read_proposal_files(paths, proposal_id)
+            manifest = yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}
+        elif strategy_id:
+            path = paths.strategies / strategy_id / "strategy.yml"
+            manifest = yaml_io.load(path, default={}) or {} if path.is_file() else {}
+    except Exception:
+        return {}
+    raw = manifest.get("backtest") if isinstance(manifest, dict) else None
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _protect_candidate_backtest_settings(
+    defaults: dict[str, Any],
+    settings: dict[str, Any] | None,
+    *,
+    allow_override: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Prevent model-generated settings from silently mutating candidate evidence.
+
+    Candidate ``backtest`` is part of the strategy under review. A normal Agent
+    replay therefore preserves it. An operator can still request an alternate
+    assumption explicitly through ``override_candidate_backtest_defaults``.
+    """
+    if settings is None:
+        return None, {}
+    incoming = dict(settings)
+    if not defaults or allow_override:
+        return incoming, {}
+
+    protected = set(defaults)
+    if protected & {"window_days", "start_utc", "end_utc"}:
+        protected.update({"window_days", "start_utc", "end_utc"})
+    if protected & {"tf", "timeframes"}:
+        protected.update({"tf", "timeframes"})
+
+    ignored: dict[str, Any] = {}
+    for key in sorted(protected):
+        if key in incoming:
+            ignored[key] = incoming.pop(key)
+    return incoming, ignored
+
+
 def _proposal_requires_standard_backtest(
     strategy_id: str | None,
     files: dict[str, str],
@@ -1607,6 +1719,8 @@ def strategy_draft_proposal_handler(
 
     paths = config.paths
     if from_strategy_id:
+        if args.get("files"):
+            return _usage_error(call, "files applies to new authored bundles; clone an existing strategy first, then edit its returned candidate paths")
         return _draft_from_promoted(
             call,
             paths,
@@ -1664,13 +1778,18 @@ def strategy_draft_proposal_handler(
         "strategy_id": strategy_id,
         "state": "draft",
         "kind": "strategy_package_proposal",
-        "seeded_from": "template",
+        "seeded_from": "provided_files" if request.files else "template",
         "strategy_class": gen.request.strategy_class,
         "files": list(gen.files.keys()),
         "validation": gen.validation.asdict() if gen.validation is not None else None,
         "proposal_paths": paths_map,
         "next_steps": _draft_next_steps(proposal.id, paths_map),
     }
+    if request.files and "main.py" in request.files and gen.validation and gen.validation.ok:
+        payload["next_steps"] = [
+            "The provided source bundle has been saved and validated. Do not rewrite it or repeat validation unless source changes.",
+            f"Call strategy_submit_proposal with proposal_id={proposal.id!r}, unless draft-only was requested, then perform the requested backtest with the same candidate and settings. This is not promotion or trading.",
+        ]
     if auto_selected_accounts:
         payload["auto_selected_accounts"] = auto_selected_accounts
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
@@ -1817,6 +1936,22 @@ def strategy_submit_proposal_handler(
             else _proposal_nonstandard_replay_next_action()
         ),
     }
+    from ...strategies.verification import completed_replay_receipt
+    try:
+        current_replay = completed_replay_receipt(
+            target.path / "after" / "strategies" / strategy_id, strategy_id, proposal_id)
+    except (OSError, ValueError):
+        # An unreadable optional report cannot turn the completed save into a
+        # tool exception or certify it. Retain the explicit verification step.
+        current_replay = None
+    if standard_backtest_required and current_replay is not None:
+        payload["backtest_required"] = False
+        payload["next_required_action"] = None
+        payload["backtest_evidence"] = current_replay
+        payload["verification_note"] = (
+            "This source revision already has a complete historical calculation. "
+            "An economic FAIL is not an execution failure: report it, do not tune or "
+            "rerun unchanged code. A newly requested period still needs its own replay.")
     from ...strategies.continuous_config import is_continuous
     if is_continuous(yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}):
         payload["next_required_action"] = None
@@ -1910,6 +2045,11 @@ def strategy_import_external_handler(call: ToolCall, *, config: Config) -> ToolR
 
 def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
     args = call.arguments or {}
+    if args.get("settings") is not None and not isinstance(args["settings"], dict):
+        return _usage_error(call, "settings must be an object")
+    engine = str(args.get("engine") or "auto").lower()
+    if engine not in {"auto", "native", "freeform"}:
+        return _usage_error(call, "engine must be auto, native or freeform")
     strategy_id = (args.get("strategy_id") or "").strip() or None
     proposal_id = (args.get("proposal_id") or "").strip() or None
     # Agents frequently pass BOTH ids right after submitting a proposal
@@ -1942,6 +2082,40 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                     "matching_proposals": matching_proposals[:10],
                 },
             )
+    candidate_backtest_defaults = _target_backtest_defaults(
+        config.paths,
+        strategy_id=strategy_id,
+        proposal_id=proposal_id,
+    )
+    allow_candidate_override = bool(args.get("override_candidate_backtest_defaults", False))
+    effective_settings, ignored_candidate_overrides = _protect_candidate_backtest_settings(
+        candidate_backtest_defaults,
+        args.get("settings"),
+        allow_override=allow_candidate_override,
+    )
+    effective_data_mode = args.get("data_mode")
+    if (
+        candidate_backtest_defaults
+        and not allow_candidate_override
+        and "data_mode" in candidate_backtest_defaults
+        and effective_data_mode is not None
+    ):
+        ignored_candidate_overrides["data_mode(top_level)"] = effective_data_mode
+        effective_data_mode = None
+    if (
+        candidate_backtest_defaults
+        and not allow_candidate_override
+        and args.get("config_path")
+    ):
+        return _usage_error(
+            call,
+            (
+                "This strategy declares authoritative strategy.yml backtest defaults. "
+                "An alternate config_path would change the evidence assumptions. "
+                "Set override_candidate_backtest_defaults=true only when the operator "
+                "explicitly requested a different replay configuration."
+            ),
+        )
     try:
         from ...skills.builtin.backtest.scripts.backtest_run import (
             run_strategy_backtest,
@@ -1951,19 +2125,28 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
         )
         from ...skills.builtin.backtest.scripts.freeform_run import (
             run_freeform_backtest,
+            FreeformDependencyError,
         )
+        from ...skills.builtin.backtest.scripts.mock_ctx import BacktestUnsupportedSurfaceError
 
-        if _target_has_freeform_backtest_script(
+        use_freeform = engine == "freeform" or engine == "auto" and _target_has_freeform_backtest_script(
             config.paths,
             strategy_id=strategy_id,
             proposal_id=proposal_id,
-        ):
+        )
+        if use_freeform:
+            if args.get("preflight_only") or effective_data_mode or effective_settings:
+                raise ValueError("preflight_only/data_mode/settings apply to the native replay. Choose engine='native' or inspect the custom replay's explicit data contract.")
+            if args.get("config_path"):
+                raise ValueError("config_path configures the native engine, but this package selected a custom freeform replay. "
+                    "Choose engine='native' to replay the saved strategy with that config, or configure the custom script explicitly. No settings were silently ignored.")
             result = run_freeform_backtest(
                 strategy_id=strategy_id,
                 proposal_id=proposal_id,
                 workspace=config.paths.root,
             )
         else:
+            from .historical_data import tool_progress
             result = run_strategy_backtest(
                 strategy_id=strategy_id,
                 proposal_id=proposal_id,
@@ -1971,8 +2154,34 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 config_path=(args.get("config_path") or None),
                 workspace=config.paths.root,
                 allow_mock=bool(args.get("allow_mock", False)),
+                preflight_only=bool(args.get("preflight_only", False)),
+                data_mode=effective_data_mode,
+                settings=effective_settings,
+                progress=tool_progress(call),
+                cancel_token=call.metadata.get("cancel_token"),
             )
+            if args.get("preflight_only"):
+                if candidate_backtest_defaults:
+                    result["candidate_backtest_defaults_applied"] = not allow_candidate_override
+                if ignored_candidate_overrides:
+                    result["ignored_candidate_backtest_overrides"] = ignored_candidate_overrides
+                return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
+        result["engine"] = "freeform" if use_freeform else "native"
+        if candidate_backtest_defaults and not use_freeform:
+            result["candidate_backtest_defaults_applied"] = not allow_candidate_override
+        if ignored_candidate_overrides and not use_freeform:
+            result["ignored_candidate_backtest_overrides"] = ignored_candidate_overrides
+    except FreeformDependencyError as exc:
+        return _backtest_error(call, exc, reason="backtest_dependency_missing",
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
     except NoHistoricalDataError as exc:
+        if getattr(exc, "replay_phase", None) == "preparing_data":
+            failed = _backtest_error(call, exc, reason="backtest_data_incomplete",
+                strategy_id=strategy_id, proposal_id=proposal_id)
+            failed.content[0].data["next_required_action"] = {
+                "type": "prepare_historical_data", "tool": "historical_data",
+                "message": "Inspect the requested local window, then download or resume only its missing ranges. An empty cache or download timeout does not prove the source lacks history. Keep the same candidate and replay config; do not silently shorten the window or enable mock data."}
+            return failed
         next_required_action: dict[str, Any] = {
             "type": "report_data_gap",
             "message": (
@@ -2036,6 +2245,8 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
             data={
                 "ok": False,
                 "reason": "no_historical_data",
+                "result_type": "backtest_result",
+                "backtest_status": "blocked",
                 "strategy_id": strategy_id,
                 "proposal_id": proposal_id,
                 "coverage_ok": False,
@@ -2043,12 +2254,15 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 "next_required_action": next_required_action,
             },
         )
+    except BacktestUnsupportedSurfaceError as exc:
+        return _backtest_error(call, exc, reason="backtest_sdk_unsupported",
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
     except (NeryaError, TradingError, ValueError) as exc:
-        return _usage_error(call, str(exc))
+        return _backtest_error(call, exc, reason=getattr(exc, "reason", "backtest_invalid_input"),
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
     except Exception as exc:
-        return _execution_error(
-            call, f"backtest failed: {type(exc).__name__}: {exc}"
-        )
+        return _backtest_error(call, exc, reason=getattr(exc, "reason", "backtest_execution_failed"),
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
     model_result = _model_facing_backtest_result(result)
     if proposal_id:
         target_sid = strategy_id or str(result.get("strategy_id") or "").strip() or None
@@ -2122,7 +2336,11 @@ def _model_facing_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
     into ``2.74%`` despite explicit unit warnings.
     """
 
+    raw_metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    raw_config = result.get("config") if isinstance(result.get("config"), dict) else {}
     out = dict(result)
+    out["result_type"] = "backtest_result"
+    out["backtest_status"] = "failed" if result.get("ok") is False else "completed"
     display = result.get("metrics_display")
     if isinstance(display, dict):
         out["metrics"] = dict(display)
@@ -2135,6 +2353,17 @@ def _model_facing_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
         out.pop(key, None)
     out["raw_metrics_file"] = result.get("metrics_path")
     out["metrics_are_display_strings"] = True
+    out["bar_accounting"] = {
+        "trading_window_bars_total": raw_metrics.get("bars_total") or result.get("bars_total"),
+        "warmup_bars_per_market": raw_config.get("warmup_bars"),
+        "note": (
+            "Coverage dataset row counts may include warmup candles. "
+            "trading_window_bars_total excludes warmup and is the correct total "
+            "when describing the evaluated one-year window. Do not multiply a "
+            "per-market coverage row count that includes warmup and call it the "
+            "trading-window bar total."
+        ),
+    }
     out["metrics_note"] = (
         "Summarise the backtest in plain language for the user. Reuse the "
         "exact numbers from metrics/operator_summary, but do not copy their "

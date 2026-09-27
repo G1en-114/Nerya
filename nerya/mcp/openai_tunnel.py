@@ -1,33 +1,105 @@
 """Supervise the official OpenAI tunnel-client, not a custom tunnel protocol.
 
-Only runtime API keys are passed via child environment. We do not mint or inject
-MCP OAuth tokens: OpenAI still forwards the end user's OAuth authorization.
+The OpenAI Tunnel path binds directly to Nerya's stdio MCP server.  This keeps
+both MCP and its credentials off a public listener: the tunnel daemon makes the
+outbound OpenAI connection and launches Nerya as a local child process.
 """
 from __future__ import annotations
 
 import importlib.util
 import os
+import platform
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .public import public_origin
-
 _PROCESSES = {}
-_PORTS = {}
 _LOCK = threading.RLock()
 _ERRORS = {}
+# The binary is host-wide, so coalesce install requests across workspaces.
+_INSTALL = {"installing": False, "install_error": ""}
+
+
+def _brew():
+    if platform.system() not in {"Darwin", "Linux"}:
+        return None
+    candidates = [shutil.which("brew"), "/opt/homebrew/bin/brew", "/usr/local/bin/brew",
+                  "/home/linuxbrew/.linuxbrew/bin/brew"]
+    return next((str(p) for p in candidates if p and Path(p).is_file()
+                 and os.access(p, os.X_OK)), None)
+
+
+def installation_status():
+    with _LOCK:
+        return {**_INSTALL, "install_supported": bool(_brew()),
+                "install_command": "brew install openai/tools/tunnel-client"}
+
+
+def _install_worker(brew):
+    error = "installFailed"
+    # Package managers must not inherit the backend's Vault/model/tunnel keys.
+    env = {k: v for k, v in os.environ.items() if k in {
+        "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TEMP",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    }}
+    env.update(HOMEBREW_NO_AUTO_UPDATE="1", HOMEBREW_NO_ENV_HINTS="1", CI="1")
+    try:
+        result = subprocess.run([brew, "install", "openai/tools/tunnel-client"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, timeout=900, check=False)
+        if result.returncode == 0:
+            error = "installVerificationFailed"
+            binary = executable()
+            if binary:
+                probe = subprocess.run([binary, "--version"], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=env, timeout=15, check=False)
+                if probe.returncode == 0:
+                    error = ""
+    except subprocess.TimeoutExpired:
+        error = "installTimeout"
+    except Exception:
+        # Never publish package-manager output, environment or a traceback.
+        error = "installFailed"
+    finally:
+        with _LOCK:
+            _INSTALL.update(installing=False, install_error=error)
+
+
+def install(config):
+    """Explicit administrator action, never an implicit install or connection.
+
+    The official tap includes the matching companion binary. Do not bypass
+    macOS Gatekeeper to run the upstream unnotarized release archives.
+    """
+    with _LOCK:
+        if _INSTALL["installing"] or (executable() and not _INSTALL["install_error"]):
+            return {"ok": True, "installed": bool(executable()), **installation_status()}
+        brew = _brew()
+        if not brew:
+            return {"ok": False, "error": "installRequiresHomebrew", "_status": 400}
+        _INSTALL.update(installing=True, install_error="")
+        try:
+            threading.Thread(target=_install_worker, args=(brew,), daemon=True,
+                             name="nerya-tunnel-install").start()
+        except RuntimeError:
+            _INSTALL.update(installing=False, install_error="installFailed")
+            return {"ok": False, "error": "installFailed", "_status": 500}
+        return {"ok": True, "installed": bool(executable()), **installation_status()}
 
 
 def executable():
     found = shutil.which("tunnel-client")
     if found:
         return found
-    for path in (Path("/opt/homebrew/bin/tunnel-client"), Path("/usr/local/bin/tunnel-client")):
+    for path in (Path("/opt/homebrew/bin/tunnel-client"), Path("/usr/local/bin/tunnel-client"),
+                 Path("/home/linuxbrew/.linuxbrew/bin/tunnel-client")):
         if path.is_file() and os.access(path, os.X_OK):
             return str(path)
     return None
@@ -55,12 +127,14 @@ def status(config):
             "tunnel_id": str(cfg.get("tunnel_id", "")), "api_key_configured": bool(cfg.get("api_key_ref")),
             "running": running, "ready": ready,
             "error": _ERRORS.get(key, "") if not running else "",
-            "install_command": "brew install openai/tools/tunnel-client",
+            **installation_status(),
             "api_tool": {"type": "mcp", "server_label": "nerya", "tunnel_id": str(cfg.get("tunnel_id", ""))}}
 
 
 def start(config, *, api_port=None):
-    from ..api.auth import has_admin_password
+    # api_port is retained for callers that also supervise the integrated HTTP
+    # bridge.  The OpenAI Tunnel no longer depends on that listener.
+    del api_port
     key = str(config.paths.root.resolve())
     cfg = config.get("mcp.openai_tunnel", {}) or {}
     with _LOCK:
@@ -69,17 +143,14 @@ def start(config, *, api_port=None):
         try:
             if config.get("mcp.enabled") is not True or cfg.get("enabled") is not True:
                 raise ValueError("Enable MCP and OpenAI Tunnel first")
-            if config.get("mcp.auth_mode", "oauth2") != "oauth2" or not has_admin_password(config):
-                raise ValueError("OAuth2 and the administrator password are required")
             if not importlib.util.find_spec("mcp"):
                 raise ValueError("Install the nerya[mcp] dependency first")
-            origin = public_origin(config)
-            if not origin.startswith("https://"):
-                raise ValueError("OAuth needs a browser-reachable HTTPS public URL; configure the Nerya public tunnel first")
             tunnel_id = str(cfg.get("tunnel_id", ""))
             if not re.fullmatch(r"tunnel_[A-Za-z0-9_-]{8,128}", tunnel_id):
                 raise ValueError("Enter a valid OpenAI Tunnel ID (tunnel_...)")
             binary = executable()
+            if _INSTALL["installing"] or _INSTALL["install_error"]:
+                raise ValueError("Finish installing and verifying tunnel-client before connecting")
             if not binary:
                 raise ValueError("Official tunnel-client is not installed")
             ref = str(cfg.get("api_key_ref", ""))
@@ -87,7 +158,6 @@ def start(config, *, api_port=None):
                 raise ValueError("Save the runtime API key in MCP settings first")
             from ..security.secrets import SecretVault
             api_key = SecretVault.open(config.paths.vault_enc).resolve(ref[8:], required_scope="mcp_tunnel")
-            port = api_port or _PORTS.get(key, 18317)
             health_dir = config.paths.state / "openai-mcp-tunnel"
             health_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             if health_dir.is_symlink():
@@ -96,11 +166,25 @@ def start(config, *, api_port=None):
             env = {k: v for k, v in os.environ.items() if k in {
                 "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "SystemRoot", "USERPROFILE",
                 "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}}
-            # The MCP listener is loopback, while browser-facing OAuth uses the
-            # configured public origin. Explicit trust is required by tunnel-client.
             env.update(CONTROL_PLANE_API_KEY=api_key, CONTROL_PLANE_TUNNEL_ID=tunnel_id,
-                       MCP_OAUTH_TRUSTED_ORIGINS=origin, MCP_STARTUP_WAIT_TIMEOUT="30s")
-            command = [binary, "run", "--mcp.server-url", f"http://127.0.0.1:{port}/mcp",
+                       MCP_STARTUP_WAIT_TIMEOUT="30s")
+            # tunnel-client must see its control-plane credentials, but the MCP
+            # child must not inherit them.  Bootstrap through the same Python
+            # interpreter, scrub tunnel-only variables, then run Nerya's CLI.
+            env["NERYA_MCP_SOURCE"] = "tunnel"
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+            bootstrap = (
+                "import os,runpy;"
+                "os.environ.pop('CONTROL_PLANE_API_KEY',None);"
+                "os.environ.pop('CONTROL_PLANE_TUNNEL_ID',None);"
+                "os.environ.pop('MCP_STARTUP_WAIT_TIMEOUT',None);"
+                "runpy.run_module('nerya.cli.app',run_name='__main__')"
+            )
+            stdio_argv = [sys.executable, "-c", bootstrap, "mcp", "serve",
+                          "--transport", "stdio", "--workspace", key]
+            stdio_command = (subprocess.list2cmdline(stdio_argv) if os.name == "nt"
+                             else shlex.join(stdio_argv))
+            command = [binary, "run", "--mcp.command", stdio_command,
                        "--health.listen-addr", "127.0.0.1:0", "--health.url-file", str(health_file)]
             process = subprocess.Popen(command, env=env, cwd=str(config.paths.root),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -130,9 +214,11 @@ def stop(config):
 
 
 def restore(config, *, api_port):
-    _PORTS[str(config.paths.root.resolve())] = api_port
+    # Keep the public signature stable for local-server startup hooks.  The
+    # tunnel-owned stdio MCP child does not use the API listener port.
+    del api_port
     if os.environ.get("NERYA_DISABLE_TUNNEL_RESTORE", "").lower() in {"1", "true", "yes"}:
         return
     if config.get("mcp.enabled") is True and config.get("mcp.openai_tunnel.enabled") is True:
         # tunnel-client performs its own network reconnection while this child lives.
-        start(config, api_port=api_port)
+        start(config)

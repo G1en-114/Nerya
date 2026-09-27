@@ -74,7 +74,7 @@ test('progress current and each reported result are independent messages, not a 
 test('missing activity still displays real file and results; it does not invent narration', () => {
   const rendered = html([base({ result: fileResult })]);
   assert.match(rendered, /skills\/research\/SKILL.md/); assert.match(rendered, /21–29/);
-  assert.match(rendered, /alpha/); assert.match(rendered, /fileOpCard.fileContents/);
+  assert.match(rendered, /alpha/); assert.match(rendered, /文件内容/);
   assert.doesNotMatch(rendered, /external-activity|external-task|external-current/);
   assert.doesNotMatch(rendered, /duplicate envelope/);
   assert.match(rendered, /data-nerya-icon="document"/);

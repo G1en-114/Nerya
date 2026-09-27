@@ -76,9 +76,10 @@ from ..data.candles import fetch_candles, fetch_public_ticker, normalize_klines
 from ..data.features import compute_features
 from ..workspace.state_store import StateStore
 from .package import StrategyManifest, StrategyPackage
-from .backtest_bridge import backtest_replay as _strategy_backtest_replay
 from .prompt_io import StrategyPromptIO
 from .result import ResultBuilder, StrategyResult
+from .config_view import StrategyConfig
+from .candle_view import candle_snapshots, StateMapping
 
 
 _LOG = logging.getLogger(__name__)
@@ -172,26 +173,6 @@ class StrategyRunDeadline:
 
 
 @dataclass
-class StrategyConfig:
-    """Read-only manifest projection exposed as ``ctx.config``.
-
-    Generated code reads things like ``ctx.config.markets[0]`` or
-    ``ctx.config.news_sources``. We deliberately surface the *typed*
-    manifest — not the raw YAML — so strategy code never sees keys
-    that aren't in the schema, even if a future operator hand-edits
-    ``strategy.yml`` to add unrelated metadata.
-    """
-
-    strategy_id: str
-    title: str
-    mode: str  # paper | shadow | live
-    markets: tuple[str, ...]
-    accounts: tuple[str, ...]
-    news_sources: tuple[str, ...]
-    extras: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class StrategyPolicyView:
     """Read-only policy projection exposed as ``ctx.policy``.
 
@@ -239,6 +220,7 @@ class StrategyMarket:
     paths: WorkspacePaths
     accounts: tuple[str, ...]
     _registry_factory: Callable[[], Any] = field(repr=False)
+    config: Config | None = field(default=None, repr=False)
     _connector_cache: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def _connector_for(self, market: str, *, account: Optional[str] = None) -> Any:
@@ -274,6 +256,7 @@ class StrategyMarket:
                 snap = fetch_public_ticker(
                     market,
                     allow_mock=False,
+                    config_like=self.config,
                 )
             except Exception as exc:
                 raise StrategyRuntimeError(f"ticker failed: {exc}") from exc
@@ -316,6 +299,8 @@ class StrategyMarket:
         return self.ticker(market, account=account)
 
     def mark_price(self, market: str, *, account: Optional[str] = None) -> float:
+        if market.split(':',1)[0].upper() in {'ONCHAIN','BYREAL_ONCHAIN','BYREAL','OKX_ONCHAIN','BITGET_ONCHAIN'}:
+            return float(self.ticker(market,account=account)['last'])
         conn = self._connector_for(market, account=account)
         try:
             return float(conn.get_mark_price(market))
@@ -373,6 +358,8 @@ class StrategyMarket:
                 count=limit,
                 interval=timeframe,
                 allow_mock=False,
+                config_like=self.config,
+                **{k:_kwargs[k] for k in ('start','end') if _kwargs.get(k) is not None},
             )
             # A total data-source failure surfaces as ``[]`` from the
             # fetcher — indistinguishable from "no history". Live venues
@@ -383,7 +370,7 @@ class StrategyMarket:
                     f"candles failed: no_live_candles market={market} "
                     f"timeframe={timeframe}"
                 )
-            return rows
+            return candle_snapshots(rows, timeframe)
 
         conn = self._connector_for(market, account=account)
         try:
@@ -391,7 +378,7 @@ class StrategyMarket:
         except Exception as exc:
             raise StrategyRuntimeError(f"candles failed: {exc}") from exc
         venue_hint = getattr(conn, "venue", venue) or venue
-        return normalize_klines(str(venue_hint), list(rows or ()))
+        return candle_snapshots(normalize_klines(str(venue_hint), list(rows or ())), timeframe)
 
     def _normalise_candle_args(
         self,
@@ -1571,7 +1558,7 @@ class StrategyMessages:
 
 
 @dataclass
-class StrategyState:
+class StrategyState(StateMapping):
     """Strategy-local key/value store with optimistic locking.
 
     Persisted at ``<strategy_root>/state/state.json``. Reads return a
@@ -1702,6 +1689,14 @@ class StrategyPosition:
         return self.size
 
     @property
+    def side(self) -> str:
+        return "long" if self.size > 0 else "short" if self.size < 0 else "flat"
+
+    @property
+    def entry_price(self) -> float:
+        return self.avg_price
+
+    @property
     def notional_usd(self) -> float:
         return self.market_value_usd
 
@@ -1716,6 +1711,8 @@ class StrategyPosition:
             "size": self.size,
             "quantity": self.quantity,
             "qty": self.qty,
+            "side": self.side,
+            "entry_price": self.entry_price,
             "avg_price": self.avg_price,
             "realized_pnl_usd": self.realized_pnl_usd,
             "unrealized_pnl_usd": self.unrealized_pnl_usd,
@@ -2377,6 +2374,7 @@ def build_strategy_context(
         paths=paths,
         accounts=manifest.accounts,
         _registry_factory=_registry_factory,
+        config=config,
     )
 
     news = StrategyNews(sources=manifest.news_sources)
@@ -2457,6 +2455,9 @@ def build_strategy_context(
     prompt = StrategyPromptIO(strategy_root=package.root, run_id=rid)
 
     def _bound_backtest_replay(run_fn: Callable[[Any], Any], **kwargs: Any) -> dict[str, Any]:
+        # Import at invocation, not while the replay engine imports its context.
+        from .backtest_bridge import backtest_replay as _strategy_backtest_replay
+
         kwargs.setdefault("markets", list(manifest.markets))
         return _strategy_backtest_replay(run_fn, **kwargs)
 

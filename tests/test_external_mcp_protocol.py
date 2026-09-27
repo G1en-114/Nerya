@@ -51,6 +51,12 @@ def rpc(client, method, params=None, *, extra_headers=None):
                        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
 
 
+def open_session(client):
+    result = rpc(client, "tools/call", {"name": "nerya_session", "arguments": {
+        "action": "open", "client_request_id": "http-wire-conversation"}})
+    return result.json()["result"]["structuredContent"]["remote_session_id"]
+
+
 def test_http_initialize_discover_and_call_share_exact_schema(http_client):
     client, catalog = http_client
     init = rpc(client, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
@@ -59,12 +65,21 @@ def test_http_initialize_discover_and_call_share_exact_schema(http_client):
     assert init.json()["result"]["serverInfo"]["name"] == "nerya"
     listed = rpc(client, "tools/list")
     assert listed.status_code == 200, listed.text
-    schema = listed.json()["result"]["tools"][0]["inputSchema"]
+    schema = next(t for t in listed.json()["result"]["tools"] if t["name"] == "echo")["inputSchema"]
+    assert schema["properties"].pop("remote_session_id")["type"] == "string"
+    assert "remote_session_id" in schema["required"]
+    schema["required"].remove("remote_session_id")
+    schema["properties"].pop("activity")
+    schema["properties"].pop("purpose")
     assert schema == catalog.describe("echo")["inputSchema"]
-    result = rpc(client, "tools/call", {"name": "echo", "arguments": {"number": 7}})
+    assert any(t["name"] == "nerya_session" for t in listed.json()["result"]["tools"])
+    sid = open_session(client)
+    result = rpc(client, "tools/call", {"name": "echo", "arguments": {"remote_session_id": sid, "number": 7}})
     assert result.status_code == 200, result.text
     body = result.json()["result"]
-    assert body["structuredContent"] == {"number": 7}
+    assert body["structuredContent"]["number"] == 7
+    assert body["structuredContent"]["nerya_trace"]["remote_session_id"].startswith("ext_mcp_")
+    assert body["structuredContent"]["nerya_trace"]["status"] == "succeeded"
     assert json.loads(body["content"][0]["text"]) == body["structuredContent"]
     assert body["isError"] is False
 
@@ -75,6 +90,8 @@ def test_http_initialize_discover_and_call_share_exact_schema(http_client):
     ({"name": "missing", "arguments": {}}, "not_found"),
 ])
 def test_http_tool_failures_have_iserror_and_structured_error(http_client, params, code):
+    sid = open_session(http_client[0])
+    params = {**params, "arguments": {**params["arguments"], "remote_session_id": sid}}
     response = rpc(http_client[0], "tools/call", params)
     assert response.status_code == 200, response.text
     body = response.json()["result"]
@@ -124,10 +141,12 @@ async def test_stdio_real_process_initialize_list_call_and_clean_shutdown(tmp_pa
                 assert init.serverInfo.name == "nerya"
                 listed = await session.list_tools()
                 assert any(t.name == "nerya_config_get" for t in listed.tools)
-                result = await session.call_tool("nerya_config_get", {"target": "agents.yml"})
+                opened = await session.call_tool("nerya_session", {"client_request_id": "stdio-wire-conversation"})
+                sid = opened.structuredContent["remote_session_id"]
+                result = await session.call_tool("nerya_config_get", {"remote_session_id": sid, "target": "agents.yml"})
                 assert result.isError is False
                 assert result.structuredContent["target"] == "agents.yml"
-                invalid = await session.call_tool("nerya_market_ticker", {})
+                invalid = await session.call_tool("nerya_market_ticker", {"remote_session_id": sid})
                 assert invalid.isError is True
     await asyncio.wait_for(exercise(), timeout=20)
 
@@ -138,6 +157,7 @@ def test_http_dispatches_real_agent_and_config_handlers(tmp_path):
     tools.client.config.data["mcp"]["native_tools"].update(allow_mutating=True, mode="auto")
     settings = ServerSettings("streamable-http", "127.0.0.1", 8765, ["testserver"], [], TOKEN)
     with TestClient(create_http_app(create_server(tools), settings)) as client:
+        sid = open_session(client)
         for name, arguments in (
             ("nerya_native_role_save", {"name": "http_researcher", "prompt": "Research only."}),
             ("nerya_native_role_get", {"name": "http_researcher"}),
@@ -145,9 +165,30 @@ def test_http_dispatches_real_agent_and_config_handlers(tmp_path):
                 "target": "agents.yml", "summary": "HTTP proposal", "config_after": {"max_parallel": 2},
             }),
         ):
-            response = rpc(client, "tools/call", {"name": name, "arguments": arguments})
+            response = rpc(client, "tools/call", {"name": name, "arguments": {"remote_session_id": sid, **arguments}})
             assert response.status_code == 200, response.text
             assert response.json()["result"]["isError"] is False, response.text
     assert (tmp_path / "subagents" / "http_researcher.agent.md").exists()
     assert not (tmp_path / "agents.yml").exists()
     assert list((tmp_path / "evolution" / "proposals").glob("*/after/agents.yml"))
+
+
+def test_http_missing_id_repeated_open_and_activity_are_one_conversation(http_client):
+    client, _ = http_client
+    missing = rpc(client, "tools/call", {"name": "echo", "arguments": {"number": 1}}).json()["result"]
+    assert missing["isError"] and missing["structuredContent"]["error"]["code"] == "session_required"
+    def sessions():
+        return rpc(client, "tools/call", {"name": "nerya_session", "arguments": {"action": "list"}}).json()["result"]["structuredContent"]["sessions"]
+    assert sessions() == sessions() == []
+    sid = open_session(client)
+    assert open_session(client) == sid
+    rows = []
+    for number in (1, 2, 3):
+        result = rpc(client, "tools/call", {"name": "echo", "arguments": {"remote_session_id": sid,
+            "number": number, "activity": {"intent": "One task", "next": "Read a number"}}}).json()["result"]
+        assert not result["isError"]
+        rows.append(result["structuredContent"]["nerya_trace"])
+    assert len(sessions()) == 1
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert len({row["turn_id"] for row in rows}) == 1
+    assert all(row["activity"]["next"] == "Read a number" for row in rows)

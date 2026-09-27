@@ -182,7 +182,7 @@ fn launch(app: tauri::AppHandle, state: Desktop) -> Result<(), String> {
     command.args(["-u"]).arg(resources.join("runtime_host.py"))
         .arg("--resources").arg(&resources).arg("--data-dir").arg(&data)
         .current_dir(&data).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(log))
-        .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONNOUSERSITE", "1").env("PYTHONDONTWRITEBYTECODE", "1").env("PYTHONUTF8", "1")
         .env_remove("PYTHONHOME");
     let python_paths = manifest["python_paths"].as_array().ok_or("invalid_runtime_manifest")?
         .iter().map(|value| resources.join(value.as_str().unwrap_or(""))).collect::<Vec<_>>();

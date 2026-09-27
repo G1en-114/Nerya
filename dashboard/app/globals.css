@@ -57,6 +57,14 @@
   --fluid-soft: rgba(34, 211, 238, 0.16);
   --text-base: #e9ebf2;
   --text-muted: #a3acc0;
+  --syntax-comment: var(--text-muted);
+  --syntax-keyword: rgb(var(--brand-readable));
+  --syntax-type: #7dd3fc;
+  --syntax-function: #93c5fd;
+  --syntax-string: var(--ok);
+  --syntax-number: var(--warn);
+  --syntax-meta: #f0abfc;
+  --syntax-deletion: var(--err);
   --scrollbar-track: #151820;
   --scrollbar-thumb: #394050;
   --scrollbar-thumb-hover: #555f75;
@@ -99,6 +107,9 @@ html.light {
   --fluid-soft: rgba(8, 145, 178, 0.12);
   --text-base: #1c2333;
   --text-muted: #59657b;
+  --syntax-type: #075985;
+  --syntax-function: #1d4ed8;
+  --syntax-meta: #86198f;
   --scrollbar-track: #f2f4f8;
   --scrollbar-thumb: #c1c9d7;
   --scrollbar-thumb-hover: #9ba6ba;
@@ -732,14 +743,11 @@ body::after {
   50% { opacity: 0; }
 }
 
-/* highlight.js dark theme — shared by the chat markdown renderer and the
-   workspace canvas code view. The token class names are highlight.js-specific
-   (emitted by rehype-highlight), so these rules are intentionally global.
-   Palette tracks the ink/brand scheme: violet keywords, cyan types, emerald
-   strings, amber numbers. */
-.hljs { color: #cdd6e4; background: transparent; }
+/* Shared semantic syntax colours for Markdown, file previews and the editor.
+   Theme tokens keep normal-size code readable on each native surface. */
+.hljs { color: var(--text-base); background: transparent; }
 .hljs-comment,
-.hljs-quote { color: #6b7689; font-style: italic; }
+.hljs-quote { color: var(--syntax-comment); font-style: italic; }
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -747,29 +755,29 @@ body::after {
 .hljs-name,
 .hljs-tag,
 .hljs-selector-id,
-.hljs-selector-class { color: #c4a3ff; }
+.hljs-selector-class { color: var(--syntax-keyword); }
 .hljs-built_in,
 .hljs-type,
 .hljs-class .hljs-title,
-.hljs-title.class_ { color: #7dd3fc; }
+.hljs-title.class_ { color: var(--syntax-type); }
 .hljs-title,
 .hljs-title.function_,
-.hljs-function .hljs-title { color: #93c5fd; }
+.hljs-function .hljs-title { color: var(--syntax-function); }
 .hljs-string,
 .hljs-attr,
 .hljs-addition,
 .hljs-meta-string,
-.hljs-template-tag { color: #6ee7b7; }
+.hljs-template-tag { color: var(--syntax-string); }
 .hljs-number,
 .hljs-variable,
 .hljs-template-variable,
-.hljs-regexp { color: #fcd34d; }
+.hljs-regexp { color: var(--syntax-number); }
 .hljs-symbol,
 .hljs-bullet,
 .hljs-meta,
 .hljs-attribute,
-.hljs-link { color: #f0abfc; }
-.hljs-deletion { color: #fca5a5; }
+.hljs-link { color: var(--syntax-meta); }
+.hljs-deletion { color: var(--syntax-deletion); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 
@@ -1024,12 +1032,51 @@ input[type=checkbox], input[type=radio] { accent-color: var(--violet); }
   .skeleton, .animate-shimmer, .animate-ai-pulse { animation: none !important; }
 }
 
-/* Compact workbench controls retain useful touch targets on narrow screens. */
-@media (max-width: 767px) {
-  [data-chat-composer] button, [data-testid="task-topbar"] button,
-  [data-testid="conversation-controls"] button, [data-testid="user-interaction"] button {
-    min-height: 44px; min-width: 44px;
-  }
+.workbench-search-hit { outline: 2px solid var(--violet); outline-offset: 4px; }
+
+/* Composer groups adapt to their panel width, including a narrow split pane. */
+[data-chat-composer] { container: composer / inline-size; }
+[data-composer-toolbar] { display:flex; align-items:center; flex-wrap:nowrap; gap:4px; margin-top:10px; }
+[data-composer-toolbar] > button { flex:none; }
+[data-composer-options], [data-composer-models], [data-composer-actions] { display:flex; align-items:center; gap:3px; min-width:0; }
+[data-composer-options] { flex:none; }
+[data-composer-models] { flex:1; justify-content:flex-end; }
+[data-composer-actions] { flex:none; margin-left:4px; }
+[data-composer-model-trigger] { max-width:220px; }
+[data-composer-toolbar] button { min-height:32px; }
+[data-testid="composer-add"][data-work-mode="plan"], [data-testid="composer-add"][data-work-mode="goal"] { color: rgb(var(--brand-readable)); }
+@container composer (max-width:480px) {
+ [data-composer-toolbar] { display:grid; grid-template-columns:32px minmax(0,1fr) auto; gap:4px; }
+ [data-composer-toolbar] > input { display:none; }
+ [data-composer-options] { grid-column:2; grid-row:1; }
+ [data-composer-actions] { grid-column:3; grid-row:1 / span 2; align-self:end; }
+ [data-composer-models] { grid-column:1 / span 2; grid-row:2; margin-left:0; justify-content:flex-start; }
+ [data-composer-model-trigger] { max-width:190px; }
+ [data-composer-models] button:first-child > svg:first-child { display:none; }
+ [data-composer-work-mode] { display:none; }
+}
+@media (pointer:coarse), (max-width:767px) {
+ [data-chat-composer] button,
+ [data-testid="task-dock-header"] button,
+ [data-testid="workspace-files"] button,
+ [data-testid="user-interaction"] button,
+ .ui-icon-button,.ui-select-option { min-height:44px; min-width:44px; }
+ [data-chat-composer] textarea { min-height:44px; }
+}
+@container composer (max-width:480px) {
+ [data-composer-toolbar] { grid-template-columns:44px minmax(0,1fr) auto; }
+ [data-composer-toolbar] button { min-height:44px; min-width:44px; }
+ [data-composer-toolbar]:has([data-composer-actions] > button:nth-child(2)) [data-composer-actions] { grid-column:1 / -1; grid-row:3; justify-content:flex-end; flex-wrap:wrap; margin-left:0; }
+ [data-composer-toolbar]:has([data-composer-actions] > button:nth-child(2)) [data-composer-models] { grid-column:1 / -1; }
 }
 
-.workbench-search-hit { outline: 2px solid var(--violet); outline-offset: 4px; }
+[data-testid="agent-start"] [role="tablist"] { scrollbar-width:none; }
+[data-testid="agent-start"] [role="tablist"]::-webkit-scrollbar { display:none; }
+@media(max-width:480px) {
+ [data-testid="agent-start"] [role="tablist"] { flex-wrap:wrap; overflow:visible; gap:2px; }
+ [data-testid="agent-start"] [role="tab"] { padding-left:9px; padding-right:9px; min-height:34px; }
+ [data-chat-composer="hero"] textarea { min-height:64px; }
+}
+
+/* Native range highlight survives focus returning to the conversation search field. */
+::highlight(nerya-match) { background: #fde68a; color: #422006; }

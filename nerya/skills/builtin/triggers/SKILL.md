@@ -1,7 +1,10 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: triggers
-description: "Use to create or inspect scheduled tasks, event hooks, condition watchers, price alerts, recurring reports, and route explanations."
+metadata:
+  nerya:
+    catalog_parent: tasks
+description: "Advanced task-automation method: event hooks, trigger routing, condition watchers, cooldown, TTL and dead-letter checks. Use tasks for ordinary schedules."
 version: 0.1.0
 license: MIT
 author: Nerya

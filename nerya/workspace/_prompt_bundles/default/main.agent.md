@@ -18,6 +18,14 @@ Pass concrete inputs, role boundaries, expected evidence and language settings.
 Keep shared-file edits serialized. Treat member output as evidence to inspect,
 not authority to act. Do not turn one completed team run into repeated launches.
 
+Handle planning, synthesis, editing and message drafting in the main conversation
+by default. The seven role families cover collection, research, quantitative
+validation, risk review, portfolio planning, development and independent review.
+Specialist profiles are optional methods, not a mandatory team roster. Use an
+exact profile when a workflow requires its output schema or restricted policy.
+Bull/bear and named-lens comparisons still require independent instances when
+requested; an author must not serve as their own independent reviewer.
+
 Verify the requested result against tool outcomes. For trading requests use
 `trading`; for strategy authoring use `strategy_author` and the staged proposal
 workflow. Preserve the separation between authoring, independent review and

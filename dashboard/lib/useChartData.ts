@@ -63,8 +63,8 @@ async function fetchChartPayload(chartId: string): Promise<CachedPayload> {
       throw new Error(`chart fetch rejected: ${reason}`);
     }
     const payload = body.payload as CachedPayload;
-    if (!payload || !Array.isArray(payload.series)) {
-      throw new Error("chart fetch payload missing series array");
+    if (!payload || payload.chart_id !== chartId || !Array.isArray(payload.series)) {
+      throw new Error("chart fetch payload missing series or mismatched chart identity");
     }
     return payload;
   })();
@@ -77,7 +77,7 @@ async function fetchChartPayload(chartId: string): Promise<CachedPayload> {
   }
 }
 
-function mergePayload(
+export function mergeChartPayload(
   block: ChartBlockShape,
   payload: CachedPayload
 ): ChartBlockShape {
@@ -90,7 +90,9 @@ function mergePayload(
     if (!fresh) return series;
     return { ...series, data: fresh, data_uri: undefined };
   });
-  return { ...block, series: merged };
+  // The URI marks unresolved data. Keeping it after hydration makes
+  // isFullyInline reject every bulk chart even though the points arrived.
+  return { ...block, series: merged, bulk_data_uri: undefined };
 }
 
 export type ChartDataResult = {
@@ -171,8 +173,11 @@ export function useChartData(input: ChartBlockShape): ChartDataResult {
     };
   }
 
-  if (state.status === "ready") {
-    const merged = mergePayload(input, state.payload);
+  // On identity changes, never render the previous chart's cached points
+  // during the render before the effects synchronize local state.
+  const currentState = lastChartId.current === chartId ? state : CACHE.get(chartId);
+  if (currentState?.status === "ready") {
+    const merged = mergeChartPayload(input, currentState.payload);
     return {
       block: merged,
       loading: false,
@@ -180,8 +185,8 @@ export function useChartData(input: ChartBlockShape): ChartDataResult {
       ready: isFullyInline(merged),
     };
   }
-  if (state.status === "error") {
-    return { block: input, loading: false, error: state.error, ready: false };
+  if (currentState?.status === "error") {
+    return { block: input, loading: false, error: currentState.error, ready: false };
   }
   return { block: input, loading: true, error: null, ready: false };
 }

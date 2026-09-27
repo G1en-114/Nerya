@@ -1,8 +1,10 @@
 "use client";
 
 import { ApiError, callApi } from "./clientApi";
-import type { AssistantMessage, ChatAttachment, ChatThread, LiveEvent, TurnPayload } from "./chat";
-import { uuid } from "./chat";
+import type { AssistantMessage, ChatAttachment, ChatRunSettings, ChatThread, LiveEvent, TurnPayload } from "./chat";
+import { DEFAULT_CHAT_RUN_SETTINGS, uuid } from "./chat";
+import { mergeStreamEvents } from "./streamEvents";
+import { getWorkspaceIdentity, subscribeWorkspaceIdentity, workspaceGeneration, workspaceStorageKey } from "./workspaceIdentity";
 
 export type CommandState = "queued" | "running" | "stopping" | "delivering" | "delivered" | "injected" |
   "succeeded" | "failed" | "blocked" | "awaiting_approval" | "awaiting_input" | "interrupted" | "unconfirmed" | "not_consumed" | "removed";
@@ -11,39 +13,78 @@ export type ConversationCommand = {
   command_id: string; session_id: string; kind: CommandKind; state: CommandState;
   revision: number; turn_id: string; position: number; created_at: number; updated_at: number;
   input: string; attachments: ChatAttachment[]; context: Record<string, unknown>;
+  editable_settings?: Partial<ChatRunSettings> & { reasoning_summary?: string | null };
+  queue_editable?: boolean;
   show_user?: boolean; has_result?: boolean; result?: TurnPayload | null;
   error?: { code?: string; status_code?: number; request_id?: string; retrying?: boolean } | null;
 };
+export type QueueEditDraft = { text: string; attachments: ChatAttachment[]; settings: ChatRunSettings; revision: number };
+export function queueEditDraft(command: ConversationCommand): QueueEditDraft {
+  const settings = command.editable_settings || command.context.run_settings || command.context.requested_model || {};
+  return { text: command.input, attachments: command.attachments, revision: command.revision,
+    settings: { ...DEFAULT_CHAT_RUN_SETTINGS, permission_mode: "default", work_mode: command.context.work_mode === "plan" || command.context.work_mode === "goal" ? command.context.work_mode : "execute",
+      ...Object.fromEntries(Object.entries(settings).filter(([, value]) => value != null)) } as ChatRunSettings };
+}
+export function queueEditRequest(command: ConversationCommand, draft: QueueEditDraft): Record<string, unknown> {
+  const initial = queueEditDraft(command).settings;
+  const request: Record<string, unknown> = { payload: { text: draft.text, attachments: draft.attachments.map(file => ({
+    id: file.id, name: file.name, mime_type: file.mime_type, size: file.size, kind: file.kind,
+    artifact_uri: file.artifact_uri, reference: file.reference,
+  })) } };
+  for (const key of ["work_mode", "permission_mode", "model_provider", "model_id", "model_tier", "model_context_window",
+    "reasoning_effort", "max_iterations", "max_total_tool_calls", "max_wall_seconds"] as const) {
+    if (draft.settings[key] !== initial[key]) request[key] = draft.settings[key];
+  }
+  if (draft.settings.reasoning_effort !== initial.reasoning_effort) {
+    request.reasoning_effort = draft.settings.reasoning_effort === "inherit" ? null : draft.settings.reasoning_effort;
+    request.reasoning_summary = ["inherit", "off"].includes(draft.settings.reasoning_effort) ? null : "auto";
+  }
+  return request;
+}
 export type CommandSnapshot = {
   ok: boolean; commands: ConversationCommand[];
   queue: { paused: boolean | number; pause_reason: string; revision: number };
   checkpoint?: { turn_id: string; resumable: boolean; resume_count?: number } | null;
   branch_of?: { session_id: string; message_id: string } | null;
 };
-export type PendingCommand = { command_id: string; session_id: string; command_type: CommandKind;
+export type PendingCommand = { workspace_id: string; command_id: string; session_id: string; command_type: CommandKind;
   request: Record<string, unknown>; created_at: number };
 export const COMMAND_PENDING_EVENT = "nerya:command-pending";
 const KEY = "nerya.chat.pending-commands.v1";
-const PREFIX = "nerya.chat.pending-command.v2:";
+const LEGACY_PREFIX = "nerya.chat.pending-command.v2:";
+const PREFIX = "nerya.chat.pending-command.v3:";
 const memory = new Map<string, PendingCommand>();
 const volatile = new Set<string>();
 export const runningCommand = (command: ConversationCommand) => command.kind !== "guide" && ["running", "stopping"].includes(command.state);
 export const commandSettled = (command: ConversationCommand) => !["queued", "running", "stopping", "delivering", "delivered"].includes(command.state);
 
 export function pendingCommands(sid?: string): PendingCommand[] {
+  const workspace = getWorkspaceIdentity();
+  if (!workspace) return [];
   if (typeof window !== "undefined") {
     try {
       const legacy: unknown = JSON.parse(localStorage.getItem(KEY) || "[]");
       if (Array.isArray(legacy)) {
-        for (const item of legacy.slice(-32)) if (item && typeof item.command_id === "string") localStorage.setItem(PREFIX+item.command_id,JSON.stringify(item));
-        localStorage.removeItem(KEY);
+        const remaining = legacy.filter(item => {
+          if (!validPending(item, workspace)) return true;
+          localStorage.setItem(workspaceStorageKey(PREFIX, workspace, item.command_id), JSON.stringify(item));
+          return false;
+        });
+        if (remaining.length !== legacy.length) localStorage.setItem(KEY, JSON.stringify(remaining));
       }
       const found = new Map<string,PendingCommand>();
-      for (let index=0; index<localStorage.length; index++) {
-        const key=localStorage.key(index); if (!key?.startsWith(PREFIX)) continue;
-        const item=JSON.parse(localStorage.getItem(key) || "null");
-        if (item && typeof item.command_id === "string" && typeof item.session_id === "string" &&
-            ["send","resume","guide"].includes(item.command_type) && item.request && typeof item.request === "object") found.set(item.command_id,item);
+      const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+      for (const key of keys) {
+        if (!key || (!key.startsWith(PREFIX) && !key.startsWith(LEGACY_PREFIX))) continue;
+        try {
+          const item = JSON.parse(localStorage.getItem(key) || "null");
+          if (!validPending(item, workspace)) continue;
+          const target = workspaceStorageKey(PREFIX, workspace, item.command_id);
+          if (key.startsWith(LEGACY_PREFIX)) {
+            localStorage.setItem(target, JSON.stringify(item)); localStorage.removeItem(key);
+          } else if (key !== target) continue;
+          found.set(item.command_id, item);
+        } catch { /* A malformed row must not hide valid pending receipts. */ }
       }
       // Per-command keys prevent two tabs from overwriting each other's pending
       // requests. A removal in another tab clears the corresponding clue here.
@@ -51,17 +92,30 @@ export function pendingCommands(sid?: string): PendingCommand[] {
       for (const [id,item] of found) memory.set(id,item);
     } catch { /* A blocked preference store does not turn an ACK into a failure. */ }
   }
-  return [...memory.values()].filter(item => !sid || item.session_id === sid);
+  return [...memory.values()].filter(item => item.workspace_id === workspace && (!sid || item.session_id === sid));
 }
-function persistPending(id: string, value: PendingCommand | null) {
+subscribeWorkspaceIdentity(() => {
+  memory.clear(); volatile.clear();
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(COMMAND_PENDING_EVENT));
+});
+function validPending(item: PendingCommand | null, workspace: string): item is PendingCommand {
+  return Boolean(item && item.workspace_id === workspace && typeof item.command_id === "string" && typeof item.session_id === "string"
+    && ["send", "resume", "guide"].includes(item.command_type) && item.request && typeof item.request === "object");
+}
+function persistPending(id: string, value: PendingCommand | null, workspace: string) {
   if (typeof window === "undefined") return;
   try {
-    if (value) localStorage.setItem(PREFIX+id,JSON.stringify(value)); else localStorage.removeItem(PREFIX+id);
-    volatile.delete(id);
-  } catch { if (value) volatile.add(id); }
+    const key = workspaceStorageKey(PREFIX, workspace, id);
+    if (value) localStorage.setItem(key,JSON.stringify(value)); else localStorage.removeItem(key);
+    if (workspace === getWorkspaceIdentity()) volatile.delete(id);
+  } catch { if (value && workspace === getWorkspaceIdentity()) volatile.add(id); }
   window.dispatchEvent(new Event(COMMAND_PENDING_EVENT));
 }
-export function settlePending(id: string) { memory.delete(id); volatile.delete(id); persistPending(id,null); }
+export function settlePending(id: string, workspace = getWorkspaceIdentity()) {
+  if (!workspace) return;
+  if (workspace === getWorkspaceIdentity()) { memory.delete(id); volatile.delete(id); }
+  persistPending(id,null,workspace);
+}
 
 export class CommandClientError extends Error {
   constructor(public readonly code: string, public readonly uncertain = false) { super(code); this.name = "CommandClientError"; }
@@ -74,6 +128,8 @@ export function commandErrorCode(error: unknown): string {
   return "connection_lost";
 }
 async function request<T extends { ok?: boolean }>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const workspace = getWorkspaceIdentity(), generation = workspaceGeneration();
+  if (!workspace) throw new CommandClientError("workspace_unknown");
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
@@ -81,6 +137,7 @@ async function request<T extends { ok?: boolean }>(path: string, body?: unknown,
   const timer = setTimeout(abort, 12000);
   try {
     const result = await callApi<T & { error?: string }>(path, { method: body === undefined ? "GET" : "POST", body, signal: controller.signal });
+    if (workspace !== getWorkspaceIdentity() || generation !== workspaceGeneration()) throw new CommandClientError("workspace_changed", true);
     if (result.ok === false) throw new CommandClientError(result.error || "command_failed");
     return result;
   } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
@@ -102,25 +159,29 @@ export const commandControl = (sid: string, action: string, revision: number, co
 
 /** One deliberate send, one stable key. Network failures never trigger a new turn. */
 export async function submitCommand(sid: string, kind: CommandKind, body: Record<string, unknown>, existing?: PendingCommand) {
+  const workspace = getWorkspaceIdentity(), generation = workspaceGeneration();
+  if (!workspace) throw new CommandClientError("workspace_unknown");
+  if (existing && (existing.workspace_id !== workspace || existing.session_id !== sid || existing.command_type !== kind)) throw new CommandClientError("workspace_mismatch");
   pendingCommands();
   if (!existing && memory.size >= 32) throw new CommandClientError("pending_limit");
-  const pending = existing || { command_id: uuid(), session_id: sid, command_type: kind, request: body, created_at: Date.now() };
+  const pending = existing || { workspace_id: workspace, command_id: uuid(), session_id: sid, command_type: kind, request: body, created_at: Date.now() };
   memory.set(pending.command_id, pending);
-  persistPending(pending.command_id,pending);
+  persistPending(pending.command_id,pending,workspace);
   const started = typeof performance !== "undefined" ? performance.now() : Date.now();
   try {
     const result = await request<{ ok: boolean; command: ConversationCommand; duplicate: boolean }>("/agent/commands", pending);
-    if (!result.command?.command_id || result.command.command_id !== pending.command_id) throw new CommandClientError("receipt_invalid",true);
-    settlePending(pending.command_id);
+    if (!result.command?.command_id || result.command.command_id !== pending.command_id || result.command.session_id !== pending.session_id) throw new CommandClientError("receipt_invalid",true);
+    settlePending(pending.command_id,workspace);
     recordCommandTiming({ command_id: pending.command_id, phase: "ack", ms: (typeof performance !== "undefined" ? performance.now() : Date.now())-started });
+    if (workspace !== getWorkspaceIdentity() || generation !== workspaceGeneration()) throw new CommandClientError("workspace_changed", true);
     return result.command;
   } catch (error) {
-    if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
-      settlePending(pending.command_id);
+    if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) {
+      settlePending(pending.command_id,workspace);
       throw new CommandClientError(commandErrorCode(error));
     }
     if (error instanceof CommandClientError && !error.uncertain) {
-      settlePending(pending.command_id); throw error;
+      settlePending(pending.command_id,workspace); throw error;
     }
     throw new CommandClientError("delivery_unconfirmed", true);
   }
@@ -151,10 +212,10 @@ export function projectCommand(thread: ChatThread, command: ConversationCommand,
   // the turn back into the previous failure/stop state after reconnecting.
   if (old?.command_id && old.command_id !== command.command_id && oldCreated > command.created_at) return thread;
   const live = runningCommand(command);
-  const events = new Map((old?.live_events || []).map(event => [event.event_id || `${event.kind}:${event.seq}`,event]));
-  for (const event of fresh) events.set(event.event_id || `${event.kind}:${event.seq}`,event);
-  const turn = command.result || old?.turn || { turn_id: tid };
-  const error = ["failed","unconfirmed"].includes(command.state)
+  const events = mergeStreamEvents(old?.live_events || [],fresh);
+  const turn = {...(command.result || old?.turn || { turn_id: tid })};
+  if(command.state === "succeeded" || live) delete turn.error;
+  const error = (["failed","unconfirmed"].includes(command.state) || command.state === "blocked" && Boolean(command.error))
     ? JSON.stringify(command.error || { code: command.state === "unconfirmed" ? "execution_unconfirmed" : "turn_failed", retrying: false }) : undefined;
   const next: AssistantMessage = { ...old, id: old?.id || command.command_id+":assistant", role: "assistant",
     ts: old?.ts || command.created_at*1000, backend_message_id: `${tid}:assistant`,
@@ -162,7 +223,7 @@ export function projectCommand(thread: ChatThread, command: ConversationCommand,
     loading: live, error, turn: { ...turn, command_id: command.command_id, context_snapshot: command.context },
     started_ms: old?.started_ms || (live ? Date.now() : undefined),
     elapsed_ms: command.result?.execution_elapsed_ms ?? old?.elapsed_ms,
-    live_events: [...events.values()], live_cursor: fresh.at(-1)?.seq ?? old?.live_cursor };
+    live_events: events, live_cursor: fresh.at(-1)?.seq ?? old?.live_cursor };
   if (index >= 0) messages[index] = next; else messages.push(next);
   return { ...thread, messages, imported: false, message_count: messages.length,
     updated_ts: Math.max(thread.updated_ts || 0, command.updated_at*1000) };

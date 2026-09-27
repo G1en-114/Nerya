@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../lib/i18n";
 
 import { Children, Fragment, isValidElement, useEffect, useId, useMemo, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode } from "react";
 import * as Popover from "@radix-ui/react-popover";
@@ -32,6 +33,7 @@ type Props = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "value" | "onChange" 
   onValueChange: (value: string) => void;
   children: ReactNode;
   searchable?: boolean;
+  createOption?: (value: string) => ReactNode;
   required?: boolean;
   placeholder?: string;
 };
@@ -39,8 +41,9 @@ type Props = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "value" | "onChange" 
 /** Select-only combobox for short lists; searchable catalogue for longer ones.
  * Radix owns the portal, positioning, dismissal and return focus. Navigation
  * previews an option; only explicit selection changes the controlled value.
+ * `createOption` turns a non-matching search into an explicit create choice.
  */
-export function ChoiceSelect({ value, onValueChange, children, searchable, required, placeholder, disabled, className = "", name, ...props }: Props) {
+export function ChoiceSelect({ value, onValueChange, children, searchable, createOption, required, placeholder, disabled, className = "", name, ...props }: Props) {
   const zh = useLocale().startsWith("zh");
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -55,9 +58,12 @@ export function ChoiceSelect({ value, onValueChange, children, searchable, requi
   const selected = choices.find((choice) => choice.value === String(value));
   const canSearch = searchable ?? choices.length > 7;
   const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return choices.filter((choice) => !needle || `${choice.text} ${choice.group ?? ""}`.toLocaleLowerCase().includes(needle));
-  }, [choices, query]);
+    const candidate = query.trim();
+    const needle = candidate.toLocaleLowerCase();
+    const matches = choices.filter((choice) => !needle || `${choice.text} ${choice.group ?? ""}`.toLocaleLowerCase().includes(needle));
+    if (!candidate || !createOption || choices.some((choice) => choice.value.toLocaleLowerCase() === needle || choice.text.toLocaleLowerCase() === needle)) return matches;
+    return [{ value: candidate, label: createOption(candidate), text: candidate, disabled: false }, ...matches];
+  }, [choices, createOption, query]);
   const label = props["aria-label"];
   const activeId = active >= 0 && filtered[active] ? `${id}-option-${active}` : undefined;
   useEffect(() => { setInvalid(false); }, [value]);
@@ -89,7 +95,7 @@ export function ChoiceSelect({ value, onValueChange, children, searchable, requi
       setActive(next ?? -1);
     } else if (event.key === "Enter" || (!canSearch && event.key === " ")) {
       event.preventDefault();
-      choose(active);
+      choose(active >= 0 ? active : 0);
     } else if (!canSearch && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault();
       const now = Date.now();
@@ -117,7 +123,7 @@ export function ChoiceSelect({ value, onValueChange, children, searchable, requi
           props.onKeyDown?.(event);
           if (!event.defaultPrevented && ["ArrowDown", "ArrowUp"].includes(event.key)) { event.preventDefault(); changeOpen(true); }
         }}>
-        <span className="min-w-0 flex-1 truncate text-left">{selected?.label ?? (value || placeholder || (zh ? "请选择" : "Choose an option"))}</span>
+        <span className="min-w-0 flex-1 truncate text-left">{selected?.label ?? (value || placeholder || (i18nCopy(zh, "copy.components_ChoiceSelect.001")))}</span>
         <ChevronDownIcon size={14} className="shrink-0 text-[color:var(--text-muted)]" />
       </button>
     </Popover.Trigger>
@@ -128,12 +134,12 @@ export function ChoiceSelect({ value, onValueChange, children, searchable, requi
         onOpenAutoFocus={(event) => { event.preventDefault(); (canSearch ? search.current : list.current)?.focus(); }}>
         {canSearch ? <div className="ui-choice-search">
           <SearchIcon size={15} aria-hidden="true" />
-          <input ref={search} type="search" value={query} aria-label={zh ? "搜索选项" : "Search options"} placeholder={zh ? "输入关键词筛选…" : "Search options…"}
+          <input ref={search} type="search" value={query} aria-label={i18nCopy(zh, "copy.components_ChoiceSelect.002")} placeholder={i18nCopy(zh, "copy.components_ChoiceSelect.003")}
             aria-controls={`${id}-list`} aria-activedescendant={activeId} onKeyDown={onKeys}
-            onChange={(event) => { setQuery(event.target.value); setActive(0); }} />
-          {query ? <button type="button" className="ui-icon-button" aria-label={zh ? "清除搜索" : "Clear search"} onClick={() => { setQuery(""); setActive(choices.findIndex((choice) => !choice.disabled)); search.current?.focus(); }}><XIcon size={14} /></button> : null}
+            onChange={(event) => { setQuery(event.target.value); setActive(-1); }} />
+          {query ? <button type="button" className="ui-icon-button" aria-label={i18nCopy(zh, "copy.components_ChoiceSelect.004")} onClick={() => { setQuery(""); setActive(choices.findIndex((choice) => !choice.disabled)); search.current?.focus(); }}><XIcon size={14} /></button> : null}
         </div> : null}
-        <div ref={list} id={`${id}-list`} role="listbox" aria-label={label ?? (zh ? "可用选项" : "Available options")}
+        <div ref={list} id={`${id}-list`} role="listbox" aria-label={label ?? (i18nCopy(zh, "copy.components_ChoiceSelect.005"))}
           tabIndex={canSearch ? -1 : 0} aria-activedescendant={!canSearch ? activeId : undefined} className="ui-choice-options" onKeyDown={!canSearch ? onKeys : undefined}>
           {filtered.map((choice, index) => <Fragment key={choice.value}>
             {choice.group && choice.group !== filtered[index - 1]?.group ? <div className="ui-choice-group" role="presentation">{choice.group}</div> : null}
@@ -144,7 +150,7 @@ export function ChoiceSelect({ value, onValueChange, children, searchable, requi
               {choice.value === String(value) ? <CheckIcon size={14} className="shrink-0" /> : null}
             </div>
           </Fragment>)}
-          {!filtered.length ? <p className="px-3 py-6 text-center text-sm text-[color:var(--text-muted)]" role="status">{zh ? "没有匹配的选项" : "No matching options"}</p> : null}
+          {!filtered.length ? <p className="px-3 py-6 text-center text-sm text-[color:var(--text-muted)]" role="status">{i18nCopy(zh, "copy.components_ChoiceSelect.006")}</p> : null}
         </div>
       </Popover.Content>
     </Popover.Portal>

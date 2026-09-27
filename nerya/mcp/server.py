@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import sys
 from contextlib import asynccontextmanager, redirect_stdout
@@ -18,6 +19,7 @@ from ..sdk.internal_client import InternalClient
 from .catalog import ToolCatalog, build_catalog, is_error
 from .dynamic_tools import DynamicMCPRegistry, MCPPolicy, policy_from_config
 from .settings import ServerSettings, require_enabled, server_settings
+from .inbound_sessions import InboundSessions, SESSION_INSTRUCTIONS
 from .tools import NeryaTools
 
 
@@ -36,27 +38,42 @@ def create_server(tools: NeryaTools | None = None, *, workspace: str | Path | No
         from mcp import types
     except ImportError as exc:
         raise RuntimeError(_INSTALL_HINT) from exc
-    with redirect_stdout(sys.stderr):
-        if catalog is None:
-            tools = tools or NeryaTools(InternalClient.from_config(config))
-            catalog = build_catalog(tools, dynamic_policy=dynamic_policy,
-                                    native_policy=native_policy, include_legacy=include_legacy,
-                                    include_dynamic=include_dynamic, include_native=include_native)
-    server = Server("nerya", instructions=config.get("mcp.instructions") or (
+    catalog_factory = None
+    if catalog is None:
+        tools = tools or NeryaTools(InternalClient.from_config(config))
+        def catalog_factory():
+            with redirect_stdout(sys.stderr):
+                return build_catalog(tools, dynamic_policy=dynamic_policy,
+                                     native_policy=native_policy, include_legacy=include_legacy,
+                                     include_dynamic=include_dynamic, include_native=include_native)
+        catalog = catalog_factory()
+    inbound = InboundSessions(config, catalog, catalog_factory=catalog_factory,
+                              source="tunnel" if os.environ.get("NERYA_MCP_SOURCE") == "tunnel" else "mcp")
+    server = Server("nerya", instructions=SESSION_INSTRUCTIONS + " " + (config.get("mcp.instructions") or (
         "Discover tools first and use their inputSchema verbatim. Results are in "
         "structuredContent; isError marks failures. Strategy/config proposals do "
         "not activate changes. Approval, credentials and live trading remain "
         "operator-controlled. Never retry a mutation blindly after a timeout."
-    ))
+    )))
 
     @server.list_tools()
     async def list_tools():
-        return [types.Tool(**row) for row in catalog.list_tools()]
+        return [types.Tool(**row) for row in inbound.descriptors()]
 
     # Shared validation provides identical CLI/MCP errors without echoing secrets.
     @server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict[str, Any] | None):
-        result = await anyio.to_thread.run_sync(catalog.call, name, arguments)
+        request_id, client_name = None, ""
+        try:
+            ctx = server.request_context
+            request_id = ctx.request_id
+            client_info = getattr(getattr(ctx.session, "client_params", None), "clientInfo", None)
+            client_name = str(getattr(client_info, "name", "") or "")
+        except LookupError:
+            pass
+        from functools import partial
+        result = await anyio.to_thread.run_sync(partial(inbound.call, name, arguments,
+                                                       request_id=request_id, client_name=client_name))
         error = is_error(result)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))],

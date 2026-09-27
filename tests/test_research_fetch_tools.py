@@ -112,7 +112,6 @@ def test_fetch_url_extracts_pdf_before_max_bytes_truncation(monkeypatch) -> None
         url="https://example.com/filing.pdf",
         max_bytes=1024,
         use_jina_fallback=False,
-        use_browser_fallback=False,
         use_scrapling_fallback=False,
     )
 
@@ -160,93 +159,6 @@ def test_fetch_url_uses_jina_reader_for_low_quality_direct_html(monkeypatch) -> 
     assert result["reader_url"] == "https://r.jina.ai/https://example.com/protected"
 
 
-def test_fetch_url_uses_browser_when_antibot_and_jina_are_low_quality(monkeypatch) -> None:
-    from nerya.integrations import browser_engines
-
-    calls: list[str] = []
-
-    def fake_http_get(url: str, **kwargs):
-        calls.append(url)
-        if url == "https://example.com/antibot":
-            return (
-                200,
-                {"content-type": "text/html"},
-                b"<html><body>Cloudflare: verify you are human before continuing.</body></html>",
-            )
-        if url == "https://r.jina.ai/https://example.com/antibot":
-            return (
-                200,
-                {"content-type": "text/plain"},
-                b"Just a moment... Checking your browser before accessing the site.",
-            )
-        raise AssertionError(url)
-
-    def fake_browser_fetch(workspace_root, *, url: str, timeout_s: float):
-        assert url == "https://example.com/antibot"
-        return {
-            "ok": True,
-            "name": "camofox",
-            "fetch_method": "browser:camofox",
-            "markdown": "Rendered article body with enough useful information for a summary.",
-            "bytes": 64,
-        }
-
-    monkeypatch.setattr(fetch_url, "http_get", fake_http_get)
-    monkeypatch.setattr(browser_engines, "fetch", fake_browser_fetch)
-
-    result = fetch_url.run(
-        url="https://example.com/antibot",
-        min_content_chars=40,
-        use_scrapling_fallback=False,
-    )
-
-    assert calls == [
-        "https://example.com/antibot",
-        "https://r.jina.ai/https://example.com/antibot",
-    ]
-    assert result["ok"] is True
-    assert result["fetch_method"] == "browser:camofox"
-    assert result["direct_fetch_method"] == "stdlib_html_text"
-    assert "Rendered article body" in result["markdown"]
-    assert any("jina_reader: low-quality content" in e for e in result["fallback_errors"])
-
-
-def test_fetch_url_records_missing_browser_engine_when_antibot_page(monkeypatch) -> None:
-    from nerya.integrations import browser_engines
-
-    def fake_http_get(url: str, **kwargs):
-        if url == "https://example.com/antibot":
-            return (
-                401,
-                {"content-type": "text/html"},
-                b"<html><body>Please enable JS and disable any ad blocker</body></html>",
-            )
-        if url == "https://r.jina.ai/https://example.com/antibot":
-            return (
-                200,
-                {"content-type": "text/plain"},
-                b"Security Verification",
-            )
-        raise AssertionError(url)
-
-    def fake_browser_fetch(workspace_root, *, url: str, timeout_s: float):
-        assert url == "https://example.com/antibot"
-        return {"ok": False, "error": "no_engine_selected"}
-
-    monkeypatch.setattr(fetch_url, "http_get", fake_http_get)
-    monkeypatch.setattr(browser_engines, "fetch", fake_browser_fetch)
-
-    result = fetch_url.run(
-        url="https://example.com/antibot",
-        min_content_chars=40,
-        use_scrapling_fallback=False,
-    )
-
-    assert result["ok"] is False
-    assert result["status"] == 401
-    assert any("browser:?: no_engine_selected" in e for e in result["fallback_errors"])
-
-
 def test_fetch_url_marks_blocker_page_failed_when_fallbacks_unusable(monkeypatch) -> None:
     def fake_http_get(url: str, **kwargs):
         if url == "https://finance.example/":
@@ -268,7 +180,6 @@ def test_fetch_url_marks_blocker_page_failed_when_fallbacks_unusable(monkeypatch
     result = fetch_url.run(
         url="https://finance.example/",
         min_content_chars=40,
-        use_browser_fallback=False,
         use_scrapling_fallback=False,
     )
 
@@ -300,7 +211,6 @@ def test_fetch_url_marks_soft_404_page_failed(monkeypatch) -> None:
     result = fetch_url.run(
         url="https://example.com/missing",
         min_content_chars=20,
-        use_browser_fallback=False,
         use_scrapling_fallback=False,
     )
 
@@ -326,7 +236,6 @@ def test_fetch_url_rejects_low_quality_jina_after_direct_timeout(monkeypatch) ->
     result = fetch_url.run(
         url="https://example.com/blocked",
         min_content_chars=40,
-        use_browser_fallback=False,
         use_scrapling_fallback=False,
     )
 
@@ -786,7 +695,7 @@ def test_search_fetch_defaults_to_browser_and_scrapling_fallbacks(monkeypatch) -
             "status": 200,
             "url": kwargs["url"],
             "title": "Rendered",
-            "fetch_method": "browser:camofox",
+            "fetch_method": "scrapling",
             "content_type": "text/html",
             "bytes": 512,
             "truncated": False,
@@ -801,7 +710,6 @@ def test_search_fetch_defaults_to_browser_and_scrapling_fallbacks(monkeypatch) -
     result = search_fetch.run(query="latest market news", fetch_top_n=1)
 
     assert result["ok"] is True
-    assert captured["use_browser_fallback"] is True
     assert captured["use_scrapling_fallback"] is True
 
 
@@ -825,7 +733,6 @@ def test_search_fetch_cli_passes_payload_fallbacks_and_base_urls(
             (
                 '{"query":"local probe","engines":["searxng"],'
                 '"base_urls":{"searxng":"http://127.0.0.1:9999"},'
-                '"use_browser_fallback":false,'
                 '"use_scrapling_fallback":true}'
             ),
         ],
@@ -836,7 +743,6 @@ def test_search_fetch_cli_passes_payload_fallbacks_and_base_urls(
     assert captured["query"] == "local probe"
     assert captured["engines"] == ["searxng"]
     assert captured["base_urls"] == {"searxng": "http://127.0.0.1:9999"}
-    assert captured["use_browser_fallback"] is False
     assert captured["use_scrapling_fallback"] is True
     assert '"ok": true' in capsys.readouterr().out
 

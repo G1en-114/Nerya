@@ -5,8 +5,10 @@ import { copy as i18nCopy } from "../../lib/i18n";
 import { StrategyWorkflowPanel } from "../workflows/StrategyWorkflowPanel";
 import { BacktestChart } from "../backtest/BacktestChart";
 import { WorkspaceFiles } from "./WorkspaceFiles";
+import { TaskDeliverables } from "./TaskDeliverables";
 import { WorkspaceTerminal } from "./WorkspaceTerminal";
 import { useStrategyReports } from "./useStrategyReports";
+import { resolveMessageApproval } from "../../lib/approvalResolution";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -34,6 +36,7 @@ import {
   loadCachedThreadTranscript,
   loadRunSettings,
   loadThreads,
+  loadDeletedSessionIds,
   newThread,
   saveRunSettings,
   saveThreads,
@@ -44,6 +47,9 @@ import {
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { ExternalCallMessage } from "./ExternalCallMessage";
 import { ExternalSessionTimeline } from "./ExternalSessionTimeline";
+import { requestConversationReveal } from "./timelineReveal";
+import { composerDelivery } from "../../lib/composerDelivery";
+import { applyExternalHistoryPage, type ExternalHistoryState } from "../../lib/externalHistory";
 import { ConversationSourceIcon } from "./ConversationSourceIcon";
 import { isExternalSource, conversationTimestamp } from "../../lib/externalCalls";
 import { projectExternalThread } from "../../lib/externalNative";
@@ -52,7 +58,6 @@ import { useWorkbench } from "./useWorkbench";
 import { ConversationTimeline,hasReadingAnchor,clearReadingAnchor } from "./ConversationTimeline";
 import { ComposerContextSummary } from "./ComposerContextSummary";
 import { TaskProvenance } from "./TaskProvenance";
-import { CollaborationSummary } from "./CollaborationSummary";
 import { InteractionPanel } from "./InteractionPanel";
 import { RuntimeNotice } from "./RuntimeNotice";
 import { taskStatus } from "../../lib/workbench";
@@ -77,6 +82,9 @@ import { ChatResultsPanel } from "./ChatResultsPanel";
 import { collectResearchVisuals, type ResearchInstrument } from "../../lib/researchVisuals";
 import type { ChartBlockShape } from "../../lib/chartBlock";
 import { ResearchVisualContext, ResearchInstrumentContext } from "./ResearchVisualContext";
+import { StrategyDetailContext } from "./StrategyDetailContext";
+import { parseStrategyDetailId, strategyDetailId, strategyDetailLabel, type StrategyDetailTarget } from "../../lib/strategyDetail";
+import { collectBacktestResults } from "../../lib/backtestResults";
 import { ResearchInstrumentPanel, ResearchCharts, ResearchChartTabs } from "./ResearchWorkspace";
 import { collectPortfolioArtifacts } from "../../lib/portfolioArtifacts";
 import { PortfolioSnapshot } from "../finance/PortfolioSnapshot";
@@ -87,7 +95,8 @@ import { browserCalls } from '../../lib/browserTrace';
 import { liveEventsToBlocks } from '../../lib/chat';
 import { useCanvasLayout } from "./useCanvasLayout";
 import { XIcon } from "../icons";
-import { takeComposeDraftPayload } from "../../lib/composeDraft";
+import { takeWorkspaceComposeDraft } from "../../lib/workspaceComposeDraft";
+import { useWorkspaceIdentity, getWorkspaceIdentity, workspaceGeneration } from "../../lib/workspaceIdentity";
 import { FinanceDraftContext, appendReviewDraft } from "../finance/FinanceReview";
 import { toast } from "../../lib/dialogs";
 
@@ -95,48 +104,7 @@ function parseTs(ts: string | number | undefined | null): number | null {
   return conversationTimestamp(ts);
 }
 
-const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
 const SESSION_PAGE_SIZE = 20;
-
-type PendingFirstMessage = {
-  threadId: string;
-  text: string;
-  attachments?: ChatAttachment[];
-};
-
-const pendingFirstMessages = new Map<string, PendingFirstMessage>();
-
-function loadDeletedSessionIds(): Set<string> {
-  if (typeof window === "undefined" || typeof localStorage === "undefined") {
-    return new Set();
-  }
-  try {
-    const parsed = JSON.parse(localStorage.getItem(DELETED_SESSIONS_KEY) || "[]");
-    return new Set(
-      Array.isArray(parsed)
-        ? parsed.filter((id): id is string => typeof id === "string" && !!id)
-        : [],
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-function rememberDeletedSession(id: string): Set<string> {
-  const next = loadDeletedSessionIds();
-  next.add(id);
-  if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
-    try {
-      localStorage.setItem(
-        DELETED_SESSIONS_KEY,
-        JSON.stringify(Array.from(next).slice(-500)),
-      );
-    } catch {
-      // Ignore quota/privacy-mode failures; the backend delete still runs.
-    }
-  }
-  return next;
-}
 
 function threadHasUnpersistedMessages(thread: ChatThread | null | undefined): boolean {
   return Boolean(
@@ -404,6 +372,11 @@ function pendingApprovalIdsForThread(
 }
 
 export function ChatView({ sessionId }: { sessionId?: string } = {}) {
+  const workspace = useWorkspaceIdentity();
+  return <WorkspaceChatView key={workspace || "unresolved"} sessionId={sessionId}/>;
+}
+
+function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
   const router = useRouter();
   const t = useTranslations("chat");
   const tCommon = useTranslations("common");
@@ -412,12 +385,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const draft = useChatDraft(draftScope);
   const { text: input, setText: setInput, attachments, setAttachments } = draft;
   const [historyMore,setHistoryMore]=useState(false);
+  const externalHistory = useRef(new Map<string,ExternalHistoryState>());
   const [historyLimit,setHistoryLimit]=useState(60);
   const [loadingOlder,setLoadingOlder]=useState(false);
   const [sending, setSending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [stopPending, setStopPending] = useState(false);
-  const [pendingAutoSend,setPendingAutoSend]=useState<{text:string;attachments:ChatAttachment[]}|null>(null);
+  const [pendingAutoSend,setPendingAutoSend]=useState<{text:string;attachments:ChatAttachment[];settings?:ChatRunSettings}|null>(null);
   const [forkTarget, setForkTarget] = useState<{ sessionId:string; message:UserMessage } | null>(null);
   const [externalSending, setExternalSending] = useState(false);
   const externalSendBusy = useRef(false);
@@ -499,15 +473,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   // with a stashed composer draft, drop it into the input and auto-run the
   // turn so the home box behaves like Codex's "what should we build?" entry.
   useEffect(() => {
-    if (!hydrated || draftConsumedRef.current || sessionId) return;
-    const draft = takeComposeDraftPayload();
-    if (!draft || (!draft.text.trim() && !draft.attachments.length)) return;
+    if (!hydrated || !draft.ready || draftConsumedRef.current || sessionId) return;
+    const handoff = takeWorkspaceComposeDraft();
+    if (!handoff || (!handoff.text.trim() && !handoff.attachments.length)) return;
     draftConsumedRef.current = true;
-    setInput(draft.text);
-    setAttachments(draft.attachments);
-    if (draft.autoSend) setPendingAutoSend({text:draft.text,attachments:draft.attachments});
+    draft.replace(handoff);
+    if (handoff.settings) setSettings(handoff.settings);
+    if (handoff.autoSend) setPendingAutoSend({text:handoff.text,attachments:handoff.attachments,settings:handoff.settings});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, sessionId]);
+  }, [hydrated, sessionId, draft.ready]);
 
   // The conversation list now lives in the global Codex sidebar. If the
   // active chat is deleted from there (tombstoned), leave the dead route.
@@ -557,12 +531,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     return idx >= 0 ? callbackData.slice(idx + 1).trim() : "";
   }
 
-  function approvalActionFromCallback(callbackData: string): string {
-    const idx = callbackData.indexOf(":");
-    return (idx >= 0 ? callbackData.slice(0, idx) : callbackData)
-      .trim()
-      .toLowerCase();
-  }
+
 
   function approvalEventFromCard(id: string, card: ApprovalCard): LiveEvent {
     const record = card.record ?? {};
@@ -597,29 +566,9 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
   function appendApprovalResolutionEvent(id: string, state: string) {
     if (!id || !sessionId) return;
-    const resolved: LiveEvent = {
-      kind: "approval.resolved",
-      seq: Date.now(),
-      ts: Date.now() / 1000,
-      approval_id: id,
-      state,
-      session_id: sessionId,
-    };
     updateThread(sessionId, (t) => ({
       ...t,
-      messages: t.messages.map((m) => {
-        if (m.role !== "assistant") return m;
-        const hasApproval = (m.live_events ?? []).some(
-          (ev) =>
-            (ev.kind === "approval.request" || ev.kind === "approval.resolved") &&
-            String(ev.approval_id || "") === id,
-        );
-        if (!hasApproval) return m;
-        return {
-          ...m,
-          live_events: [...(m.live_events ?? []), resolved],
-        };
-      }),
+      messages: t.messages.map((m) => resolveMessageApproval(m,id,state)),
     }));
   }
 
@@ -700,13 +649,34 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   async function buildImportedThread(
     sid: string,
     sessionMeta: { created_at?: string; updated_at?: string; title?: string; source?: string },
-    opts: { full?: boolean; max_pairs?:number;anchor_message_id?:string } = {},
+    opts: { full?: boolean; max_pairs?:number;anchor_message_id?:string; before?:string; after?:string; limit?:number; refresh_call_ids?:string[] } = {},
   ): Promise<ChatThread | null> {
     const external = isExternalSource(sessionMeta.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(sid);
+    const workspaceAtRead = getWorkspaceIdentity(), readGeneration = workspaceGeneration();
     const version = historyRevision(sid);
-    const t = await clientApi.sessionTranscript(sid, { ...opts, full: opts.full || external });
-    if(sid === sessionId)setHistoryMore(Boolean(t.has_more));
+    const currentHistory = externalHistory.current.get(sid) || null;
+    const mode = opts.before ? "older" : currentHistory && !opts.anchor_message_id ? "newer" : "replace";
+    const activeCalls = currentHistory?.messages.flatMap(message => {
+      const trace = message.turn?.external_call as {call_id?:string;status?:string}|undefined;
+      return trace?.call_id && ["running","awaiting_approval","blocked"].includes(trace.status||"") ? [trace.call_id] : [];
+    }).slice(0,60) || [];
+    let t = await clientApi.sessionTranscript(sid, external ? {...opts, full:opts.full, limit:60,
+      ...(mode==="newer" && currentHistory?.next_after_cursor ? {after:currentHistory.next_after_cursor,anchor_message_id:undefined} : {}), refresh_call_ids:activeCalls} : opts);
+    if (workspaceAtRead !== getWorkspaceIdentity() || readGeneration !== workspaceGeneration()) return null;
     if (historyPending(sid) || version !== historyRevision(sid) || loadDeletedSessionIds().has(sid)) return null;
+    if (external && !opts.full) {
+      let merged = applyExternalHistoryPage(currentHistory,t,{sessionId:sid,requestGeneration:readGeneration,currentGeneration:workspaceGeneration(),mode});
+      if (merged.status === "reset" && t.code !== "session_deleted") {
+        externalHistory.current.delete(sid);
+        t = await clientApi.sessionTranscript(sid,{limit:60});
+        if (workspaceAtRead !== getWorkspaceIdentity() || readGeneration !== workspaceGeneration()) return null;
+        merged = applyExternalHistoryPage(null,t,{sessionId:sid,requestGeneration:readGeneration,currentGeneration:workspaceGeneration(),mode:"replace"});
+      }
+      if (merged.status !== "applied") { if(merged.status==="ignored")return null; throw new Error(merged.code||"external_history_unavailable"); }
+      externalHistory.current.set(sid,merged.state);
+      t = {...t,messages:merged.state.messages,has_more:merged.state.has_more};
+    }
+    if(sid === sessionId)setHistoryMore(Boolean(t.has_more));
     if (!t?.ok || !Array.isArray(t.messages)) {
       if (t?.error && !/not found|session_deleted/.test(t.error)) throw new Error(t.error);
       return null;
@@ -718,7 +688,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     for (const m of t.messages) {
       const ts = parseTs(m.ts) ?? created;
       if (m.role === "user") {
-        if (m.meta?.source === "approval_continue") continue;
+        if (["approval_continue", "interaction_continue"].includes(String(m.meta?.source || ""))) continue;
         if (!firstUser) firstUser = m.content;
         msgs.push({
           id: m.message_id || uuid(),
@@ -795,10 +765,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     setLoadingOlder(true);
     const limit=historyLimit+100;
     const root=scrollRef.current, height=root?.scrollHeight||0,top=root?.scrollTop||0;
+    const oldAnchor=[...(root?.querySelectorAll<HTMLElement>('[data-timeline-turn]')||[])].find(el=>el.getBoundingClientRect().bottom>(root?.getBoundingClientRect().top||0));
+    const anchorId=oldAnchor?.dataset.timelineTurn,anchorOffset=oldAnchor&&root?oldAnchor.getBoundingClientRect().top-root.getBoundingClientRect().top:0;
     followLatest.current=false;
     try {
-      const built=await buildImportedThread(active.id,{title:active.title,source:active.source},{max_pairs:limit});
-      if(built){setThreads(previous=>upsertThread(previous,mergeAuthoritativeThread(previous.find(t=>t.id===active.id),built)));setHistoryLimit(limit);requestAnimationFrame(()=>{if(root)root.scrollTop=top+root.scrollHeight-height;});}
+      const before=isExternalSource(active.source)?externalHistory.current.get(active.id)?.next_before_cursor:null;
+      const built=await buildImportedThread(active.id,{title:active.title,source:active.source},before?{before}:{max_pairs:limit});
+      if(built){setThreads(previous=>upsertThread(previous,mergeAuthoritativeThread(previous.find(t=>t.id===active.id),built)));setHistoryLimit(limit);requestAnimationFrame(()=>{if(root){const node=[...root.querySelectorAll<HTMLElement>('[data-timeline-turn]')].find(el=>el.dataset.timelineTurn===anchorId);if(node)root.scrollTop+=node.getBoundingClientRect().top-root.getBoundingClientRect().top-anchorOffset;else root.scrollTop=top+root.scrollHeight-height;}});}
     } finally{setLoadingOlder(false);}
   }
 
@@ -913,12 +886,47 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   useEffect(()=>{
     if(!pendingAutoSend||workbench.connection!=="online")return;
     const next=pendingAutoSend;setPendingAutoSend(null);
-    void runAgentTurn(next.text,{visibleUser:true,attachments:next.attachments});
+    void runAgentTurn(next.text,{visibleUser:true,attachments:next.attachments,settings:next.settings});
     // Pending first input waits for runtime capability confirmation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[pendingAutoSend,workbench.connection]);
 
   const commandRunning = Boolean(commandEngine.active);
+  const attemptedApprovalRecovery = useRef(new Set<string>());
+  useEffect(() => {
+    const view=workbench.view;
+    if (!view || view.session_id!==sessionId || externalView) return;
+    const resolutions=view.approval_resolutions || [];
+    if(resolutions.length) setThreads(previous=>{
+      let changed=false;
+      const next=previous.map(thread=>{
+        if(thread.id!==sessionId)return thread;
+        let touched=false;
+        const messages=thread.messages.map(message=>{
+          let updated=message;
+          for(const resolution of resolutions)updated=resolveMessageApproval(updated,resolution.id,resolution.state);
+          touched ||= updated!==message;
+          return updated;
+        });
+        if(!touched)return thread;
+        changed=true;return {...thread,messages};
+      });
+      return changed?next:previous;
+    });
+    for (const resolution of resolutions) {
+      if (resolution.state!=='approved' || !['tool_permission','tool_permission_batch'].includes(resolution.kind || '')) continue;
+      const command=commandEngine.commands.find(item=>item.turn_id===resolution.turn_id && item.state==='awaiting_approval');
+      if (!command || commandEngine.active || commandEngine.data?.queue.pause_reason==='operator') continue;
+      const key=`${workbench.runtime?.workspace_id}:${workbench.runtime?.started_at}:${command.command_id}:${resolution.id}`;
+      if (attemptedApprovalRecovery.current.has(key)) continue;
+      attemptedApprovalRecovery.current.add(key);
+      // POST reconciliation of an already approved, exact tool permission.
+      // Never grant permissions, resume financial approvals or drain the queue.
+      void commandEngine.control('reconcile', command).then(()=>workbench.refresh()).catch(error=>{
+        toast({tone:'warn',message:`Approved task recovery: ${String(error)}`});
+      });
+    }
+  },[workbench.view?.revision, sessionId, externalView, commandEngine.data]);
   useEffect(() => { if (!externalView) setSending(commandRunning); }, [externalView, commandRunning]);
   // Tunnel writes from a separate process, so the in-process event bus is not
   // authoritative. Poll persisted external threads without replacing live chat.
@@ -951,7 +959,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           if (!previous || version > previous.version || Date.now() - previous.at > 15_000) {
             transcript = await buildImportedThread(selectedMeta.session_id, {
               ...selectedMeta, title: sessionTitle(selectedMeta, selectedMeta.session_id),
-            }, { full: true });
+            });
             if (transcript) loaded.set(transcript.id, { version, at: Date.now() });
           }
         }
@@ -1055,7 +1063,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }
   const strategyId = active?.strategy_id || (hydrated && !sessionId ? strategyIdFromLocation() : '');
   const strategyProposal = active?.strategy_proposal_id || (hydrated && !sessionId ? new URLSearchParams(window.location.search).get('proposal') : null);
-  const strategyReports = useStrategyReports(strategyId, (active?.messages.length || 0) + results.length);
+  const strategyReports = useStrategyReports(strategyId, (active?.messages.length || 0) + results.length, strategyProposal);
   const [strategyDirty, setStrategyDirty] = useState(false);
   const hasBrowser = browserOperations.length > 0;
   const resources = useMemo(() => collectThreadItems(active), [active]);
@@ -1067,6 +1075,16 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }
   const research = useMemo(() => collectResearchVisuals(active), [active]);
   const researchSession = active?.id || sessionId || ('new:' + strategyId);
+  const [detailFocus, setDetailFocus] = useState<{ session: string; targets: StrategyDetailTarget[] }>({ session: '', targets: [] });
+  const [detailDirty, setDetailDirty] = useState<Record<string, boolean>>({});
+  useEffect(() => setDetailDirty({}), [researchSession]);
+  const receiptDetails = useMemo(() => collectBacktestResults(active).flatMap(result => {
+    if (!result.strategyId) return [];
+    const strategy: StrategyDetailTarget = { kind: 'strategy', strategyId: result.strategyId, proposalId: result.proposalId, title: result.title };
+    return result.status === 'completed' && result.ts ? [strategy, { ...strategy, kind: 'backtest' as const, ts: result.ts }] : [strategy];
+  }), [active]);
+  const detailTargets = [...new Map([...receiptDetails, ...(detailFocus.session === researchSession ? detailFocus.targets : [])].map(target => [strategyDetailId(target), target])).values()];
+  const detailTabs = detailTargets.map(target => ({ id: strategyDetailId(target) as TaskDockTab, label: strategyDetailLabel(target, zh) }));
   const [researchFocus, setResearchFocus] = useState<{ session: string; chartId: string } | null>(null);
   const showResearch = researchFocus?.session === researchSession && research.studies.length > 0;
   const [instrumentFocus, setInstrumentFocus] = useState<{ session: string; instrument: ResearchInstrument; charts: ChartBlockShape[] } | null>(null);
@@ -1074,6 +1092,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const detailInstruments = [...new Map([...research.instruments, ...(focusedInstrument ? [focusedInstrument.instrument] : [])].map(item => [item.id, item])).values()];
   const instrumentTabs = detailInstruments.map(item => ({ id: ('instrument:' + item.id) as TaskDockTab, label: item.market }));
   const automaticTabs = [
+    ...detailTabs,
     ...(strategyId ? [{ id: 'strategy' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.001") }] : []),
     ...strategyReports.runs.map(run => ({ id: ('backtest:' + run.ts) as TaskDockTab, label: (i18nCopy(zh, "copy.components_chat_ChatView.002")) + run.ts })),
     ...(hasBrowser ? [{ id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.003") }] : []),
@@ -1082,14 +1101,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     ...snapshots.map((item, index) => ({ id: item.id as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.018", { index: index + 1 }) })),
     ...(agentWork.rows.length ? [{ id: 'agents' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.004") }] : []),
   ];
-  const toolTabs = [{ id: 'files' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.005") }, { id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.006") }, { id: 'terminal' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.007") }];
+  const toolTabs = [{ id: 'deliverables' as TaskDockTab, label: zh ? "任务产物" : "Task deliverables" }, { id: 'files' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.005") }, { id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.006") }, { id: 'terminal' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.007") }];
   const dockChoices = [...new Map([...toolTabs, ...automaticTabs, ...instrumentTabs].map(tab => [tab.id, tab])).values()];
   // On compact layouts the workspace replaces, rather than sits beside, chat.
   // Discovering old results must not navigate away from the conversation.
-  const taskDock = useTaskDock(researchSession, [...automaticTabs, ...instrumentTabs].map(tab => tab.id), automaticTabs.map(tab => tab.id), true);
+  const taskDock = useTaskDock(researchSession, ['deliverables', ...[...automaticTabs, ...instrumentTabs].map(tab => tab.id)], [], true);
   const fileTabKey = JSON.stringify(taskDock.tabs.filter(id => id.startsWith('file:')));
   const openedFiles = useMemo(() => (JSON.parse(fileTabKey) as string[]).map(id => ({ id, item: workspaceFileItem(id.slice(5)) })), [fileTabKey]);
-  const dockTabs = taskDock.tabs.flatMap(id => { const tab = dockChoices.find(tab => tab.id === id); return tab ? [tab] : id.startsWith('file:') ? [{ id, label: id.slice(5).split('/').pop() || id.slice(5) }] : []; });
+  const dockTabs = taskDock.tabs.flatMap(id => { const tab = dockChoices.find(tab => tab.id === id); const detail = parseStrategyDetailId(id); return tab ? [tab] : detail ? [{ id, label: strategyDetailLabel(detail, zh) }] : id.startsWith('file:') ? [{ id, label: id.slice(5).split('/').pop() || id.slice(5) }] : []; });
+  const openedDetails = taskDock.tabs.flatMap(id => { const target = detailTargets.find(item => strategyDetailId(item) === id) || parseStrategyDetailId(id); return target ? [{ id, target }] : []; });
   useEffect(() => {
     if (!hydrated || new URLSearchParams(window.location.search).get('panel') !== 'browser') return;
     taskDock.select('browser');
@@ -1120,6 +1140,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     setResearchFocus({ session: researchSession, chartId });
     if (compact || fullCanvas) closeCanvas();
   }
+  function openStrategyDetail(target: StrategyDetailTarget) {
+    canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDetailFocus(old => ({ session: researchSession, targets: [...new Map([...(old.session === researchSession ? old.targets : []), target].map(item => [strategyDetailId(item), item])).values()] }));
+    const id = strategyDetailId(target);
+    taskDock.select(id as TaskDockTab);
+    focusDock(id);
+  }
   function openResearchInstrument(instrument: ResearchInstrument, charts: ChartBlockShape[]) {
     canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setInstrumentFocus({ session: researchSession, instrument, charts });
@@ -1131,13 +1158,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     if (instrument) selectWorkspace('instrument:' + instrument.id, true);
     else openResearchCharts(block.chart_id);
   }
-  function openDock() { taskDock.show(); focusDock(taskDock.selected); }
+  function openDock() { const tab = taskDock.selected || 'deliverables'; taskDock.select(tab as TaskDockTab); focusDock(tab); }
   function openBrowserDock() {
     canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     taskDock.select('browser');
     focusDock('browser');
   }
   async function removeDockTab(id: string) {
+    if (detailDirty[id] && !await confirmDialog({ message: i18nCopy(zh, "copy.components_chat_ChatView.008"), tone: 'warning' })) return;
+    setDetailDirty(old => ({ ...old, [id]: false }));
     if (id === 'strategy' && strategyDirty && !await confirmDialog({ message: i18nCopy(zh, "copy.components_chat_ChatView.008"), tone: 'warning' })) return;
     taskDock.remove(id as TaskDockTab);
     if (id === 'strategy') setStrategyDirty(false);
@@ -1151,6 +1180,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     taskDock.select(tab);
     focusDock(tab);
   }
+  const [pendingReveal, setPendingReveal] = useState<{session:string;id:string}|null>(null);
+  useEffect(() => {
+    if (!pendingReveal || hideSource || pendingReveal.session !== active?.id) return;
+    const frame = requestAnimationFrame(() => { requestConversationReveal({...pendingReveal,focus:true}); setPendingReveal(null); });
+    return () => cancelAnimationFrame(frame);
+  }, [pendingReveal,hideSource,active?.id]);
   function revealResult(id: string) {
     const child = agentResults.find((r) => r.id === id);
     if (child?.agentId) {
@@ -1160,25 +1195,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     }
     followLatest.current = false; setReadingHistory(true);
     selectWorkspace("conversation");
-    requestAnimationFrame(() => {
-      const message=active?.messages.find(m=>m.id===id);
-      const turnId=message?.role==="assistant"?message.turn?.turn_id:undefined;
-      const placeholder=turnId?document.getElementById("turn-"+encodeURIComponent(turnId)):null;
-      placeholder?.scrollIntoView({block:"start"});
-      const article = Array.from(scrollRef.current?.querySelectorAll<HTMLElement>("[data-turn-id]") || []).find((el) => el.dataset.turnId === id);
-      article?.scrollIntoView({ block: "start" });
-      article?.focus({ preventScroll: true });
-    });
-  }
-  function pendingFirstMessageThreadId(): string {
-    try {
-      const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
-      if (!raw) return "";
-      const parsed = JSON.parse(raw) as { threadId?: unknown };
-      return typeof parsed.threadId === "string" ? parsed.threadId : "";
-    } catch {
-      return "";
-    }
+    if (active) setPendingReveal({session:active.id,id});
   }
 
   // When the URL points at a saved session, treat the backend transcript
@@ -1187,10 +1204,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   useEffect(() => {
     setTranscriptLoadFailed(false);
     if (!hydrated || !sessionId) {
-      setMissingSession(false);
-      return;
-    }
-    if (pendingFirstMessageThreadId() === sessionId) {
       setMissingSession(false);
       return;
     }
@@ -1264,31 +1277,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId, transcriptRetry]);
 
-  // Pick up a first message that was staged on `/chat` before the route
-  // switched to `/chat/[id]`. Running it here keeps the turn alive across
-  // the unmount/remount caused by navigation.
-  useEffect(() => {
-    if (!hydrated || !sessionId) return;
-    let pending: PendingFirstMessage | null =
-      pendingFirstMessages.get(sessionId) ?? null;
-    if (pending) {
-      pendingFirstMessages.delete(sessionId);
-    }
-    try {
-      const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
-      if (!pending && raw) pending = JSON.parse(raw);
-    } catch {
-      if (!pending) pending = null;
-    }
-    if (!pending || pending.threadId !== sessionId) return;
-    sessionStorage.removeItem("nerya.chat.pendingFirstMessage");
-    // Legacy pre-command handoffs carry no receipt ID. Restore them as drafts,
-    // never automatically replay an input whose admission cannot be proven.
-    setInput(pending.text);
-    setAttachments(pending.attachments ?? []);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, sessionId]);
-
   useEffect(() => {
     followLatest.current = !hasReadingAnchor(active?.id||""); lastScrollTop.current = 0; setReadingHistory(!followLatest.current);
   }, [active?.id]);
@@ -1346,28 +1334,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
   async function resolveApproval(callbackData: string) {
     const approvalId = approvalIdFromCallback(callbackData);
-    const action = approvalActionFromCallback(callbackData);
     if (!approvalId) return;
-    const approvalKind = String(
-      pendingApprovals.get(approvalId)?.record?.kind || "",
-    ).toLowerCase();
-    const isAutoResumedFinancialApproval = [
-      "trade_intent",
-      "wallet_swap",
-    ].includes(approvalKind);
     setResolvingApprovalIds((prev) => new Set(prev).add(approvalId));
     try {
       const res = await clientApi.approvalCallback({
         callback_data: callbackData,
         actor_id: "dashboard",
       });
+      if (!res.ok) throw new Error(res.error || "approval_resolution_failed");
       const state = String(res?.state || "").toLowerCase();
-      const resolvedApprovalKind = String(
-        res?.approval_kind || approvalKind,
-      ).toLowerCase();
-      const resolvedAutoResumedFinancialApproval =
-        isAutoResumedFinancialApproval ||
-        ["trade_intent", "wallet_swap"].includes(resolvedApprovalKind);
       if (state === "approved" || state === "rejected") {
         const resolvedIds =
           Array.isArray(res?.approval_ids) && res.approval_ids.length
@@ -1382,25 +1357,14 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         });
       }
       await refreshApprovals();
-      if (res?.ok && action === "approve" && state === "approved" && !isExternalSource(active?.source)) {
-        await runAgentTurn(
-          resolvedAutoResumedFinancialApproval
-            ? `Financial approval ${approvalId} was approved. The frozen financial action is resumed automatically by the approval handler. Do not submit or retry the order, trade intent, or wallet transaction. Query the existing approval, order, or transaction status, report the resulting state, and continue the original task from that result.`
-            : "The requested permission was approved. Continue from the pending tool call, retry the approved action, and proceed with the original task.",
-          {
-            visibleUser: false,
-            source: "approval_continue",
-            kind: "approval.continue",
-            channel: "approval_continue",
-            payloadExtra: {
-              approval_id: approvalId,
-              approval_callback_data: callbackData,
-              approval_action: action,
-              approval_state: state,
-            },
-          },
-        );
+      // The server owns continuation admission, including after this page closes.
+      commandEngine.refresh();
+      workbench.refresh();
+      if (state === "approved" && res.resume?.ok === false) {
+        toast({tone:'warn',message:zh ? "授权已保存，续跑任务尚未恢复，请查看任务状态。无需重复授权。" : "Permission saved; continuation is not yet confirmed. Check task status; do not grant permission again."});
       }
+    } catch (error) {
+      toast({tone:'error',message:zh ? `授权处理失败：${String(error)}` : `Approval failed: ${String(error)}`});
     } finally {
       setResolvingApprovalIds((prev) => {
         const next = new Set(prev);
@@ -1414,8 +1378,11 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     visibleUser?: boolean; attachments?: ChatAttachment[]; source?: string; kind?: string;
     channel?: string; payloadExtra?: Record<string, unknown>; resumeTurnId?: string;
     commandKind?: "send" | "resume" | "guide";
+    runOnly?:boolean; settings?: ChatRunSettings;
   } = {}) {
     const clean = text.trim(), outgoing = options.attachments ?? [];
+    const sentDraft = draft.capture(), runSettings = options.settings || settings;
+    const submitWorkspace = getWorkspaceIdentity(), submitGeneration = workspaceGeneration();
     if (workbench.connection !== "online") return;
     if (commandEngine.pending.length) { toast({ tone:'warn',message:commandErrorText('delivery_unconfirmed',zh) }); return; }
     if ((!clean && !outgoing.length) || turnInFlightRef.current || history.pending || history.edit) return;
@@ -1431,14 +1398,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       payload: { text: clean || "Please review the attached files.", channel: options.channel || "dashboard",
         attachments: outgoing.map(attachmentForRequest), ...(options.payloadExtra ?? {}) },
       ...(thread.strategy_id ? { strategy_id: thread.strategy_id, strategy_proposal_id: thread.strategy_proposal_id || undefined } : {}),
-      reasoning_effort: settings.reasoning_effort === "off" ? undefined : settings.reasoning_effort,
-      reasoning_summary: settings.reasoning_effort === "off" ? undefined : "auto",
-      work_mode: settings.work_mode || "execute",
-      permission_mode: settings.permission_mode, model_tier: settings.model_tier || undefined,
-      model_provider: settings.model_provider || undefined, model_id: settings.model_id || undefined,
-      model_context_window: settings.model_context_window, max_iterations: settings.max_iterations,
-      max_total_tool_calls: settings.max_total_tool_calls, max_wall_seconds: settings.max_wall_seconds,
-      evidence_contract: settings.evidence_contract,
+      reasoning_effort: runSettings.reasoning_effort === "inherit" ? undefined : runSettings.reasoning_effort,
+      reasoning_summary: ["inherit", "off"].includes(runSettings.reasoning_effort) ? undefined : "auto",
+      ...(options.runOnly ? {run_only:true} : {}),
+      work_mode: runSettings.work_mode || "execute",
+      permission_mode: runSettings.permission_mode, model_tier: runSettings.model_tier || undefined,
+      model_provider: runSettings.model_provider || undefined, model_id: runSettings.model_id || undefined,
+      model_context_window: runSettings.model_context_window || undefined, max_iterations: runSettings.max_iterations,
+      max_total_tool_calls: runSettings.max_total_tool_calls, max_wall_seconds: runSettings.max_wall_seconds,
+      evidence_contract: runSettings.evidence_contract,
       ...(options.resumeTurnId ? { resume_turn_id: options.resumeTurnId, continuation_feedback: clean } : {}),
     };
     turnInFlightRef.current = true; setSubmitting(true);
@@ -1447,15 +1415,17 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     if (!active) saveThreads(upsertThread(loadThreads(), thread));
     try {
       const command = await submitCommand(sid, commandKind, body);
+      if (submitWorkspace !== getWorkspaceIdentity() || submitGeneration !== workspaceGeneration()) return;
       keepRoute = true;
       setThreads(previous => {
         const current = previous.find(item => item.id === sid) || thread;
         return upsertThread(previous, projectCommand(current, command));
       });
       if (externalSnapshot.current.sessionId === originRoute && options.visibleUser !== false) {
-        setInput(value => value.trim() === clean ? "" : value);
-        const ids = new Set(outgoing.map(file => file.id));
-        setAttachments(files => files.filter(file => !ids.has(file.id)));
+        if (commandKind === "guide") {
+          const currentDraft = draft.capture();
+          if (sentDraft && currentDraft?.revision === sentDraft.revision && currentDraft.workspace === sentDraft.workspace) setInput("");
+        } else draft.clearIfUnchanged(sentDraft);
       }
       commandEngine.refresh();
     } catch (error) {
@@ -1465,7 +1435,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       turnInFlightRef.current = false; setSubmitting(false);
       // The backend continues independently of this route's lifetime. A late
       // ACK must not navigate the user away from another conversation.
-      if (!originRoute && keepRoute && externalSnapshot.current.sessionId === originRoute) router.replace(`/chat/${sid}`);
+      if (submitWorkspace === getWorkspaceIdentity() && submitGeneration === workspaceGeneration() && !originRoute && keepRoute && externalSnapshot.current.sessionId === originRoute) router.replace(`/chat/${sid}`);
     }
   }
 
@@ -1479,7 +1449,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       message: zh ? "这会新建一轮，可能重新获取数据或执行动作。原失败记录和已完成操作会保留；有可用断点时优先使用“从断点继续”。" : "This starts a new turn and may fetch data or execute actions again. The previous record and completed actions remain. Prefer a checkpoint when available.",
       okLabel: zh ? "新建一轮运行" : "Start a new turn", cancelLabel: zh ? "取消" : "Cancel",
     });
-    if (accepted) await runAgentTurn(previous.text, { attachments: previous.attachments ?? [] });
+    if (accepted) await runAgentTurn(previous.text, { attachments: previous.attachments ?? [],runOnly:true,visibleUser:false });
   }
 
   async function send(text: string) {
@@ -1507,7 +1477,19 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       } finally { externalSendBusy.current = false; setExternalSending(false); }
       return;
     }
-    await runAgentTurn(text, { visibleUser: true, attachments });
+    const delivery = currentDelivery();
+    if (!delivery.canSubmit) return;
+    let runOnly = false;
+    if (delivery.requiresRunOnlyConfirmation) {
+      const scope = getWorkspaceIdentity(), generation = workspaceGeneration(), route = sessionId;
+      const accepted = await confirmDialog({
+        title: zh ? "仅运行这条追问" : "Run this follow-up only",
+        message: zh ? "此会话的队列仍处于暂停状态。仅运行这条消息，并保持队列暂停？" : "This conversation's queue is paused. Run only this message and leave the queue paused?",
+      });
+      if (!accepted || scope !== getWorkspaceIdentity() || generation !== workspaceGeneration() || externalSnapshot.current.sessionId !== route) return;
+      runOnly = true;
+    }
+    await runAgentTurn(text, { visibleUser: true, attachments, runOnly });
   }
 
   async function cancel() {
@@ -1550,7 +1532,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     conversationEmpty && !active?.transcript_loaded &&
     !showMissing &&
     !showLoadFailure &&
-    pendingFirstMessageThreadId() !== sessionId && !hasCommandState;
+    !hasCommandState;
   const showLoading =
     conversationEmpty &&
     !showMissing &&
@@ -1563,6 +1545,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const showHero =
     conversationEmpty && !externalView && !showMissing && !showLoadFailure && !showLoading && !workbench.view?.pending_interactions.length && !draft.recovery.length && !draft.storageError;
 
+  function currentDelivery() {
+    return composerDelivery({commands:commandEngine.commands,queue:commandEngine.data?.queue,
+      connection:sessionId ? commandEngine.connection : workbench.connection,
+      pendingCount:commandEngine.pending.length,awaitingInput:Boolean(workbench.view?.pending_interactions.length),awaitingApproval});
+  }
+  const delivery = currentDelivery();
   const composerProps = {
     sessionId: active?.id,
     value: input,
@@ -1572,12 +1560,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     onGuide: !externalView && commandEngine.active?.state === "running" ? () => { void runAgentTurn(input, { commandKind: "guide", attachments: [] }); } : undefined,
     submitting: externalView ? externalSending : submitting,
     stopping: stopPending || commandEngine.active?.state === "stopping",
-    sending: externalView ? externalSending : sending,
-    locked: externalView ? !active : workbench.connection !== "online" || Boolean(workbench.view?.pending_interactions.length) || awaitingApproval || history.pending || Boolean(history.edit),
+    sending: externalView ? externalSending : Boolean(commandEngine.active),
+    submitMode: externalView ? "send" as const : delivery.mode,
+    queued: !externalView && delivery.mode === "queue",
+    locked: externalView ? !active : !delivery.canSubmit || history.pending || Boolean(history.edit),
     external: externalView,
-    placeholder: externalView ? (zh ? '向此会话追加消息…' : 'Add a message to this session…') : sending ? (zh ? '补充任务，发送后排队；也可指导本轮…' : 'Queue a follow-up, or guide this turn…') : undefined,
-    lockMessage: awaitingApproval ? t("approvalPaused") : th("editLabel"),
+    placeholder: externalView ? (zh ? '向此会话追加消息…' : 'Add a message to this session…') : delivery.mode === 'queue' ? (zh ? '补充消息，加入队列…' : 'Add a follow-up to the queue…') : (zh ? '继续追问…' : 'Ask a follow-up…'),
+    lockMessage: awaitingApproval ? t("approvalPaused") : workbench.view?.pending_interactions.length ? (zh ? "请先处理上方问题或计划；可以继续撰写草稿。" : "Resolve the question or plan above before sending. You can keep drafting.") : history.edit ? th("editLabel") : workbench.connection==="connecting" ? (zh?"正在连接…":"Connecting…") : (zh?"连接暂不可用":"Connection unavailable"),
     settings,
+    contextControl:externalView?undefined:<ComposerContextSummary thread={active} settings={settings}/>,
     onSettingsChange: (next:ChatRunSettings)=>{setSettings(next);draft.setSettings(next);},
     modelOptions,
     attachments: externalView ? [] : attachments,
@@ -1595,17 +1586,18 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       onClose={() => setForkTarget(null)} onCreated={id => { setForkTarget(null); router.push(`/chat/${id}`); }} />}
     <ResearchVisualContext.Provider value={openResearchVisual}>
     <ResearchInstrumentContext.Provider value={openResearchInstrument}>
+    <StrategyDetailContext.Provider value={{ open: openStrategyDetail, active: canvasVisible ? taskDock.selected : '' }}>
     <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench">
       <RuntimeNotice workbench={workbench} />
-      <ChatTaskHeader workStatus={taskStatus(active,commandEngine.commands,workbench.view)} connection={workbench.connection} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
+      <ChatTaskHeader diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} workStatus={taskStatus(active,commandEngine.commands,workbench.view)} connection={workbench.connection} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
         approvalCount={activeApprovalIds.length} loading={showLoading} showTabs tab={taskDock.selected || ''}
         workspaceAvailable canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
         onToggleBrowser={openBrowserDock}
-        onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else { taskDock.show(); focusDock(taskDock.selected || ''); } }} onOpenResult={openResult} />
-      <TaskProvenance thread={active}/>
+        onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else openDock(); }} onOpenResult={openResult} />
+
       {commandEngine.data?.branch_of && <div className="shrink-0 border-b border-[color:var(--line)] px-5 py-2 text-xs text-[color:var(--text-muted)]" data-testid="branch-origin">
         {zh ? '此分支保留了原会话上下文，不包含原操作的可执行副本。' : 'This branch retains conversation context, not executable copies of prior actions.'}
-        <a className="ml-2 underline" href={`/chat/${encodeURIComponent(commandEngine.data.branch_of.session_id)}`}>{zh ? '查看原会话' : 'View original conversation'}</a>
+        <a className="ml-2 underline" href={`/chat/${encodeURIComponent(commandEngine.data.branch_of.session_id)}?message=${encodeURIComponent(commandEngine.data.branch_of.message_id)}`}>{zh ? '查看原会话' : 'View original conversation'}</a>
       </div>}
       {!showHero && awaitingApproval && hideSource ? <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-warn/25 bg-warn/10 px-4 py-2 text-xs text-warn">
         <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
@@ -1626,11 +1618,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           </div>
         ) : (
           <>
-            {active && isExternalSource(active.source) && <div data-testid="external-session" className="flex flex-wrap items-center gap-2 border-b border-[color:var(--line)] px-5 py-3 text-xs text-[color:var(--text-muted)]">
-              <ConversationSourceIcon source={active.source} size={18} />
-              <span className="font-medium text-[color:var(--text-base)]">{active.source === "tunnel" ? "Tunnel" : "MCP"} · {zh ? "外部工作会话" : "External work session"}</span>
-              <details><summary>{zh ? "会话详情" : "Session details"}</summary><code className="break-all select-all">{active.id}</code></details>
-            </div>}
             {research.studies.length > 0 && <ResearchChartTabs open={showResearch} count={research.studies.length} onConversation={() => setResearchFocus(null)} onCharts={() => openResearchCharts()} />}
             {showResearch && <ResearchCharts charts={research.studies} selected={researchFocus?.chartId || ''} onSelect={openResearchCharts} />}
             <div hidden={showResearch} className={styles.transcriptViewport}>
@@ -1696,7 +1683,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                 </div>
               ) : (
                 <div ref={transcriptRef} className={styles.conversation} data-testid="conversation-content">
-                  {isExternalSource(active?.source) ? <ExternalSessionTimeline traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
+                  {isExternalSource(active?.source) ? <ExternalSessionTimeline session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
                     m.role === "user" ? (
                       <UserBubble
                         key={m.id}
@@ -1726,6 +1713,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                         pendingApprovals={pendingApprovals}
                         onApprovalAction={resolveApproval}
                         resolvingApprovalIds={resolvingApprovalIds}
+                        onContinue={!externalView && !sending && commandEngine.data?.checkpoint?.turn_id===m.turn?.turn_id && commandEngine.data?.checkpoint?.resumable && m.execution_status!=="unconfirmed" ? ()=>continueCheckpoint(m.turn!.turn_id!) : undefined}
                         onRetry={
                           m.error && !m.loading && m.execution_status !== "unconfirmed" && active!.messages[mi - 1]?.role === "user"
                             ? () => void retryFailedTurn(m.id)
@@ -1754,8 +1742,6 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             ) : null}
             {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[800px] flex-wrap items-center gap-2 px-4 text-xs" role="status"><span>{zh?"找到其他窗口保存的草稿":"Saved drafts from other windows"}</span>{draft.recovery.slice(0,3).map(row=><button type="button" key={row.key} className="min-h-11 underline" onClick={()=>draft.restore(row)}>{zh?"恢复：":"Restore: "}{row.draft.text.slice(0,40)||row.draft.attachments[0]?.name}</button>)}<button type="button" className="min-h-11" onClick={draft.dismissRecovery}>{zh?"忽略":"Dismiss"}</button></div>}
             {draft.storageError&&<p role="status" className="mx-auto max-w-[800px] px-4 text-xs text-warn">{zh?"持久化草稿暂不可用，当前输入仍保留在此窗口。":"Persistent draft storage is unavailable. Current input remains in this window."}</p>}
-            <CollaborationSummary agents={agentWork.rows} onOpen={()=>selectWorkspace("agents",true)}/>
-            {!externalView&&<ComposerContextSummary thread={active} settings={settings}/>}
             {workbench.view?.pending_interactions.length ? <InteractionPanel items={workbench.view.pending_interactions} onResolved={()=>{workbench.refresh();commandEngine.refresh();}} /> : null}
             {!externalView && <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+"\n"+text : text)} />}
             {!externalView && <ChatInput {...composerProps} variant="docked" taskHeader={agentWork.rows.length ? (
@@ -1779,7 +1765,16 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             event.preventDefault(); closeCanvas();
           }
         }}>
-        <TaskDockHeader tabs={dockTabs} choices={dockChoices} onRemove={id => void removeDockTab(id)} selected={taskDock.selected || ''} onSelect={tab => selectWorkspace(tab, true)} expanded={fullCanvas} onToggleSize={toggleCanvasSize} onClose={closeCanvas}/>
+        <TaskDockHeader compact={compact || fullCanvas} tabs={dockTabs} choices={dockChoices} onRemove={id => void removeDockTab(id)} selected={taskDock.selected || ''} onSelect={tab => selectWorkspace(tab, true)} expanded={fullCanvas} onToggleSize={toggleCanvasSize} onClose={closeCanvas}/>
+        {openedDetails.map(({ id, target }) => <section key={id} id={'task-dock-panel-' + id} role="tabpanel" aria-labelledby={'task-dock-tab-' + id} hidden={taskDock.selected !== id} className={taskDock.selected === id ? 'min-h-0 min-w-0 flex-1 overflow-auto' : 'hidden'} data-testid="strategy-detail-tab" data-detail-kind={target.kind} data-strategy-id={target.strategyId} data-proposal-id={target.proposalId || ''} data-backtest-ts={target.kind === 'backtest' ? target.ts : undefined}>
+          {target.kind === 'strategy' ? <StrategyWorkflowPanel embedded strategyId={target.strategyId} proposalId={target.proposalId}
+            onDirtyChange={dirty => setDetailDirty(old => old[id] === dirty ? old : { ...old, [id]: dirty })}
+            onSaved={view => { setDetailDirty(old => ({ ...old, [id]: false })); if (view.source.proposal_id !== target.proposalId) openStrategyDetail({ ...target, proposalId: view.source.proposal_id }); strategyReports.retry(); }} />
+            : canvasVisible && taskDock.selected === id && <div className="p-4 sm:p-5"><header className="mb-5 border-b border-[color:var(--line)] pb-4"><h2 className="text-base font-semibold break-words">{target.title || target.strategyId}</h2><p className="mt-1 text-xs text-[color:var(--text-muted)]">{zh ? '历史回测' : 'Historical backtest'} · {target.ts}</p></header><BacktestChart strategyId={target.strategyId} ts={target.ts} proposalId={target.proposalId} /></div>}
+        </section>)}
+        {taskDock.tabs.includes('deliverables') && <section id="task-dock-panel-deliverables" role="tabpanel" aria-labelledby="task-dock-tab-deliverables" hidden={taskDock.selected !== 'deliverables'} className={taskDock.selected === 'deliverables' ? 'min-h-0 flex-1' : 'hidden'}>
+          <TaskDeliverables items={[...automaticTabs, ...instrumentTabs].filter(item => item.id !== 'browser')} files={workbench.view?.result_refs || []} onSelect={id => selectWorkspace(id, true)} onOpenFile={path => { taskDock.select(('file:' + path) as TaskDockTab); focusDock('file:' + path); }} onBrowseFiles={() => selectWorkspace('files', true)}/>
+        </section>}
         {!dockTabs.length && <div className="flex min-h-0 flex-1 items-center justify-center px-6" data-testid="workspace-launcher"><div className="w-full max-w-md space-y-1">
           {toolTabs.map(tab => <button type="button" key={tab.id} onClick={() => selectWorkspace(tab.id, true)} className="flex min-h-11 w-full items-center gap-3 rounded-lg bg-[color:var(--panel-bg)] px-4 text-left text-sm hover:bg-[color:var(--line)] focus-visible:ring-2"><NeryaGlyph name={tab.id === 'files' ? 'folder' : tab.id === 'browser' ? 'globe' : 'terminal'} size={18} className="text-[color:var(--text-muted)]" />{tab.label}</button>)}
         </div></div>}
@@ -1816,10 +1811,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         </section>}
       </section>}
       </div>
-      {externalView && <ChatInput {...composerProps} variant="docked" taskHeader={<p className="px-1 pb-2 text-xs text-[color:var(--text-muted)]" data-testid="external-composer-hint">
-        {zh ? '消息随工具结果交给外部 Agent，不会启动本地模型。' : 'Delivered with tool results; no local model is started.'}
-      </p>} />}
+      {externalView && <ChatInput {...composerProps} variant="docked" />}
+
     </div>
+    </StrategyDetailContext.Provider>
     </ResearchInstrumentContext.Provider>
     </ResearchVisualContext.Provider>
       <HistoryDeleteDialog open={Boolean(history.deleteTarget)} title={th("deleteMessage")} description={th("deleteMessageHelp")}

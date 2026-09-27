@@ -56,10 +56,9 @@ export function ContinuousStrategyStatus({ strategyId, proposalId, dirty }: {
           `/strategies/runtime/status?strategy_id=${encodeURIComponent(strategyId)}`, { signal: new AbortController().signal });
         if (!current.ok || !current.package_hash) throw new Error(current.error || "Current strategy version unavailable");
         hash = current.package_hash;
-        const approved = await confirm({ title: t("启动常驻监听？", "Start continuous listener?"), tone: "warning",
-          message: t(`将运行当前 ${current.manifest.mode || "paper"} 版本。符合条件的事件可唤醒策略 Agent，并在账户授权和风控允许范围内自主下单。不是单次测试。`,
-            `Start the current ${current.manifest.mode || "paper"} version. Qualifying events can invoke the strategy Agent and place orders within account permissions and risk limits. This is not a single test.`),
-          okLabel: t("启动监听", "Start listener") });
+        const approved = await confirm({ title: t("copy.components_workflows_ContinuousStrategyStatus.001"), tone: "warning",
+          message: t("copy.components_workflows_ContinuousStrategyStatus.002", { value0: current.manifest.mode || "paper" }),
+          okLabel: t("copy.components_workflows_ContinuousStrategyStatus.003") });
         if (!approved || !mounted.current) return;
       }
       const result = await callApi<Service>(`/strategies/runtime/service/${action}`, {
@@ -71,32 +70,32 @@ export function ContinuousStrategyStatus({ strategyId, proposalId, dirty }: {
     finally { if (mounted.current) { setBusy(false); setRefresh((value) => value + 1); } }
   }
   const labels: Record<string, string> = {
-    starting: t("启动中", "Starting"), running: t("运行中", "Running"), restarting: t("恢复中", "Restarting"),
-    stopping: t("正在停止", "Stopping"), stopped: t("已停止", "Stopped"), finished: t("监听已结束", "Listener finished"),
-    failed: t("运行失败", "Failed"), interrupted: t("进程已中断", "Interrupted"), unresponsive: t("进程无响应", "Unresponsive"),
+    starting: t("copy.components_workflows_ContinuousStrategyStatus.004"), running: t("copy.components_workflows_ContinuousStrategyStatus.005"), restarting: t("copy.components_workflows_ContinuousStrategyStatus.006"),
+    stopping: t("copy.components_workflows_ContinuousStrategyStatus.007"), stopped: t("copy.components_workflows_ContinuousStrategyStatus.008"), finished: t("copy.components_workflows_ContinuousStrategyStatus.009"),
+    failed: t("copy.components_workflows_ContinuousStrategyStatus.010"), interrupted: t("copy.components_workflows_ContinuousStrategyStatus.011"), unresponsive: t("copy.components_workflows_ContinuousStrategyStatus.012"),
   };
-  const connection = ({ connected: t("已连接", "Connected"), connecting: t("连接中", "Connecting"), reconnecting: t("重新连接中", "Reconnecting"), disconnected: t("未连接", "Disconnected"), idle: t("待连接", "Idle") } as Record<string, string>)[service?.connection || ""];
+  const connection = ({ connected: t("copy.components_workflows_ContinuousStrategyStatus.013"), connecting: t("copy.components_workflows_ContinuousStrategyStatus.014"), reconnecting: t("copy.components_workflows_ContinuousStrategyStatus.015"), disconnected: t("copy.components_workflows_ContinuousStrategyStatus.016"), idle: t("copy.components_workflows_ContinuousStrategyStatus.017") } as Record<string, string>)[service?.connection || ""];
   const active = !!service && activeStates.has(service.state);
-  return <section className={styles.root} data-testid="continuous-strategy-status" aria-label={t("常驻脚本状态", "Continuous script status")}>
-    <div className={styles.line}><strong>{t("常驻脚本", "Continuous script")}</strong>
+  return <section className={styles.root} data-testid="continuous-strategy-status" aria-label={t("copy.components_workflows_ContinuousStrategyStatus.018")}>
+    <div className={styles.line}><strong>{t("copy.components_workflows_ContinuousStrategyStatus.019")}</strong>
       <span role="status" className={styles.state} data-state={error ? "unknown" : service?.state || "stopped"}>
-        {proposalId ? t("待审候选 · 未运行", "Candidate · not running") : error ? t("状态不可用", "Status unavailable") : labels[service?.state || ""] || t("读取状态…", "Reading status…")}
+        {proposalId ? t("copy.components_workflows_ContinuousStrategyStatus.020") : error ? t("copy.components_workflows_ContinuousStrategyStatus.021") : labels[service?.state || ""] || t("copy.components_workflows_ContinuousStrategyStatus.022")}
       </span><span className={styles.grow} />
-      {!proposalId && <><button type="button" className={ui.quietButton} disabled={busy || dirty || !!error || !service || active} onClick={() => void control("start")}>{t("启动监听", "Start listener")}</button>
-      <button type="button" className={ui.quietButton} disabled={busy || (!active && !error)} onClick={() => void control("stop")}>{t("停止监听", "Stop listener")}</button></>}
+      {!proposalId && <><button type="button" className={ui.quietButton} disabled={busy || dirty || !!error || !service || active} onClick={() => void control("start")}>{t("copy.components_workflows_ContinuousStrategyStatus.023")}</button>
+      <button type="button" className={ui.quietButton} disabled={busy || (!active && !error)} onClick={() => void control("stop")}>{t("copy.components_workflows_ContinuousStrategyStatus.024")}</button></>}
     </div>
-    <p className={styles.note}>{proposalId ? t("审核并应用后才能启动。候选不会继承当前版本的运行状态。", "Apply this reviewed candidate before starting. It does not inherit the active version’s running state.") :
-      t("持续接收事件，不依赖定时任务。停止会取消待处理工作；已提交的订单不会自动撤销或平仓。", "Receives events continuously without a timer. Stop cancels pending work, not submitted orders or existing positions.")}</p>
+    <p className={styles.note}>{proposalId ? t("copy.components_workflows_ContinuousStrategyStatus.025") :
+      t("copy.components_workflows_ContinuousStrategyStatus.026")}</p>
     {!proposalId && service && !error && <div className={styles.metrics}>
       {connection && <span>WebSocket · {connection}</span>}
-      <span>Agent · {service.agent_active ? t("处理中", "Processing") : t("等待事件", "Waiting for events")}</span>
-      <span>{t("排队", "Queued")} {service.queue_depth ?? 0}</span>
-      <span>{t("接收", "Accepted")} {service.accepted_events ?? 0} / {t("拦截", "Filtered")} {service.rejected_events ?? 0}</span>
-      {!!service.restart_count && <span>{t("重启", "Restarts")} {service.restart_count}</span>}
-      {service.last_message_at && <span>{t("最近消息", "Last message")} {new Date(service.last_message_at * 1000).toLocaleTimeString()}</span>}
+      <span>Agent · {service.agent_active ? t("copy.components_workflows_ContinuousStrategyStatus.027") : t("copy.components_workflows_ContinuousStrategyStatus.028")}</span>
+      <span>{t("copy.components_workflows_ContinuousStrategyStatus.029")} {service.queue_depth ?? 0}</span>
+      <span>{t("copy.components_workflows_ContinuousStrategyStatus.030")} {service.accepted_events ?? 0} / {t("copy.components_workflows_ContinuousStrategyStatus.031")} {service.rejected_events ?? 0}</span>
+      {!!service.restart_count && <span>{t("copy.components_workflows_ContinuousStrategyStatus.032")} {service.restart_count}</span>}
+      {service.last_message_at && <span>{t("copy.components_workflows_ContinuousStrategyStatus.033")} {new Date(service.last_message_at * 1000).toLocaleTimeString()}</span>}
     </div>}
-    {(error || service?.last_error) && <p className={styles.error} role="alert">{error || service?.last_error}<button type="button" className={ui.quietButton} onClick={() => setRefresh((n) => n + 1)}>{t("刷新", "Refresh")}</button></p>}
-    {service?.stop_reason && !active && <p className={styles.note}>{t("停止原因", "Stop reason")} · {service.stop_reason}</p>}
-    {service?.last_event && <details className={styles.note}><summary>{t("最近事件回执", "Latest event receipt")} · {service.last_event.status}</summary><p>{service.last_event.event_id}<br />{service.last_event.session_id}</p></details>}
+    {(error || service?.last_error) && <p className={styles.error} role="alert">{error || service?.last_error}<button type="button" className={ui.quietButton} onClick={() => setRefresh((n) => n + 1)}>{t("copy.components_workflows_ContinuousStrategyStatus.034")}</button></p>}
+    {service?.stop_reason && !active && <p className={styles.note}>{t("copy.components_workflows_ContinuousStrategyStatus.035")} · {service.stop_reason}</p>}
+    {service?.last_event && <details className={styles.note}><summary>{t("copy.components_workflows_ContinuousStrategyStatus.036")} · {service.last_event.status}</summary><p>{service.last_event.event_id}<br />{service.last_event.session_id}</p></details>}
   </section>;
 }

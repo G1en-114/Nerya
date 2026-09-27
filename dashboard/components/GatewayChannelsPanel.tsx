@@ -1,4 +1,5 @@
 "use client";
+import { Icon as NeryaGlyph } from "./icons";
 
 /**
  * Self-contained Gateway channels workspace.
@@ -622,7 +623,7 @@ export function GatewayChannelsPanel() {
                     className="inline-flex items-center gap-1 rounded-md border border-brand-500/30 bg-brand-500/10 px-2 py-1 text-[10px] text-brand-100 hover:bg-brand-500/20"
                     title={selectedPlatform.docs_url}
                   >
-                    {t("setupDocs")} ↗
+                    {t("setupDocs")} <NeryaGlyph name="arrowUpRight" size={16} />
                   </a>
                 ) : null}
               </div>

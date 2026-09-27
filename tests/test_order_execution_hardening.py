@@ -43,6 +43,7 @@ from nerya.trading.order_intents import (
     PartialExitSpec,
     ProtectionRule,
     StopLossSpec,
+    TakeProfitSpec,
 )
 from nerya.trading.order_polling import (
     is_definitive_not_found_error,
@@ -663,7 +664,7 @@ def test_protection_rejects_pnl_usd_and_r_multiple_specs(tmp_path):
     tp_rule = ProtectionRule(
         position_id="pos_y", strategy_id="s1", account_id="paper_main",
         market="mock:BTC/USDT", side="long",
-        take_profit=StopLossSpec(type="r_multiple", value=2.0),
+        take_profit=TakeProfitSpec(type="r_multiple", value=2.0),
         status="armed",
     )
     with pytest.raises(IntentValidationError, match="r_multiple"):
@@ -748,10 +749,10 @@ def test_paper_resolve_respects_cancel_race(tmp_path, monkeypatch):
         tracker.close()
 
         terminal = orch.step_executor(executor)
-        assert terminal is False, "cancel_requested is not terminal"
+        assert terminal is True, "paper cancellation is confirmed locally"
         tracker = OrderTracker(cfg.paths)
         row = tracker.get(order_id)
-        assert row.state == "cancel_requested"
+        assert row.state == "canceled"
         assert row.filled_size == 0.0, "must not fill after cancel_requested"
         assert tracker.fills_for_order(order_id) == []
         assert PositionBook(cfg.paths).get_open_merged(

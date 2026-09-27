@@ -111,6 +111,20 @@ def run_freqtrade_tick(
         _write_position(ctx, market, pos)
     meta = _read_meta(ctx)
     last_ts = int(dataframe["date"].iloc[-1].timestamp() * 1000)
+    if getattr(ctx, "runmode", "") == "backtest":
+        # A historical submitted receipt is deliberately non-terminal. Adopt
+        # only the engine's settled position on the next tick, never estimates.
+        settled = ctx.portfolio.position(market)
+        qty = float(settled.get("size", settled.get("qty", 0)) or 0) if settled else 0.0
+        price = float(settled.get("avg_price", 0) or 0) if settled else 0.0
+        side = "long" if qty > 0 else "short" if qty < 0 else "flat"
+        if side != pos.get("side") or (qty and price != pos.get("entry_price")):
+            pos = {"side": side, "qty": abs(qty), "entry_price": price,
+                   "entry_ts_ms": last_ts if qty else 0, "stake_amount": abs(qty) * price,
+                   "high_water_profit": 0.0, "stop_price": None}
+        else:
+            pos.update(qty=abs(qty), stake_amount=abs(qty) * price)
+        _write_position(ctx, market, pos)
 
     # Engine-managed exit checks run every tick (intra-candle price may
     # have moved even when the candle timestamp has not).

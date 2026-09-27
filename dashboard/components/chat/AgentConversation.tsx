@@ -1,24 +1,26 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import { useMemo } from "react";
 import { useLocale } from "next-intl";
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { StreamedMarkdown } from "./TurnBlocks";
 import { MessagesIcon } from "../icons";
+import { RoleAvatar } from "../RoleAvatar";
 import { agentRuns, childResult, contentValue, pairOperations, readableResult, working, type AgentRun } from "../../lib/agentConversation";
-import { AgentDebug, ToolActivity } from "./ReadableExecution";
+import { ToolActivity } from "./ReadableExecution";
 import type { AgentDetail, AgentMail, AgentWork } from "./useAgentWork";
 import type { ChatResult } from "../../lib/chatResults";
 
 function Mail({ mail, names }: { mail: AgentMail; names: Map<string, string> }) {
   const zh = useLocale().startsWith("zh");
-  return <article data-testid="agent-mail" className="my-4 text-[13px]">
-    <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-[color:var(--text-muted)]">
-      <MessagesIcon size={13} /><span>{names.get(mail.sender) || (zh ? "协作者" : "Collaborator")} → {names.get(mail.recipient) || (zh ? "协作者" : "Collaborator")}</span>
-      <span>{mail.status === "queued" ? (zh ? "已排队，等待接收" : "Queued, awaiting delivery") : mail.status === "delivered" ? (zh ? "已送达本轮" : "Delivered this run") : (zh ? "已保存到上下文" : "Saved to context")}</span>
-    </div>
-    <StreamedMarkdown text={mail.content} />
-  </article>;
+  const label = (names.get(mail.sender) || i18nCopy(zh, "copy.components_chat_AgentConversation.001")) + ' → ' + (names.get(mail.recipient) || i18nCopy(zh, "copy.components_chat_AgentConversation.002"));
+  return <div data-testid="agent-mail">
+    <div className="mt-4 flex items-center gap-2 text-xs text-[color:var(--text-muted)]"><MessagesIcon size={13}/>{label}{mail.status === 'queued' ? ' · ' + i18nCopy(zh, "copy.components_chat_AgentConversation.003") : ''}</div>
+    {mail.sender === 'operator' || mail.sender === 'lead'
+      ? <UserBubble msg={{ id: mail.id, role: 'user', text: mail.content, ts: mail.ts * 1000 }} />
+      : <AssistantBubble msg={{ id: mail.id, role: 'assistant', ts: mail.ts * 1000, turn: { reply_text: mail.content } }} />}
+  </div>;
 }
 
 function Run({ row, run, messages, names, onOpenResult }: {
@@ -36,23 +38,20 @@ function Run({ row, run, messages, names, onOpenResult }: {
     const text = readableResult(raw, zh).trim().replace(/\s+/g, " ");
     return Boolean(text) && (!final || !final.includes(text)) && typeof contentValue(raw) === "string";
   });
-  const toolCount = steps.filter((s) => s.event.kind.startsWith("tool_")).length;
   const timeline = [
     ...steps.map((step) => ({ key: `step:${step.key}`, ts: step.event.ts, node: step.event.kind.startsWith("tool_") ? <ToolActivity step={step} state={run.state} />
-      : <div className="py-3 text-[14px] leading-relaxed"><StreamedMarkdown text={readableResult(step.data.text || step.data.error, zh)} /></div> })),
+      : <div className="py-3 text-sm leading-relaxed"><StreamedMarkdown text={readableResult(step.data.text || step.data.error, zh)} /></div> })),
     ...messages.map((mail) => ({ key: `mail:${mail.id}`, ts: mail.sender === row.id ? mail.ts : Number((mail as AgentMail & { delivered_at?: number }).delivered_at || mail.ts), node: <Mail mail={mail} names={names} /> })),
   ].sort((a, b) => a.ts - b.ts);
-  const trace = timeline.length ? <div data-testid="agent-readable-trace">{timeline.map((item) => <div key={item.key}>{item.node}</div>)}</div> : undefined;
   return <section data-agent-run={run.attempt}>
-    <div className="mb-3 mt-5 text-xs text-[color:var(--text-muted)]">{zh ? `第 ${run.attempt} 轮` : `Run ${run.attempt}`}</div>
     {run.instruction || run.attempt === 1 ? <UserBubble msg={{ id: `${row.id}:instruction:${run.attempt}`, role: "user", ts: run.ts * 1000, text: run.instruction || row.title }} /> : null}
-    <AssistantBubble msg={{ id: `${row.id}:run:${run.attempt}`, role: "assistant", ts: run.ts * 1000, loading: isActive,
-      error: run.state === "failed" ? run.error || (zh ? "本轮未能完成，请查看操作错误后重试。" : "This run failed. Review the operation error before retrying.") : undefined,
-      turn: { reply_text: complete ? result.text : "" } }}
-      traceContent={trace} traceLabel={toolCount ? (isActive ? (zh ? `执行中 · ${toolCount} 项操作` : `Working · ${toolCount} operations`) : (zh ? `查看执行过程 · ${toolCount} 项操作` : `View execution steps · ${toolCount} operations`)) : undefined}
+    <div className="native-agent-identity mb-2 mt-4 flex items-center gap-2 text-xs font-medium"><RoleAvatar role={row.name} size={32} alt="" /><span>{row.name}</span></div>
+    <AssistantBubble msg={{ id: `${row.id}:run:${run.attempt}`, role: "assistant", ts: run.ts * 1000, loading: isActive, execution_status: run.state === "completed" ? "succeeded" : run.state,
+      error: run.state === "failed" ? run.error || (i18nCopy(zh, "copy.components_chat_AgentConversation.007")) : undefined,
+      turn: { reply_text: !isActive ? result.text : "" } }}
+      traceContent={timeline.length ? <div data-testid="agent-conversation-stream">{timeline.map(item => <div key={item.key}>{item.node}</div>)}</div> : undefined}
       onOpenResult={onOpenResult && complete && result.text ? () => onOpenResult(result) : undefined} />
-    {!complete && !isActive && result.text ? <section className="my-3 text-sm"><p className="mb-2 text-xs text-warn">{zh ? "本轮未完成，以下为已保存的部分输出" : "This run did not complete. Saved partial output follows."}</p><StreamedMarkdown text={result.text} /></section> : null}
-    {run.output != null && !isActive ? <AgentDebug value={run.output} /> : null}
+
   </section>;
 }
 
@@ -62,7 +61,7 @@ export function AgentConversation({ row, detail, rows, onOpenResult }: {
   const zh = useLocale().startsWith("zh");
   const runs = useMemo(() => agentRuns(row, detail), [row, detail]);
   const names = new Map(rows.map((a) => [a.id, a.name]));
-  names.set("operator", zh ? "你" : "You"); names.set("lead", "Nerya");
+  names.set("operator", i18nCopy(zh, "copy.components_chat_AgentConversation.011")); names.set("lead", "Nerya");
   const messages = detail?.messages || [];
   const mailbox = new Map<number, AgentMail[]>();
   for (const mail of messages.filter((m) => m.status !== "queued")) {
@@ -74,7 +73,7 @@ export function AgentConversation({ row, detail, rows, onOpenResult }: {
   return <div data-testid="agent-conversation">
     {runs.map((run) => <Run key={run.attempt} row={row} run={run} names={names}
       messages={mailbox.get(run.attempt) || []} onOpenResult={onOpenResult} />)}
-    {row.legacy && !row.legacySteps?.length ? <p className="mt-3 text-xs text-[color:var(--text-muted)]">{zh ? "历史任务未保存详细过程，仍可查看已保存的结果。" : "The detailed history was not saved. The saved result is still available."}</p> : null}
+    {row.legacy && !row.legacySteps?.length ? <p className="mt-3 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_AgentConversation.012")}</p> : null}
     {row.legacySteps?.map((step) => <details key={step.key} className="py-2 text-sm"><summary className="cursor-pointer">{step.label}</summary><StreamedMarkdown text={readableResult(step.detail, zh)} /></details>)}
     {messages.filter((mail) => mail.status === "queued").map((mail) => <Mail key={mail.id} mail={mail} names={names} />)}
   </div>;

@@ -20,7 +20,6 @@
  *   │ ▣ Interface   │
  *   │ INTEGRATIONS  │  ── standalone /routes (forceSection pages)
  *   │ ⌕ Web search  │
- *   │ ◍ Browsers    │
  *   │ ⊙ Memory      │
  *   │ ▤ Env & Vault │
  *   │ ✉ Gateway     │
@@ -34,6 +33,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { startDesktopDragging } from "../../lib/desktop";
 import { useEffect, useState, type ComponentType, type SVGProps } from "react";
 import {
   ChartIcon,
@@ -136,13 +136,10 @@ export function SettingsSidebar() {
     { key: "access", label: tTabs("access"), icon: ShieldCheckIcon },
     { key: "runtime", label: tTabs("runtime"), icon: GlobeIcon },
     { key: "mcp", label: tTabs("mcp"), icon: GlobeIcon },
-    { key: "capabilityGates", label: tTabs("capabilityGates"), icon: WrenchIcon },
     { key: "interface", label: tTabs("interface"), icon: ChartIcon },
   ];
   const integrations: { href: string; label: string; icon: IconComp }[] = [
     { href: "/web-search", label: tTabs("search"), icon: SearchIcon },
-    { href: "/browsers", label: tTabs("browsers"), icon: GlobeIcon },
-    { href: "/memory", label: tTabs("memory"), icon: MemoryIcon },
     { href: "/env-vault", label: tNav("envVault"), icon: FolderIcon },
     { href: "/gateway", label: tNav("gateway"), icon: MessagesIcon },
   ];
@@ -170,6 +167,8 @@ export function SettingsSidebar() {
       className="w-64 nerya-sidebar embedded-scroll sticky top-0 flex h-screen shrink-0 flex-col overflow-x-hidden border-r"
       style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}
     >
+      <div className="nerya-sidebar-titlebar-drag shrink-0" aria-hidden="true"
+        onMouseDown={(event) => { if (event.button === 0) void startDesktopDragging().catch(() => undefined); }} />
       <div className="px-2 pt-3">
         <Link href="/" className="group sidebar-item sidebar-item-idle w-full">
           <ChevronLeftIcon

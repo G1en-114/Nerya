@@ -3,8 +3,11 @@ import { Icon as NeryaGlyph } from "../icons";
 
 import Link from "next/link";
 import { StrategyChatReference } from "../workflows/StrategyChatReference";
-import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { WorkflowPromotionReceipt, promotionReceiptFacts } from "../workflows/WorkflowPromotionReceipt";
+import { useContext, useEffect, useMemo, useState } from "react";
+import { StrategyDetailContext } from "../chat/StrategyDetailContext";
+import { strategyDetailId } from "../../lib/strategyDetail";
+import { useLocale, useTranslations } from "next-intl";
 
 import {
   clientApi,
@@ -13,9 +16,12 @@ import {
 } from "../../lib/clientApi";
 import type { StrategyValidationReport } from "../../lib/strategyTypes";
 import { formatTsShort } from "../../lib/format";
+import { workflowApi } from "../../lib/workflowApi";
+import type { WorkflowView } from "../../lib/workflowTypes";
 import { confirm, toast } from "../../lib/dialogs";
 import { Pill } from "../Page";
 import { ShieldCheckIcon, StrategiesIcon, TrashIcon } from "../icons";
+import cardStyles from "./StrategyProposalCard.module.css";
 
 export type StrategyProposalView = {
   id: string;
@@ -56,7 +62,7 @@ function stringValue(value: unknown): string {
 
 function parseMaybeJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
-  const text = value.trim();
+  const text = value.includes("[compacted_kept]") ? value.slice(value.lastIndexOf("[compacted_kept]") + "[compacted_kept]".length).trim() : value.trim();
   if (!text) return value;
   if (!text.startsWith("{") && !text.startsWith("[")) return value;
   try {
@@ -210,6 +216,8 @@ export function StrategyProposalApprovalCard({
   onNotice?: (message: string | null) => void;
 }) {
   const t = useTranslations("strategyProposal");
+  const details = useContext(StrategyDetailContext);
+  const zh = useLocale().startsWith("zh");
   const tCommon = useTranslations("common");
   const [editedProposal, setEditedProposal] = useState<StrategyProposalView | null>(null);
   const normalized = editedProposal || strategyProposalFromToolResult(proposal) || proposal;
@@ -220,10 +228,16 @@ export function StrategyProposalApprovalCard({
   const [localNotice, setLocalNotice] = useState<string | null>(null);
   const [appliedStrategyId, setAppliedStrategyId] = useState<string | null>(null);
   const [stateOverride, setStateOverride] = useState<string | null>(null);
+  const [promotionReceipt, setPromotionReceipt] = useState<StrategyRuntimePromotionResult | null>(null);
+  const recordedPromotion = useMemo(() => {
+    const parsed = strategyProposalFromToolResult(proposal);
+    return parsed?.promotion ? parsed : undefined;
+  }, [proposal]);
   const [validationResult, setValidationResult] =
     useState<StrategyValidationReport | null>(null);
   const [validationChecked, setValidationChecked] = useState(false);
   const [validating, setValidating] = useState(false);
+  const [snapshot, setSnapshot] = useState<WorkflowView | null>(null);
 
   const proposalId = stringValue(normalized.id);
   const state = (stateOverride || stringValue(normalized.state) || "draft").toLowerCase();
@@ -252,6 +266,12 @@ export function StrategyProposalApprovalCard({
     !normalized.validation &&
     !TERMINAL_STATES.has(state);
   const validationPending = shouldValidate && !validationChecked;
+  const manifest = snapshot ? { ...recordOf(snapshot.manifest.extras), ...snapshot.manifest } : {};
+  const agentMode = recordOf(manifest.agent_task).enabled === true;
+  const gated = snapshot?.strategy.nodes.some(node => node.kind === "script" && node.control?.can_stop);
+  const typeLabel = snapshot ? agentMode ? gated ? (zh ? "脚本驱动 Agent" : "Script-gated Agent") : (zh ? "事件驱动 Agent" : "Event-driven Agent") : (zh ? "纯脚本策略" : "Script strategy") : "";
+  const displayTitle = stringValue(manifest.title) || stringValue(normalized.summary) || strategyId || proposalId;
+  const states: Record<string, string> = zh ? { draft:"草稿", pending_review:"待审核", proposed:"待审核", approved:"已批准", applied:"已应用", rejected:"已拒绝", rolled_back:"已回滚", superseded:"已有新版本" } : { draft:"Draft", pending_review:"Awaiting review", proposed:"Awaiting review", approved:"Approved", applied:"Applied", rejected:"Rejected", rolled_back:"Rolled back", superseded:"Superseded" };
   const canApprove =
     proposalId &&
     !TERMINAL_STATES.has(state) && state !== "draft" &&
@@ -291,10 +311,13 @@ export function StrategyProposalApprovalCard({
   }, [proposalId]);
 
   useEffect(() => {
-    if (!shouldValidate || validationChecked || validating) return;
-    void validateProposal();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proposalId, shouldValidate, validationChecked, validating]);
+    let cancelled = false;
+    setSnapshot(null);
+    if (strategyId && packageProposal) workflowApi.get(strategyId, proposalId).then(view => {
+      if (!cancelled) setSnapshot(view);
+    }).catch(() => { /* The saved receipt remains readable if its source is unavailable. */ });
+    return () => { cancelled = true; };
+  }, [proposalId, strategyId, packageProposal]);
 
   async function approve() {
     if (!proposalId) return;
@@ -323,14 +346,17 @@ export function StrategyProposalApprovalCard({
         throw new Error(t("validationBlockedNotice"));
       }
       const out = await clientApi.strategyRuntimePromote(proposalId, approveNote);
+      setPromotionReceipt(out);
       if (!out.ok) {
         throw new Error(out.error || out.reason || "strategy_promote_failed");
       }
       const nextStrategyId = stringValue(out.strategy_id) || strategyId;
       setAppliedStrategyId(nextStrategyId || null);
       setStateOverride("applied");
-      const msg = t("appliedNotice", { strategy: nextStrategyId || proposalId });
-      setLocalNotice(msg);
+      const msg = promotionReceiptFacts(out).syncFailed
+        ? (zh ? "版本已应用，调度待同步。请查看下方回执并仅重试同步。" : "Version applied; schedules need synchronization. Review the receipt below and retry sync only.")
+        : t("appliedNotice", { strategy: nextStrategyId || proposalId });
+      setLocalNotice(t("appliedNotice", { strategy: nextStrategyId || proposalId }));
       onNotice?.(msg);
       await onApproved?.(out);
     } catch (e) {
@@ -397,52 +423,54 @@ export function StrategyProposalApprovalCard({
 
   return (
     <div
-      className={[
-        "rounded-lg border border-warn/30 bg-warn/[0.055] text-xs [overflow-wrap:anywhere]",
-        compact ? "p-3" : "p-4",
-      ].join(" ")}
+      className={cardStyles.card}
       data-proposal-id={proposalId}
+      data-testid="strategy-proposal-card"
     >
-      {strategyId && <StrategyChatReference key={proposalId} strategyId={strategyId} proposalId={proposalId} onSaved={(view) => { setEditedProposal({ ...normalized, id: view.source.proposal_id || proposalId, strategy_id: strategyId, state: view.source.state, summary: String(view.manifest.title || strategyId), validation: undefined }); setStateOverride(null); }} />}
-      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <StrategiesIcon size={15} className="text-warn" />
-            <span className="font-mono text-sm text-ink-100">
-              {strategyId || proposalId}
-            </span>
-            <Pill tone={stateTone(state)}>{state}</Pill>
+      <div className={cardStyles.layout}>
+        <div className={cardStyles.identity}>
+          <div className={cardStyles.heading}>
+            <div className={cardStyles.kind}><StrategiesIcon size={15}/>{typeLabel || (zh ? "策略候选" : "Strategy candidate")}</div>
+            <h3 className={cardStyles.title}>{displayTitle}</h3>
+          </div>
+          <div className={cardStyles.states}>
+            <Pill tone={stateTone(state)}>{states[state] || state}</Pill>
             {backtestVerdict ? (
-              <Pill tone={verdictTone}>
+              <span className={verdictTone === "danger" ? "text-danger" : verdictTone === "warn" ? "text-warn" : "text-[color:var(--text-muted)]"}>
                 {t("backtestVerdict", { verdict: backtestVerdict })}
-              </Pill>
+              </span>
             ) : null}
-            {validationOk ? <Pill tone="ok">{t("validationOk")}</Pill> : null}
-            {validating || validationPending ? <Pill tone="brand">{t("validating")}</Pill> : null}
+            {validationOk ? <span className="inline-flex items-center gap-1"><ShieldCheckIcon size={13}/>{zh ? "结构校验通过" : "Structure validated"}</span> : null}
+            {validating ? <Pill tone="brand">{t("validating")}</Pill> : null}
             {hasBlockers ? <Pill tone="danger">{t("blocked")}</Pill> : null}
           </div>
-          <div className="mt-1 text-ink-300 leading-relaxed">
-            {stringValue(normalized.summary) || t("fallbackSummary")}
+          <div className={cardStyles.facts} data-testid="strategy-card-facts">
+            {Array.isArray(manifest.markets) && <span>{manifest.markets.map(String).join(" · ")}</span>}
+            {Boolean(manifest.mode) && <span>{manifest.mode === "paper" ? (zh ? "模拟交易" : "Paper mode") : String(manifest.mode)}</span>}
+            {recordOf(manifest.schedule).enabled === false && <span>{zh ? "定时任务未启动" : "Schedule inactive"}</span>}
           </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-500">
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--text-muted)]">
             {normalized.ts ? <span>{formatTsShort(String(normalized.ts))}</span> : null}
             {files.length ? <span>{t("files", { count: files.length })}</span> : null}
             {/* Raw ids are reviewer/debug detail; keep them one click away. */}
             <details className="inline-block">
-              <summary className="cursor-pointer list-none text-ink-500 hover:text-ink-300 underline decoration-dotted underline-offset-2">
+              <summary className="cursor-pointer list-none text-[color:var(--text-muted)] hover:text-[color:var(--text-base)] underline decoration-dotted underline-offset-2">
                 {t("detailsToggle")}
               </summary>
-              <span className="mt-1 block font-mono text-ink-500">
+              <span className="mt-1 block font-mono text-[color:var(--text-muted)]">
                 {t("proposalId")}: {proposalId}
                 {normalized.target ? ` · ${t("target")}: ${String(normalized.target)}` : ""}
               </span>
             </details>
           </div>
+          {strategyId && <div className="mt-4 border-t border-[color:var(--line)] pt-3"><StrategyChatReference key={proposalId} strategyId={strategyId} proposalId={proposalId} view={snapshot} onSaved={(view) => { setEditedProposal({ ...normalized, id: view.source.proposal_id || proposalId, strategy_id: strategyId, state: view.source.state, summary: String(view.manifest.title || strategyId), validation: undefined }); setStateOverride(null); }} /></div>}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {!packageProposal && <Link className="btn btn-ghost text-xs" href={"/self-evolution?tab=proposals&proposal_id=" + encodeURIComponent(proposalId)}>{t("detailsToggle")} <NeryaGlyph name="arrowUpRight" size={16} /></Link>}
-          {state === "applied" && strategyId ? (
+        <div className={cardStyles.actions}>
+          {details && strategyId && <button type="button" className={cardStyles.expand} title={zh ? "在右侧标签页查看" : "Open in a detail tab"} aria-label={zh ? "在对话中展开策略详情" : "Open strategy details in conversation"} aria-expanded={details.active === strategyDetailId({ kind: "strategy", strategyId, proposalId })} aria-controls={'task-dock-panel-' + strategyDetailId({ kind: "strategy", strategyId, proposalId })} onClick={() => details.open({ kind: "strategy", strategyId, proposalId, title: displayTitle })} data-testid="expand-strategy-details"><NeryaGlyph name="arrowUpRight" size={18}/></button>}
+          {validationPending && <button type="button" className="btn btn-ghost text-xs" disabled={validating} onClick={() => void validateProposal()}>{zh ? "检查候选" : "Validate candidate"}</button>}
+          {!packageProposal && !details && <Link className="btn btn-ghost text-xs" href={"/self-evolution?tab=proposals&proposal_id=" + encodeURIComponent(proposalId)}>{t("detailsToggle")} <NeryaGlyph name="arrowUpRight" size={16} /></Link>}
+          {state === "applied" && strategyId && !details ? (
             <Link
               href={`/strategies/${encodeURIComponent(strategyId)}`}
               className="btn btn-ghost cursor-pointer text-xs"
@@ -496,6 +524,7 @@ export function StrategyProposalApprovalCard({
         </div>
       ) : null}
 
+      {state === "applied" && strategyId && <WorkflowPromotionReceipt key={proposalId} strategyId={strategyId} proposalId={proposalId} receipt={promotionReceipt || recordedPromotion} />}
       {notice ? (
         <div className="mt-3 rounded-md border border-accent-500/30 bg-accent-500/10 px-3 py-2 text-accent-200">
           {notice}

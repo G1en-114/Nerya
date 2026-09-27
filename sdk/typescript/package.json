@@ -1,6 +1,6 @@
 {
   "name": "@nerya/sdk",
-  "version": "0.1.0",
+  "version": "1.0.0-beta.1",
   "description": "Nerya Trigger and Trading SDK for TypeScript / Node.js",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src", "README.md"],
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit"

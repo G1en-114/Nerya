@@ -115,7 +115,7 @@ _CAPABILITIES = WalletCapabilities(
         supported=True, status="partial",
         note=(
             "Real router quotes for bsc (PancakeSwap v2 getAmountsOut); "
-            "other chains return a clearly-marked synthetic placeholder."
+            "other chains require an aggregator wallet for real quotes."
         ),
     ),
     swap=WalletCapability(
@@ -156,7 +156,9 @@ class MetaMaskWallet(SelfCustodyWallet):
 
     # ------------------------------------------------------------------
     def capabilities(self) -> WalletCapabilities:
-        return _CAPABILITIES
+        from dataclasses import replace
+        return replace(_CAPABILITIES,swap_chains=tuple(dict.fromkeys(('bsc',*(self.config.get('dex_routes') or {})))),
+                       minimum_output='enforced',receipt_polling=True)
 
     def readiness(self) -> WalletReadiness:
         base = super().readiness()

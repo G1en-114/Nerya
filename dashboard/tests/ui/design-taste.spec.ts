@@ -1,6 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import en from "../../messages/en.json";
-import zh from "../../messages/zh.json";
+import { en, zh } from "../../messages";
 
 // Isolated UI acceptance. These are example roles, never a connected runtime.
 async function fixture(page: Page, locale: "en" | "zh" = "en", theme = "dark") {

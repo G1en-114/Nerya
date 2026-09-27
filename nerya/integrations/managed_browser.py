@@ -1,4 +1,4 @@
-"""The dedicated, headed Chromium work browser shared by Agent and operator.
+"""The dedicated, embedded Chromium work browser shared by Agent and operator.
 
 No personal browser discovery, credential import, signing or virtual WebAuthn
 endpoints live here. Playwright communicates over its private pipe, not a public
@@ -73,11 +73,13 @@ def load_profile(root: Path | str, profile: str) -> dict[str, Any]:
     if path.is_symlink():
         raise BrowserError("profile_symlink_not_allowed")
     if not path.exists():
-        return {"id": profile, "version": 1, "extensions": []}
+        return {"id": profile, "version": 1, "engine": "chromium", "extensions": []}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("version") != 1 or data.get("id") != profile or not isinstance(data.get("extensions"), list):
             raise ValueError()
+        from .browser_native import channel
+        data['engine'] = channel(data.get('engine', 'chromium'))
         return data
     except (ValueError, AttributeError, OSError):
         raise BrowserError("invalid_profile_settings") from None
@@ -160,7 +162,7 @@ def review_extension(value: Any) -> dict[str, Any]:
             "extension_id": extension_id, "control_ui": False}
 
 
-def save_profile(root: Path | str, profile: str, extensions: Any) -> dict[str, Any]:
+def save_profile(root: Path | str, profile: str, extensions: Any, *, engine: Any = None) -> dict[str, Any]:
     if not isinstance(extensions, list) or len(extensions) > 12:
         raise BrowserError("extension_count_limit")
     reviewed = []
@@ -181,7 +183,9 @@ def save_profile(root: Path | str, profile: str, extensions: Any) -> dict[str, A
         if entry["control_ui"] and not entry["extension_id"]:
             raise BrowserError("extension_ui_control_requires_stable_manifest_key")
         reviewed.append(entry)
-    config = {"id": identifier(profile), "version": 1, "extensions": reviewed}
+    from .browser_native import channel
+    selected = channel(engine if engine is not None else load_profile(root, profile).get('engine', 'chromium'))
+    config = {"id": identifier(profile), "version": 1, "engine": selected, "extensions": reviewed}
     directory = profile_directory(root, profile)
     fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=directory)
     try:
@@ -217,6 +221,10 @@ class ChromiumWorker:
         self.control_id = ''
         self._manual_dispatch = False
         self.surface_state: dict[str, Any] = {}
+        self.viewport = {'width': 1280, 'height': 800}
+        self.viewport_revision = 0
+        from .browser_dialog import OperatorDialogs
+        self.dialogs = OperatorDialogs(self)
         self._history_pages: set = set()
         self.interrupted = threading.Event()
         self.agent_controller: Any = None
@@ -235,25 +243,28 @@ class ChromiumWorker:
         driver = None
         try:
             paths = []
-            for entry in self.config["extensions"]:
+            from .browser_native import channel, launch_options
+            engine = channel(self.config.get('engine', 'chromium'))
+            for entry in self.config["extensions"] if engine == 'chromium' else []:
                 if not entry.get("enabled", True):
                     continue
                 current = review_extension(entry["path"])
                 if current["digest"] != entry["digest"]:
                     raise BrowserError("extension_changed_review_again")
                 paths.append(entry["path"])
-            data_directory = self.directory / "chromium"
+            # Each engine owns its own Nerya profile. Never repurpose a personal
+            # Chrome directory or silently migrate an existing Chromium profile.
+            data_directory = self.directory / engine
             if data_directory.is_symlink():
                 raise BrowserError("profile_symlink_not_allowed")
             data_directory.mkdir(mode=0o700, exist_ok=True)
             driver = self.factory()
-            args = ["--disable-extensions-except=" + ",".join(paths), "--load-extension=" + ",".join(paths)] if paths else []
             self.context = driver.chromium.launch_persistent_context(
-                str(data_directory), channel="chromium", headless=False,
-                args=args, chromium_sandbox=True, ignore_https_errors=False,
-                viewport={"width": 1280, "height": 800}, timeout=30000,
+                str(data_directory), **launch_options(engine, paths),
             )
             self.context.set_default_timeout(10000)
+            self.context.on('close', lambda *_: self.stopping.set())
+            self.context.on('dialog', self._unmanaged_dialog)
             self.cdp = self.context.browser.new_browser_cdp_session()
             self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
             from .browser_network import NetworkLog
@@ -314,6 +325,10 @@ class ChromiumWorker:
             if self.agent_controller is None or self.agent_controller.session_id != (payload or {}).get('session_id'):
                 raise BrowserError('browser_session_changed')
             self.interrupted.set()
+        if command == 'native':
+            from .browser_native import destination
+            destination((payload or {}).get('destination', 'focus'), self.config.get('engine', 'chromium'))
+            self.interrupted.set()
         if command in {"handoff", "agent_revoke"}:
             self.interrupted.set()  # Visible to an executing batch before its next step.
         if self.stopping.is_set():
@@ -336,6 +351,16 @@ class ChromiumWorker:
         self.interrupted.set()
         self.stopping.set()
 
+    def _unmanaged_dialog(self, dialog: Any) -> None:
+        # Without a listener, Playwright silently dismisses native web dialogs.
+        # An AgentController, when present, owns its existing page-level handler.
+        if self.agent_controller is not None:
+            return
+        if self.human_control:
+            self.dialogs.show(getattr(dialog, 'page', None), dialog)
+            return
+        dialog.dismiss()
+
     def _sync_pages(self) -> None:
         from .browser_workspace import record_visit
         for page in self.context.pages:
@@ -344,6 +369,7 @@ class ChromiumWorker:
                 page.on('framenavigated', lambda frame, p=page: record_visit(self.root, self.config['id'], frame.url) if frame is p.main_frame else None)
                 record_visit(self.root, self.config['id'], page.url)
             if not page.is_closed() and page not in self.pages.values():
+                page.set_viewport_size(self.viewport)
                 self.pages[str(len(self.pages) + 1)] = page
         if self.page is None or self.page.is_closed():
             self.page = next((p for p in self.pages.values() if not p.is_closed()), None)
@@ -384,19 +410,68 @@ class ChromiumWorker:
     def _command(self, command: str, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.is_owner_thread(), "Playwright thread affinity"
         self._sync_pages()
+        if command == 'viewport':
+            width, height = payload.get('width'), payload.get('height')
+            if (type(width) is not int or type(height) is not int
+                    or not 240 <= width <= 3840 or not 180 <= height <= 3840):
+                raise BrowserError('invalid_browser_viewport')
+            if self._has_protected_target():
+                raise BrowserError('protected_browser_ui')
+            size = {'width': width, 'height': height}
+            if size != self.viewport:
+                # Same queue as browser actions: never resize midway through a batch.
+                previous = dict(self.viewport)
+                try:
+                    for page in self.pages.values():
+                        if not page.is_closed():
+                            page.set_viewport_size(size)
+                except Exception:
+                    for page in self.pages.values():
+                        if not page.is_closed():
+                            try:
+                                page.set_viewport_size(previous)
+                            except Exception:
+                                self.close()  # Unknown geometry must not accept clicks.
+                    raise BrowserError('browser_viewport_failed') from None
+                self.viewport = size
+                self.viewport_revision += 1
+                if self.agent_controller:
+                    self.agent_controller.clear_refs()
+            return self._command('status', {})
         if command == 'network_detail':
             if self._has_protected_target():
                 raise BrowserError('protected_browser_ui')
             return self.network.detail(payload)
+        if command == 'native':
+            from .browser_native import destination
+            url = destination(payload.get('destination', 'focus'), self.config.get('engine', 'chromium'))
+            self._command('handoff', {})
+            if url:
+                self.page = next((p for p in self.context.pages if not p.is_closed() and p.url == url), None) or self.context.new_page()
+                self.page.goto(url, wait_until='domcontentloaded')
+            elif self.page is None:
+                self.page = self.context.new_page()
+            self.page.bring_to_front()
+            return self._command('status', {})
         if command == 'human_command':
-            if not self.human_control or self._has_protected_target():
+            if not self.human_control:
                 raise BrowserError('take_over_before_manual_input')
+            if self._has_protected_target() and payload.get('command') not in {'select_tab', 'close_tab', 'new_tab', 'navigate'}:
+                raise BrowserError('protected_browser_ui_use_native_window')
             if not self.control_id or payload.get('control_id') != self.control_id:
                 raise BrowserError('human_control_changed')
             expected = payload.get('session_id')
             actual = self.agent_controller.session_id if self.agent_controller else ''
             if expected is not None and expected != actual:
                 raise BrowserError('browser_session_changed')
+            expected_tab = payload.get('expected_tab_id')
+            if expected_tab is not None and self.pages.get(str(expected_tab)) is not self.page:
+                raise BrowserError('browser_tab_changed')
+            if payload.get('expected_url') is not None and (self.page is None or public_url(self.page.url) != payload['expected_url']):
+                raise BrowserError('browser_page_changed')
+            if (payload.get('expected_viewport_revision') is not None
+                    and payload['expected_viewport_revision'] != self.viewport_revision):
+                raise BrowserError('browser_viewport_changed')
             operation = payload.get('command')
             if operation not in {'navigate','new_tab','select_tab','close_tab','back','forward','reload','click','type','press','scroll','extension_open'}:
                 raise BrowserError('unsupported_manual_command')
@@ -424,7 +499,7 @@ class ChromiumWorker:
                 raise BrowserError('browser_session_changed')
             if payload.get('control') not in {'handoff', 'resume'}:
                 raise BrowserError('unsupported_trace_control')
-            return self._command(payload['control'], {})
+            return self._command(payload['control'], {'focus': payload.get('focus', True)})
         if command == "preview":
             # One worker job: another action cannot run between pixels and metadata.
             state = self._command("status", {})
@@ -469,7 +544,9 @@ class ChromiumWorker:
                     "paused": self.paused or self.interrupted.is_set(),
                     "agent_access": self.agent_controller.access_status() if self.agent_controller else {"enabled": False, "occupied": False},
                     "tabs": [{"id": k, "url": public_url(p.url), "protected": self._protected(p),
-                              "selected": p is self.page} for k, p in self.pages.items() if not p.is_closed()]}
+                              "selected": p is self.page} for k, p in self.pages.items() if not p.is_closed()],
+                    "engine": self.config.get('engine', 'chromium'),
+                    "viewport": dict(self.viewport), "viewport_revision": self.viewport_revision}
             return dict(self.surface_state)
         if command == "handoff":
             self.paused = True
@@ -477,7 +554,7 @@ class ChromiumWorker:
             self.control_id = secrets.token_urlsafe(18)
             if self.agent_controller:
                 self.agent_controller.clear_refs()
-            if self.page is not None:
+            if self.page is not None and payload.get('focus', True):
                 self.page.bring_to_front()
             return {"ok": True, "paused": True}
         if command == "resume":
@@ -499,10 +576,13 @@ class ChromiumWorker:
             if page is None or page.is_closed():
                 raise BrowserError("tab_not_found")
             self.page = page
-            page.bring_to_front()
+            if not self._manual_dispatch:
+                page.bring_to_front()
             return {"ok": True}
         if self.paused and not self._manual_dispatch:
             raise BrowserError("human_handoff_active")
+        if command == 'navigate' and self.page is None:
+            self.page = self.context.new_page()
         if command == "new_tab":
             self.page = self.context.new_page()
             self.page.goto(navigation_url(payload.get("url", "about:blank")), wait_until="domcontentloaded")
@@ -532,7 +612,7 @@ class ChromiumWorker:
             return {"ok": True, "image": "data:image/png;base64," + base64.b64encode(image).decode("ascii")}
         elif command == "click":
             x, y = payload.get("x"), payload.get("y")
-            if any(type(v) not in (int, float) or not math.isfinite(v) for v in (x, y)) or not (0 <= x <= 1280 and 0 <= y <= 800):
+            if any(type(v) not in (int, float) or not math.isfinite(v) for v in (x, y)) or not (0 <= x < self.viewport['width'] and 0 <= y < self.viewport['height']):
                 raise BrowserError("invalid_viewport_coordinates")
             self.page.mouse.click(x, y)
         elif command == "type":
@@ -542,14 +622,16 @@ class ChromiumWorker:
             self.page.keyboard.insert_text(text)
         elif command == "press":
             key = payload.get("key")
-            if key not in {"Enter", "Tab", "Shift+Tab", "Escape", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"}:
+            keys = {'Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'}
+            shortcuts = {'ControlOrMeta+a', 'ControlOrMeta+z', 'ControlOrMeta+Shift+z', 'ControlOrMeta+y'}
+            if not isinstance(key, str) or key not in keys | {'Shift+' + k for k in keys} | shortcuts:
                 raise BrowserError("unsupported_key")
             self.page.keyboard.press(key)
         elif command == "scroll":
-            dy = payload.get("dy", 500)
-            if type(dy) not in (int, float) or not math.isfinite(dy) or abs(dy) > 3000:
-                raise BrowserError("invalid_scroll")
-            self.page.mouse.wheel(0, dy)
+            dx, dy = payload.get('dx', 0), payload.get('dy', 500)
+            if any(type(value) not in (int, float) or not math.isfinite(value) or abs(value) > 3000 for value in (dx, dy)):
+                raise BrowserError('invalid_scroll')
+            self.page.mouse.wheel(dx, dy)
         elif command == "extension_open":
             extension_id = payload.get("extension_id")
             entry = next((e for e in self.config["extensions"] if e.get("extension_id") == extension_id and extension_id and e.get('enabled', True)), None)
@@ -601,9 +683,12 @@ def open_browser(root: Path | str, profile: str) -> ChromiumWorker:
     return worker
 
 
-def capabilities() -> dict[str, Any]:
-    return {"engine": "chromium", "playwright_installed": importlib.util.find_spec("playwright") is not None,
-            "persistent_profile": True, "native_window": True, "unpacked_mv3_extensions": True,
-            "chrome_web_store_install": False, "credential_import": False,
+def capabilities(engine: str = 'chromium') -> dict[str, Any]:
+    from .browser_native import channel
+    engine = channel(engine)
+    return {"engine": engine, "playwright_installed": importlib.util.find_spec("playwright") is not None,
+            "persistent_profile": True, "native_window": False, "embedded": True, "resizable_viewport": True, "unpacked_mv3_extensions": True,
+            "chrome_web_store_install": engine == 'chrome', "native_password_manager": True,
+            "native_extensions": True, "credential_import": False,
             "local_wallet_injection": False, "passkey_provider": "native_browser_or_os_requires_device_validation",
             "virtual_authenticator": False, "agent_tools_exposed": True, "agent_requires_site_grant": False, "automatic_mode": True}

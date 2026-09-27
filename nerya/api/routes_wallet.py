@@ -39,6 +39,7 @@ from ..wallet.errors import (
     WalletPolicyDenied,
     WalletProviderNotFound,
     WalletTransportError,
+    WalletQuoteError,
 )
 
 
@@ -299,11 +300,12 @@ def _configure_wallet_binding(
     balances: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     name = (provider or "").strip().lower() or None
-    if name and name not in wallet_mod.PROVIDERS:
+    catalog=wallet_mod.provider_catalog(_workspace(client))
+    if name and name not in catalog:
         return {
             "ok": False,
             "error": "unknown_provider",
-            "known": sorted(wallet_mod.PROVIDERS.keys()),
+            "known": sorted(catalog),
         }
     provider_cfg = config if isinstance(config, dict) else {}
     patch: dict[str, Any] = {}
@@ -398,8 +400,8 @@ def _safe_secret_part(value: str) -> str:
     return "".join(out).strip("._-") or "default"
 
 
-def _wallet_schema(provider: str) -> list[dict[str, Any]]:
-    entry = wallet_mod.PROVIDERS.get(provider) or {}
+def _wallet_schema(provider: str,workspace=None) -> list[dict[str, Any]]:
+    entry = wallet_mod.provider_catalog(workspace).get(provider) or {}
     fields = list(entry.get("credential_fields") or [])
     fields.extend(list(entry.get("advanced_credential_fields") or []))
     return [dict(f) for f in fields]
@@ -433,7 +435,7 @@ def _vaultify_wallet_config(
     credentials are vaultified instead of being persisted in plaintext.
     """
 
-    schema = {f.get("name"): f for f in _wallet_schema(provider)}
+    schema = {f.get("name"): f for f in _wallet_schema(provider,_workspace(client))}
     out: dict[str, Any] = {}
     stored: list[dict[str, Any]] = []
     vault: SecretVault | None = None
@@ -1348,12 +1350,14 @@ def routes():
     def status(client, payload):
         name = (payload.get("provider") or "").strip().lower() \
             or (client.config.data.get("wallet") or {}).get("provider")
-        if not name:
+        if not name and not payload.get('wallet_id') and not payload.get('account_id'):
             return {"provider": None, "ready": False,
                     "reason": "no wallet provider selected"}
         try:
+            from ..wallet.bindings import resolve_binding
+            wallet_id,name,cfg=resolve_binding(client.config,payload)
             p = wallet_mod.build_provider(
-                name, _wallet_cfg(client, name),
+                name, cfg,
                 workspace=_workspace(client),
             )
         except WalletProviderNotFound as exc:
@@ -1364,6 +1368,7 @@ def routes():
             return {"provider": name, "ready": False,
                     "error": "wallet_config_error", "reason": str(exc)}
         r = p.readiness().to_dict()
+        r['wallet_id']=wallet_id
         r["active"] = (name == (client.config.data.get("wallet") or {}).get("provider"))
         try:
             caps = p.capabilities()
@@ -1431,33 +1436,12 @@ def routes():
         )
 
     def quote(client, payload):
-        name = (payload.get("provider") or "").strip().lower() \
-            or (client.config.data.get("wallet") or {}).get("provider")
-        if not name:
-            return {"ok": False, "error": "no_provider_selected"}
+        from ..wallet.swap_approval import prepare_swap
         try:
-            p = wallet_mod.build_provider(
-                name, _wallet_cfg(client, name), workspace=_workspace(client),
-            )
-            result = p.quote(
-                chain=str(payload.get("chain") or "ethereum"),
-                token_in=str(payload.get("token_in") or ""),
-                token_out=str(payload.get("token_out") or ""),
-                amount_in=float(payload.get("amount_in") or 0.0),
-                slippage_bps=int(payload.get("slippage_bps") or 50),
-                **{k: v for k, v in payload.items()
-                   if k not in {"provider", "chain", "token_in", "token_out",
-                                 "amount_in", "slippage_bps"}},
-            )
-            return {"ok": True, "quote": result.to_dict()}
-        except WalletDependencyError as exc:
-            return {"ok": False, "error": "dependency_missing",
-                    "provider": exc.provider, "missing": exc.missing,
-                    "install_hint": exc.install_hint}
-        except WalletPolicyDenied as exc:
-            return {"ok": False, "error": "policy_denied", "reason": str(exc)}
-        except Exception as exc:  # pragma: no cover
-            return {"ok": False, "error": "provider_error", "reason": str(exc)}
+            request,quote = prepare_swap(client.config,payload)
+            return {"ok":True,"quote":quote,"wallet_id":request.get('wallet_id')}
+        except (ValueError,WalletPolicyDenied,WalletQuoteError) as exc:
+            return {"ok":False,"error":"quote_unavailable","reason":str(exc)}
 
     def swap(client, payload):
         if not client.config.live_trading_enabled():
@@ -1499,21 +1483,23 @@ def routes():
         except Exception as exc:  # pragma: no cover
             return {"ok": False, "error": "provider_error", "reason": str(exc)}
 
+    def execution_status(client,payload):
+        from ..wallet.swap_approval import reconcile_execution
+        return reconcile_execution(client.config,str(payload.get('execution_id') or payload.get('approval_id') or ''))
+
     def balance(client, payload):
-        name = (payload.get("provider") or "").strip().lower() \
-            or (client.config.data.get("wallet") or {}).get("provider")
-        if not name:
-            return {"ok": False, "error": "no_provider_selected"}
         try:
+            from ..wallet.bindings import resolve_binding
+            wallet_id,name,cfg=resolve_binding(client.config,payload)
             p = wallet_mod.build_provider(
-                name, _wallet_cfg(client, name), workspace=_workspace(client),
+                name, cfg, workspace=_workspace(client),
             )
             result = p.get_balance(
                 chain=str(payload.get("chain") or "ethereum"),
                 address=str(payload.get("address") or ""),
                 token=str(payload.get("token") or ""),
             )
-            return {"ok": True, "balance": result.to_dict()}
+            return {"ok": True, "wallet_id":wallet_id, "balance": result.to_dict()}
         except WalletDependencyError as exc:
             return {"ok": False, "error": "dependency_missing",
                     "provider": exc.provider, "missing": exc.missing,
@@ -1529,19 +1515,18 @@ def routes():
         market = str(payload.get("market") or payload.get("symbol") or "").strip()
         interval = str(payload.get("interval") or "1h")
         limit = int(payload.get("limit") or 100)
+        window={k:int(payload[k]) for k in ('start','end') if payload.get(k) is not None}
         if not ((chain and token) or market):
             return {"ok": False, "error": "chain_token_or_market_required"}
         provider = str(payload.get("provider") or "").strip().lower()
         wallet_id = str(payload.get("wallet_id") or "").strip()
-        if provider or wallet_id:
-            selected = None
-            for binding in wallet_mod.list_configured_providers(client.config.data):
-                if wallet_id and binding.get("wallet_id") != wallet_id:
-                    continue
-                if provider and binding.get("provider") != provider:
-                    continue
-                selected = binding
-                break
+        if provider or wallet_id or payload.get('account_id'):
+            from ..wallet.bindings import resolve_binding
+            try:
+                wid,name,cfg=resolve_binding(client.config,payload)
+                selected={'wallet_id':wid,'provider':name,'config':cfg}
+            except WalletPolicyDenied as exc:
+                return {'ok':False,'error':'policy_denied','reason':str(exc)}
             if selected is not None:
                 try:
                     p = wallet_mod.build_provider(
@@ -1553,12 +1538,12 @@ def routes():
                     market_fetcher = getattr(p, "get_market_klines", None)
                     if chain and token and callable(token_fetcher):
                         candles = token_fetcher(
-                            chain=chain, token=token, interval=interval, limit=limit,
+                            chain=chain, token=token, interval=interval, limit=limit, **window,
                         )
                         source_market = f"{chain}:{token}"
                     elif market and callable(market_fetcher):
                         candles = market_fetcher(
-                            market=market, interval=interval, limit=limit,
+                            market=market, interval=interval, limit=limit, **window,
                         )
                         source_market = market
                     else:
@@ -1590,7 +1575,7 @@ def routes():
                     return {"ok": False, "error": "provider_error", "reason": str(exc)}
         if not chain or not token:
             return {"ok": False, "error": "chain_and_token_required_for_fallback"}
-        candles = fetch_token_klines(chain, token, interval=interval, limit=limit)
+        candles = fetch_token_klines(chain, token, interval=interval, limit=limit, **window)
         return {"ok": True, "chain": chain, "token": token,
                 "interval": interval, "count": len(candles),
                 "candles": candles, "source": "geckoterminal"}
@@ -1930,6 +1915,7 @@ def routes():
         ("POST", "/wallet/configure", configure),
         ("POST", "/wallet/quote", quote),
         ("POST", "/wallet/swap", swap),
+        ("POST", "/wallet/execution", execution_status),
         ("POST", "/wallet/balance", balance),
         ("POST", "/wallet/klines", klines),
         ("POST", "/wallet/portfolio", portfolio),

@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from ..llm.attempt_budget import AttemptBudget, DEFAULT_EXTRA_ATTEMPT_LIMIT
 from ..llm.messages import MessagesResponse
-from ..llm.model_registry import lookup as _model_registry_lookup
+from ..llm.model_registry import context_window_limit, resolve_context_window
 from ..tools.types import (
     ContextModifier,
     ToolError,
@@ -131,6 +131,11 @@ class LoopUsage:
     prompt_tokens_last: int = 0
     compaction_count: int = 0
     reactive_compaction_count: int = 0
+    requested_context_window: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.requested_context_window is None:
+            self.requested_context_window = self.context_window
 
     @property
     def total_tokens(self) -> int:
@@ -196,17 +201,17 @@ class LoopUsage:
             "usd": usd,
         })
 
-        if self.context_window <= 0 and (provider or model):
-            try:
-                self.context_window = int(
-                    _model_registry_lookup(provider, model).context_window or 0
-                )
-            except Exception:
-                self.context_window = 0
+        if response.requested_context_window is not None:
+            self.requested_context_window = response.requested_context_window
+        if provider or model:
+            self.context_window = resolve_context_window(
+                provider, model, self.requested_context_window, response.context_window,
+            )
 
     def asdict(self) -> dict[str, Any]:
         return {
             "context_window": self.context_window,
+            "requested_context_window": self.requested_context_window,
             "llm_calls": self.llm_calls,
             "input_tokens_total": self.input_tokens_total,
             "output_tokens_total": self.output_tokens_total,
@@ -224,6 +229,7 @@ class LoopUsage:
         data = dict(value or {})
         return cls(
             context_window=max(0, int(data.get("context_window") or 0)),
+            requested_context_window=max(0, int(data.get("requested_context_window", data.get("context_window")) or 0)),
             llm_calls=max(0, int(data.get("llm_calls") or 0)),
             input_tokens_total=max(0, int(data.get("input_tokens_total") or 0)),
             output_tokens_total=max(0, int(data.get("output_tokens_total") or 0)),
@@ -252,6 +258,7 @@ class LoopUsage:
             "output_tokens_total": self.output_tokens_total,
             "prompt_tokens_last": self.prompt_tokens_last,
             "context_window": self.context_window,
+            "requested_context_window": int(self.requested_context_window or 0),
             "compaction_count": self.compaction_count,
             "reactive_compaction_count": self.reactive_compaction_count,
             "provider": self.provider,
@@ -670,6 +677,13 @@ class LoopRunState:
                 context_window=int(config.model_context_window or 0),
                 attempt_limit=int(config.max_extra_llm_attempts_per_turn),
             )
+            state.usage.requested_context_window = (
+                config.requested_model_context_window
+                if config.requested_model_context_window is not None else int(config.model_context_window or 0)
+            )
+            state.usage.context_window = resolve_context_window(
+                config.model_provider or "", config.model_id or "", config.model_context_window,
+            )
             for prior in prior_messages or []:
                 if not isinstance(prior, dict) or prior.get("role") not in {"user", "assistant"}:
                     continue
@@ -688,6 +702,16 @@ class LoopRunState:
         if explicit_id and cp.turn_id and explicit_id != cp.turn_id:
             raise ValueError(f"turn checkpoint mismatch: requested={explicit_id!r} checkpoint={cp.turn_id!r}")
         state = cls.from_checkpoint(cp)
+        state.usage.context_window = context_window_limit(
+            state.usage.context_window, config.model_context_window,
+        )
+        if config.requested_model_context_window:
+            state.usage.requested_context_window = context_window_limit(
+                state.usage.requested_context_window, config.requested_model_context_window,
+            )
+        # Every continuation call uses config.model_options(); keep the saved
+        # caller cap there too so a response cannot reset it to auto (zero).
+        config.requested_model_context_window = state.usage.requested_context_window
         waiting_since=cp.control.get("user_wait_started_at")
         if cp.terminal.get("stop_reason")=="user_input_pending" and isinstance(waiting_since,(int,float)) and state.deadline_epoch is not None:
             state.deadline_epoch += max(0,now-float(waiting_since))
@@ -725,7 +749,7 @@ class LoopRunState:
             blocked = APPROVAL_PENDING_REASON
         elif self.stop_reason == "user_input_pending":
             blocked = ""
-        elif self.iterations >= config.max_iterations:
+        elif self.iterations >= config.iteration_limit:
             blocked = "max_iterations"
         elif self.deadline_epoch is not None and now >= self.deadline_epoch:
             blocked = "runtime_wall_time_exceeded"

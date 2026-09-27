@@ -208,24 +208,23 @@ def test_auto_apply_lane_flag_is_protected_scope(tmp_path):
         )
 
 
-def test_skills_enabled_is_a_valid_self_config_target(tmp_path):
+def test_skills_enabled_is_not_a_self_config_proposal_target(tmp_path):
     paths = WorkspacePaths(tmp_path)
-    prop = propose_core_config_patch(
-        paths,
-        target="skills/enabled.yml",
-        summary="enable the research skill",
-        config_after={"enabled": ["trading", "research", "self_modify"]},
-        current_config={"enabled": ["trading"]},
-    )
-    assert prop.kind == "core_config_patch"
-    assert (prop.path / "after" / "skills" / "enabled.yml").exists()
+    with pytest.raises(ValueError, match="not allowed for self-config patches"):
+        propose_core_config_patch(
+            paths,
+            target="skills/enabled.yml",
+            summary="enable the research skill",
+            config_after={"enabled": ["trading", "research", "self_modify"]},
+            current_config={"enabled": ["trading"]},
+        )
 
 
-def test_skills_enabled_direct_write_requires_proposal_tool():
+def test_skills_enabled_direct_write_redirects_to_skill_manage():
     from nerya.tools.native.file_ops import _proposal_required_tools
 
     assert _proposal_required_tools("skills/enabled.yml") == [
-        "evolve_core_config_patch"
+        "skill_manage"
     ]
 
 

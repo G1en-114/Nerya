@@ -2,6 +2,9 @@
 import { useEffect, useState } from "react";
 import { ApiError, callApi } from "../../lib/clientApi";
 import type { Connection, RuntimeInfo, SessionView } from "../../lib/workbench";
+import { getWorkspaceIdentity, setWorkspaceIdentity } from "../../lib/workspaceIdentity";
+import { deleteThreadLocally } from "../../lib/chat";
+import { clearChatDraft } from "../../lib/chatDraft";
 
 let runtimeRequest: Promise<RuntimeInfo> | undefined;
 let runtimeExpires=0;
@@ -9,8 +12,9 @@ export function getRuntimeInfo() {
   if(Date.now()>runtimeExpires){runtimeRequest=undefined;runtimeExpires=Date.now()+10000;}
   return runtimeRequest ??= callApi<RuntimeInfo>("/runtime/info").then(info => {
     if (info.protocol_version !== 1 || !Array.isArray(info.capabilities) || !info.capabilities.includes("conversation_commands") || !info.capabilities.includes("session_view")) throw new Error("runtime_incompatible");
+    setWorkspaceIdentity(info.workspace_id);
     return info;
-  }).catch(error => { runtimeRequest = undefined; throw error; });
+  }).catch(error => { runtimeRequest = undefined; setWorkspaceIdentity(null); throw error; });
 }
 
 export function useWorkbench(sessionId?: string) {
@@ -28,7 +32,17 @@ export function useWorkbench(sessionId?: string) {
         let view: SessionView | null = null;
         if (sessionId) {
           try { view = await callApi<SessionView>("/agent/sessions/view?session_id="+encodeURIComponent(sessionId), {signal:controller.signal}); }
-          catch (error) { if (!(error instanceof ApiError && error.status === 404)) throw error; }
+          catch (error) {
+            const payload = error instanceof ApiError && error.payload && typeof error.payload === "object" ? error.payload as Record<string, unknown> : {};
+            if (error instanceof ApiError && error.status === 410 && payload.error === "session_deleted") {
+              // Deletion by another tab/client is authoritative, not a network
+              // outage. Do not leave obsolete cached strategy cards on screen.
+              if (!stopped && getWorkspaceIdentity() === info.workspace_id) {
+                clearChatDraft(sessionId);
+                deleteThreadLocally(sessionId);
+              }
+            } else if (!(error instanceof ApiError && error.status === 404)) throw error;
+          }
           if (view && (!view.status || view.session_id !== sessionId)) throw new Error("runtime_incompatible");
         }
         active=Boolean(view&&["running","stopping","queued"].includes(view.status.execution));

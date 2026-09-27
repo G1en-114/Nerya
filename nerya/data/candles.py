@@ -312,6 +312,7 @@ def _canonical_venue(venue: str) -> str:
         "BYREAL_SOLANA": "BYREAL_ONCHAIN",
         "BYREAL_ONCHAIN": "BYREAL_ONCHAIN",
         "ONCHAIN": "ONCHAIN",
+        'PM':'POLYMARKET','POLYMARKET_V2':'POLYMARKET',
         "PAPER": "PAPER",
         "MOCK": "MOCK",
         "EQUITY": "YAHOO",
@@ -368,6 +369,8 @@ def canonical_venue(venue: str) -> str:
 
 
 def _market_for_venue(market: str, venue: str) -> str:
+    if _canonical_venue(venue)=='POLYMARKET':
+        return 'POLYMARKET:'+market.split(':',1)[-1]
     tail = _tail_symbol(market)
     return f"{_canonical_venue(venue)}:{tail}" if venue else market
 
@@ -583,12 +586,17 @@ def _fetch_wallet_market_klines(
         try:
             from .onchain_klines import fetch_token_klines
 
-            return fetch_token_klines(
+            rows = fetch_token_klines(
                 chain,
                 token,
                 interval=interval,
                 limit=count,
-            ), ""
+                start=start, end=end,
+            )
+            if start is not None or end is not None:
+                rows = [row for row in rows if (start is None or int(row.get("ts",0)) >= start)
+                        and (end is None or int(row.get("ts",0)) <= end)]
+            return rows, ""
         except Exception as exc:
             return [], f"{type(exc).__name__}: {exc}"
 
@@ -1055,6 +1063,10 @@ def _fetch_kraken_rest_pages(
 
 def _fetch_public_rest_ticker(venue: str, market: str) -> dict[str, Any]:
     v = _canonical_venue(venue)
+    if v=='POLYMARKET':
+        from ..connectors.polymarket import PolymarketConnector
+        t=PolymarketConnector().get_ticker(market)
+        return {**t.asdict(),'price':t.last or t.mid}
     if v == "YAHOO":
         from ..connectors.yahoo import YahooFinanceConnector
 
@@ -1113,6 +1125,22 @@ def fetch_public_ticker(
     """Fetch a live ticker/mark snapshot using dynamic workspace candidates."""
 
     err = ""
+    venue=_canonical_venue(_venue_of(market))
+    if venue in set(_wallet_market_data_source_by_canonical()) | {'ONCHAIN'}:
+        usd_market=market
+        if venue=='BYREAL_ONCHAIN':
+            parts=market.split(':',2)
+            if len(parts)!=3 or '@' not in parts[2]:
+                return {'price':0.0,'_envelope':degraded_envelope('ticker',error='byreal_usd_price_requires_pool_and_mint',venue=venue).as_dict()}
+            usd_market='ONCHAIN:'+parts[1]+':'+parts[2].split('@',1)[1]
+        rows=fetch_candles(usd_market,interval='1m',count=1,config_like=config_like,allow_mock=False)
+        if rows and rows[-1].get('price_currency','USD')=='USD':
+            row=rows[-1];price=float(row['close'])
+            return {'price':price,'last':price,'mid':price,'ts_ms':int(row['ts'])*1000,
+                'age_s':max(0,time.time()-int(row['ts'])),'price_currency':'USD',
+                'source':(row.get('_envelope') or {}).get('source'),
+                '_envelope':row.get('_envelope') or degraded_envelope('ticker',error='missing_provenance').as_dict()}
+        return {'price':0.0,'_envelope':degraded_envelope('ticker',error='no_live_usd_candles',venue=venue).as_dict()}
     for venue in _candidate_venues(market, config_like):
         if venue in {"MOCK", "PAPER"}:
             continue
@@ -1133,7 +1161,7 @@ def fetch_public_ticker(
                     "last": snap.get("last") or snap.get("price"),
                     "spread_bps": snap.get("spread_bps"),
                     "ts_ms": snap.get("ts_ms"),
-                    "age_s": 0,
+                    "age_s": max(0,time.time()-float(snap.get('ts_ms') or time.time()*1000)/1000) if venue=='POLYMARKET' else 0,
                     "source": env.source,
                     "_envelope": env.as_dict(),
                 }
@@ -1186,6 +1214,15 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
     venue = _venue_of(market)
     err = ""
     wallet_market_venues = set(_wallet_market_data_source_by_canonical().keys())
+    if _canonical_venue(venue)=='POLYMARKET':
+        from ..connectors.polymarket import PolymarketConnector
+        try:
+            rows=_connector_get_klines(conn or PolymarketConnector(),market,interval=interval,count=count,start=start,end=end)
+            candles=[{'ts':int(r[0])//1000,'open':r[1],'high':r[2],'low':r[3],'close':r[4],'volume':0,
+                      'data_kind':'price_samples','volume_available':False,'price_currency':'PUSD'} for r in rows]
+            return tag_list_envelope(candles,live_envelope(source='polymarket_clob',venue='polymarket'))
+        except Exception as exc:
+            return tag_list_envelope([],degraded_envelope('polymarket_clob',error=str(exc),venue='polymarket'))
     if _canonical_venue(venue) in (wallet_market_venues | {"ONCHAIN"}):
         rows, wallet_err = _fetch_wallet_market_klines(
             market,

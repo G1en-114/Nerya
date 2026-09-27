@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: sec_filings
+metadata:
+  nerya:
+    catalog_parent: equity_research
 description: "Use to list, fetch, and read SEC filing sections such as 10-K, 10-Q, 8-K, S-1, risk factors, MD&A, and financial statements; includes Financial Datasets credential setup."
 version: 0.1.0
 license: MIT

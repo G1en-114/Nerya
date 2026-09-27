@@ -179,6 +179,7 @@ def candle_chart_from_rows(
     subtitle: Optional[str] = None,
     insights: Iterable[str] = (),
     as_of: str = "",
+    overlays: Iterable[Any] = (),
 ) -> Optional[dict[str, Any]]:
     """Build an OHLCV candlestick ChartBlock dict from row-shaped data.
 
@@ -225,6 +226,7 @@ def candle_chart_from_rows(
         title=title,
         subtitle=subtitle,
         series=[{"type": "candlestick", "name": "ohlc", "data": candles}],
+        overlays=overlays,
         source={"skill": skill, "action": action, "as_of": as_of},
         path=path,  # type: ignore[arg-type]
         ctx=ctx,

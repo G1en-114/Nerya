@@ -1,0 +1,15 @@
+{
+  "name": "nerya-desktop",
+  "version": "1.0.0-beta.1",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build --features custom-protocol",
+    "prepare:runtime": "node scripts/prepare.mjs",
+    "installer:mac": "npm run build -- --bundles app && node scripts/installer.mjs",
+    "test": "python3 -m unittest discover -s tests -v"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

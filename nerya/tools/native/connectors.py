@@ -122,6 +122,8 @@ MARKET_DATA_SCHEMA: dict[str, Any] = {
         "action": {
             "type": "string",
             "enum": [
+                "ranked_universe",
+                "list_symbols",
                 "get_ticker",
                 "get_mark_price",
                 "get_candles",
@@ -130,14 +132,19 @@ MARKET_DATA_SCHEMA: dict[str, Any] = {
                 "compress_context",
             ],
             "description": (
-                "Read-only market-data action. Use get_candles for OHLCV, "
+                "Read-only market-data action. For requests like top N coins by "
+                "market cap, use ranked_universe: it fetches one authoritative "
+                "ranking and maps it to active venue markets in ONE call. "
+                "Use list_symbols once to map another already-known ranked list; "
+                "use get_candles for OHLCV, "
+                "ranked universe onto active venue markets; use get_candles for OHLCV, "
                 "calculate_features for last-bar indicators, summarize_market "
                 "or compress_context for prompt-ready context."
             ),
         },
         "venue": {
             "type": "string",
-            "description": "Optional venue when market/symbol is unqualified, e.g. binance.",
+            "description": "Optional venue when market/symbol is unqualified. ranked_universe defaults to binance.",
         },
         "market": {
             "type": "string",
@@ -177,6 +184,22 @@ MARKET_DATA_SCHEMA: dict[str, Any] = {
                 "Optional per-request market data timeout in seconds. "
                 "The runtime caps this so slow public feeds degrade quickly."
             ),
+        },
+        "rank_by": {
+            "type": "string",
+            "enum": ["market_cap"],
+            "default": "market_cap",
+            "description": "Ranking field for ranked_universe.",
+        },
+        "quote": {
+            "type": "string",
+            "default": "USDT",
+            "description": "Required quote asset for ranked_universe/list mapping.",
+        },
+        "exclude_stablecoins": {
+            "type": "boolean",
+            "default": False,
+            "description": "Whether ranked_universe skips common USD stablecoins.",
         },
     },
     "required": ["action"],
@@ -836,6 +859,35 @@ def market_data_handler(call: ToolCall, *, config_like: Any | None = None) -> To
     action = str(args.get("action") or "").strip()
     if not action:
         return _usage_error(call, "action is required.")
+    if action == "ranked_universe":
+        venue = str(args.get("venue") or args.get("market") or "binance").strip().lower()
+        if ":" in venue or "/" in venue:
+            venue = ""
+        from ...skills.builtin.markets.scripts.ranked_universe import run as ranked_universe
+
+        data = ranked_universe(
+            venue=venue,
+            count=int(args.get("count") or args.get("limit") or 10),
+            quote=str(args.get("quote") or "USDT"),
+            rank_by=str(args.get("rank_by") or "market_cap"),
+            exclude_stablecoins=bool(args.get("exclude_stablecoins", False)),
+            timeout_s=_market_timeout_s(args),
+        )
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
+    if action == "list_symbols":
+        # The generic market_data surface historically taught callers to put a
+        # venue-qualified value in `market`. Accept a bare venue there as a
+        # compatibility shorthand so one harmless field mix-up does not burn a
+        # tool retry during universe discovery.
+        venue = str(args.get("venue") or args.get("market") or "").strip().lower()
+        if ":" in venue or "/" in venue:
+            venue = ""
+        if not venue:
+            return _usage_error(call, "venue is required for list_symbols.")
+        from ...skills.builtin.markets.scripts.list_symbols import run as list_symbols
+
+        data = list_symbols(venue=venue)
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
     if not (str(args.get("market") or "").strip() or str(args.get("symbol") or "").strip()):
         return _usage_error(
             call,

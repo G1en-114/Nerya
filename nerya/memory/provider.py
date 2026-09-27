@@ -1,45 +1,7 @@
-"""Abstract base class for pluggable Nerya memory providers.
+"""Legacy memory-provider contracts retained for external import compatibility.
 
-The memory subsystem is split into two layers:
-
-1. A **built-in** memory provider (the curated MEMORY.md / USER.md
-   notebook + the embedded fact log) that is *always on*. It owns the
-   data Nerya itself produces and never goes away.
-2. **Optional external providers** (Mem0, Honcho, Hindsight, Supermemory,
-   Letta, ...) that can be plugged in to back the agent with cloud /
-   richer memory stores. At most one external provider is active per
-   workspace at any time.
-
-This module reflects that split: :class:`MemoryProvider` is the contract
-both layers implement. The orchestration that enforces the *exactly
-one builtin + at most one external* rule lives in
-``nerya/memory/manager.py``.
-
-Design notes:
-
-* Methods that *might* talk to a slow remote service (``prefetch``,
-  ``sync_turn``, ``handle_tool_call``) are kept narrow and should be
-  cancellable. ``prefetch`` is the only call the manager fires on the
-  hot path before each turn, so it must time-bound itself.
-* The *system-prompt block* is split into the part injected at the
-  start of each session (``system_prompt_block``) and the part that
-  may be pre-fetched per-turn before the LLM call. The first is
-  **frozen** for prefix-cache stability; the second is wrapped in a
-  ``<memory-context>`` fence by the manager so the model can tell
-  recalled content apart from fresh user input.
-* Tool dispatch is opt-in: a provider returns its own JSON-Schema tool
-  definitions from ``get_tool_schemas`` (e.g. a ``memory`` tool with
-  ``add`` / ``replace`` / ``remove`` actions) and processes the
-  resulting calls in ``handle_tool_call``. Providers that don't offer
-  tools simply return ``[]``.
-* ``initialize`` runs once per session; it's the right place to load
-  state from disk or open a remote connection. The manager treats
-  ``initialize`` failures as recoverable — the provider just gets
-  marked unavailable, it doesn't take Nerya down.
-
-The contract is intentionally Python-narrow (no MyPy ``Protocol``)
-because subclasses elsewhere in the tree may extend it with provider-
-specific helpers, and we want the ``isinstance`` check to be cheap.
+Current Agent recall and writes use MemoryRuntime. These interfaces do not
+register or enable alternative backends in the product.
 """
 
 from __future__ import annotations

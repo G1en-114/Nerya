@@ -220,7 +220,7 @@ class Recorder:
         if not self.permitted or not self.controller.session_id or self.controller.actor != self.actor:
             return {}
         w._sync_pages()
-        return {'visual': dict(self.trace.visual),
+        return {'visual': dict(self.trace.visual), 'viewport': dict(w.viewport),
                 'url': public_url(w.page.url) if w.page and self.controller.allowed(w.page.url) else '',
                 'tabs': [{'id': key, 'url': public_url(p.url) if self.controller.allowed(p.url) else '[not authorized]',
                           'selected': p is w.page} for key, p in w.pages.items() if not p.is_closed()]}
@@ -242,7 +242,7 @@ class Recorder:
             if point is None and self.trace.visual.get('url') == public_url(self.worker.page.url):
                 point = self.trace.visual.get('cursor')
             visual = {'action':action, 'boxes':boxes, 'cursor':point,
-                      'viewport':{'width':1280,'height':800}, 'url':public_url(self.worker.page.url), 'ts':time.time()}
+                      'viewport':dict(self.worker.viewport), 'url':public_url(self.worker.page.url), 'ts':time.time()}
             with _LOCK:
                 self.trace.visual = visual
             self.trace.emit('visual', **visual)
@@ -261,7 +261,7 @@ class Recorder:
             self.channel = channel
             channel.on('Page.screencastFrame', lambda event: self.on_frame(channel, event))
             channel.send('Page.startScreencast', {'format': 'jpeg', 'quality': 55,
-                         'maxWidth': 1280, 'maxHeight': 800, 'everyNthFrame': 1})
+                         'maxWidth': self.worker.viewport['width'], 'maxHeight': self.worker.viewport['height'], 'everyNthFrame': 1})
         except Exception:
             self.trace.emit('preview_mode', mode='step_checkpoints')
 

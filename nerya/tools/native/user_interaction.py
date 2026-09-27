@@ -5,7 +5,12 @@ from ...agent.command_store import CommandError
 
 QUESTION_SCHEMA = {"type":"object", "properties":{
     "title":{"type":"string"}, "message":{"type":"string"},
-    "choices":{"type":"array","items":{"type":"string"}}, "multiple":{"type":"boolean"}},"required":["title"]}
+    "questions": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
+        "type": "object", "properties": {
+            "id": {"type": "string"}, "question": {"type": "string"},
+            "options": {"type": "array", "items": {"type": "string"}},
+            "multiple": {"type": "boolean"}}, "required": ["id", "question"]}},
+    },"required":["title", "questions"]}
 PLAN_SCHEMA = {"type":"object", "properties":{
     "title":{"type":"string"}, "message":{"type":"string"},
     **{key:{"type":"array","items":{"type":"string"}} for key in ("steps","deliverables","constraints")}},"required":["title","steps"]}

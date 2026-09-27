@@ -12,9 +12,9 @@
  * here — shipping dependencies is an operator decision; `package.json`
  * and `npm install` are up to them.
  *
- * Build a production copy with:
- *   tsc --outDir dist
- * and point `wallet.<provider>.skill_path` at the directory.
+ * Configure provider=external, command=["node", "/absolute/path/adapter.js"].
+ * Contract v1 is documented by the adapter Skill. Keep describe
+ * fail-closed until quote minimums and receipt lookup are implemented.
  */
 
 const chunks = [];
@@ -31,11 +31,12 @@ process.stdin.on("end", async () => {
     process.exit(2);
   }
   try {
+    if (input.protocol_version !== 1) throw new Error("unsupported_protocol_version");
     const out = await dispatch(input.command, input.payload || {});
-    process.stdout.write(JSON.stringify(out) + "\n");
+    process.stdout.write(JSON.stringify({ protocol_version: 1, ...out }) + "\n");
   } catch (err) {
     process.stdout.write(JSON.stringify({
-      ok: false, reason: String(err && err.stack ? err.stack : err),
+      protocol_version: 1, ok: false, reason: "adapter_operation_failed",
     }) + "\n");
     process.exit(1);
   }
@@ -43,27 +44,22 @@ process.stdin.on("end", async () => {
 
 async function dispatch(command, payload) {
   switch (command) {
+    case "describe":
+      return { swap_chains: [], minimum_output: "unknown", receipt_polling: false };
     case "balance":
-      return {
-        balance: 0,
-        symbol: payload.token || "NATIVE",
-        decimals: 18,
-        note: "stub — wire your TS wallet lib here",
-      };
     case "quote":
-      return {
-        expected_out: 0,
-        min_out: 0,
-        price_impact_bps: 0,
-        gas_cost_usd: 0,
-      };
+    case "candles":
+      throw new Error("read_adapter_not_implemented");
     case "swap":
       return {
         ok: false,
+        status: "failed",
         tx_hash: "",
         amount_out: 0,
         reason: "stub — implement via your TS wallet lib",
       };
+    case "get_execution_status":
+      return { status: "unknown", confirmed: false, reason: "receipt_reader_not_implemented" };
     default:
       return { ok: false, reason: `unknown_command: ${command}` };
   }

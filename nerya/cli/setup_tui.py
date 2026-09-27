@@ -591,62 +591,22 @@ def _step_gateway(ctx: _Ctx) -> None:
 
 
 def _step_memory(ctx: _Ctx) -> None:
-    """Memory backend — default ``builtin`` (notebook)."""
-
-    ctx.console.rule("[bold]4/7 · Memory backend", style="cyan")
-
-    current = _safe(
-        lambda: ctx.client.config.get("memory.backend", "builtin"),
-        on_error="builtin",
-    )
-    ctx.console.print(
-        f"  Current backend: [cyan]{current}[/cyan]. "
-        "Builtin keeps a curated AGENT.md + OPERATOR.md notebook with "
-        "char-bounded entries."
-    )
-
-    if not _ask_yes(ctx, "  Change the memory backend?", default=False):
-        ctx.result.add("Memory", "ok", f"{current} (default)")
-        ctx.console.print()
-        return
-
-    backend = _ask(
-        ctx,
-        "  Backend",
-        default=str(current),
-        choices=["builtin", "memsearch", "agentmemory"],
-    )
-
-    try:
-        _persist_yaml(ctx.client.config, {"memory": {"backend": backend}})
-        ctx.console.print(f"  [green]Saved:[/green] memory.backend = {backend}")
-        ctx.result.add("Memory", "ok", backend)
-    except Exception as exc:  # pragma: no cover — defensive
-        ctx.console.print(f"  [red]Save failed: {exc}[/red]")
-        ctx.result.add("Memory", "error", str(exc))
+    """Built-in learning needs no provider choice or external service."""
+    ctx.console.rule("[bold]4/7 · Memory & learning", style="cyan")
+    ctx.console.print("  Built-in memory: global knowledge, isolated strategies and workflows. No extra service required.")
+    ctx.result.add("Memory", "ok", "builtin")
     ctx.console.print()
 
 
 def _step_browser(ctx: _Ctx) -> None:
-    """Headless browser engine — default off."""
+    """The managed Chromium work browser is built in."""
 
-    ctx.console.rule("[bold]5/7 · Headless browser", style="cyan")
+    ctx.console.rule("[bold]5/7 · Work browser", style="cyan")
     ctx.console.print(
-        "  The browser engine powers web-scraping skills "
-        "(Playwright + Chromium). Default: [cyan]off[/cyan]."
+        "  Nerya uses one managed Chromium work browser. "
+        "There is no browser engine selection or separate browser install step."
     )
-
-    if not _ask_yes(ctx, "  Enable the headless browser engine?", default=False):
-        ctx.result.add("Browser", "skipped", "default: off")
-        ctx.console.print()
-        return
-
-    ctx.console.print(
-        "  Install instructions live at "
-        "[cyan]/browsers[/cyan] in the dashboard.\n"
-        "  Run [cyan]nerya doctor --only browsers[/cyan] to verify."
-    )
-    ctx.result.add("Browser", "warn", "manual install required")
+    ctx.result.add("Browser", "ok", "managed Chromium")
     ctx.console.print()
 
 

@@ -6,7 +6,9 @@ import importlib.util
 import asyncio
 import bisect
 import inspect
+import math
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from .config import BacktestConfig
 from .indicators import compute_indicators
 from .mock_ctx import MockCtx, MockPolicy, MockState, SimpleConfigView, append_jsonl
 from .portfolio import PortfolioState
+from .order_evidence import action_counts
 from .slippage import apply_slippage, compute_fee, fee_bps_for, slip_bps_for
 
 
@@ -38,6 +41,9 @@ class BacktestResult:
     final_portfolio: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     order_attempts: int = 0
+    order_events: list[dict[str, Any]] = field(default_factory=list)
+    execution_mode: str = "script"
+    signals: list[dict[str, Any]] = field(default_factory=list)
 
 
 def settle(
@@ -46,20 +52,35 @@ def settle(
     next_bar_by_market: dict[str, dict[str, Any] | None],
     portfolio: PortfolioState,
     config: BacktestConfig,
+    *,
+    defer_missing: bool = False,
+    policy: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     fills: list[dict[str, Any]] = []
     rejects: list[dict[str, Any]] = []
-    ordered = sorted(pending, key=lambda p: str(p.get("reason") or ""))
+    waiting: list[dict[str, Any]] = []
+    # Explanations are not scheduling priority. Preserve submission order.
+    ordered = list(pending)
     for order in ordered:
         market = str(order.get("market") or "")
         is_exit, order_side = _classify_order(order)
+        quantity_intent = order.get("sdk_method") == "submit_intent"
+        if quantity_intent:
+            is_exit = portfolio.position(market).qty * (1 if order_side == "buy" else -1) < 0
         if config.kill_switch:
             rejects.append(_reject(order, "kill_switch"))
             continue
         if not market or market not in current_bar_by_market:
             rejects.append(_reject(order, "missing_market_bar"))
             continue
-        if not is_exit and portfolio.open_positions_count() >= config.max_open_trades:
+        if defer_missing and next_bar_by_market.get(market) is None:
+            waiting.append(order)
+            continue
+        caps = [config.max_open_trades]
+        policy_cap = int(getattr(policy,"max_open_positions",0) or 0)
+        if policy_cap > 0:
+            caps.append(policy_cap)
+        if not is_exit and abs(portfolio.position(market).qty) <= 1e-12 and portfolio.open_positions_count() >= min(caps):
             rejects.append(_reject(order, "max_open_trades"))
             continue
         slip_bps = slip_bps_for(market, config.slip_bps_by_venue)
@@ -83,13 +104,34 @@ def settle(
         fill_price = apply_slippage(base_price, raw_side, slip_bps)
         size = float(order.get("size") or 0.0)
         size_unit = str(order.get("size_unit") or "usd").lower()
-        if is_exit:
+        if quantity_intent:
+            # A low-level SDK order specifies quantity, not an implicit full
+            # close. The portfolio handles partial reductions and reversals.
+            qty = size if size_unit == "base" else size / fill_price if fill_price else 0.0
+            if not math.isfinite(qty) or qty <= 0:
+                rejects.append(_reject(order, "invalid_size"))
+                continue
+            notional = qty * fill_price
+            after_qty = portfolio.position(market).qty + (qty if raw_side == "buy" else -qty)
+            if raw_side == "sell" and after_qty < -1e-12 and not config.allow_short:
+                rejects.append(_reject(order, "short_not_allowed"))
+                continue
+            fee_preview = compute_fee(notional, fee_bps_for(market, config.fee_bps_by_venue))
+            if raw_side == "buy" and (portfolio.cash or 0.0) < notional + fee_preview:
+                rejects.append(_reject(order, "insufficient_cash"))
+                continue
+        elif is_exit:
             pos = portfolio.position(market)
             qty = abs(pos.qty)
             if qty <= 1e-12:
                 rejects.append(_reject(order, "no_open_position"))
                 continue
+            if (pos.qty > 0 and raw_side != "sell") or (pos.qty < 0 and raw_side != "buy"):
+                rejects.append(_reject(order, "position_side_mismatch"))
+                continue
             reduce_pct = order.get("reduce_pct")
+            if order.get("fixed_base") is not None:
+                qty = min(qty, float(order["fixed_base"]))
             if reduce_pct is not None:
                 qty = qty * max(0.0, min(1.0, float(reduce_pct or 0.0)))
                 if qty <= 1e-12:
@@ -97,6 +139,8 @@ def settle(
                     continue
         else:
             notional = _stake_notional(size, size_unit, fill_price, portfolio, config)
+            if order.get("max_notional_usd") is not None:
+                notional = min(notional, float(order["max_notional_usd"]))
             if notional <= 0.0:
                 rejects.append(_reject(order, "zero_size"))
                 continue
@@ -116,9 +160,19 @@ def settle(
                 rejects.append(_reject(order, "zero_size"))
                 continue
         notional = qty * fill_price
+        if not is_exit and policy is not None:
+            single = float(getattr(policy,"max_single_order_usd",0) or 0)
+            daily = float(getattr(policy,"max_daily_notional_usd",0) or 0)
+            day = int((next_bar or bar).get("ts",0)) // 86400
+            if single > 0 and notional > single + 1e-8:
+                rejects.append(_reject(order,"max_single_order_usd"))
+                continue
+            if daily > 0 and portfolio.daily_notional.get(day,0.0) + notional > daily + 1e-8:
+                rejects.append(_reject(order,"max_daily_notional_usd"))
+                continue
         fee = compute_fee(notional, fee_bps_for(market, config.fee_bps_by_venue))
         fill = {
-            "ts": int(bar.get("ts", 0)),
+            "ts": int((next_bar or bar).get("ts", 0)),
             "market": market,
             "side": raw_side,
             "qty": qty,
@@ -130,11 +184,16 @@ def settle(
             "slippage_usd": abs(fill_price - base_price) * qty,
             "reason": str(order.get("reason") or ""),
             "intent_id": order.get("intent_id"),
+            "signal_ts": order.get("signal_ts"),
+            "order_id": f"{order.get('intent_id')}:fill",
             "forced_close": forced_close,
         }
         portfolio.apply_fill(fill)
+        if order.get("protection") and not is_exit:
+            from .historical_protection import arm
+            arm(portfolio, fill, order["protection"])
         fills.append(fill)
-    pending.clear()
+    pending[:] = waiting
     return fills, rejects
 
 
@@ -147,7 +206,13 @@ def run_backtest(
     run_fn: Any | None = None,
     artefacts_dir: str | Path | None = None,
     strategy_config: dict[str, Any] | None = None,
+    check_cancel: Any | None = None,
+    progress: Any | None = None,
 ) -> BacktestResult:
+    config.validate()
+    if check_cancel:
+        check_cancel()
+    deadline = time.monotonic() + config.max_run_seconds
     if not config.markets:
         config.markets = list(candles_by_market.keys())
     strategy_root = Path(strategy_pkg_path) if strategy_pkg_path else None
@@ -168,11 +233,22 @@ def run_backtest(
     pending: list[dict[str, Any]] = []
     result = BacktestResult(strategy_id=strategy_id, strategy_root=strategy_root, config=config)
     audit_sink = append_jsonl(Path(artefacts_dir) / "logs" / "engine.log") if artefacts_dir else None
-    benchmark_start = _benchmark_value(candles_by_market, config.markets, bar_index[0]) if bar_index else 0.0
+    benchmark_initial: dict[str, float] = {}
+    last_prices: dict[str, float] = {}
     strategy_view, policy_view = _views_from_strategy_config(strategy_id, config, strategy_config)
+    result.execution_mode = "agent" if (strategy_view.extras.get("agent_task") or {}).get("enabled") is True else "script"
     tf_rows = timeframe_candles_by_market or {}
+    previous: dict[str, dict[str, Any]] = {}
 
     for i, ts in enumerate(bar_index):
+        if check_cancel:
+            check_cancel()
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"historical replay exceeded max_run_seconds={config.max_run_seconds} at bar {i}")
+        if progress and i % 64 == 0:
+            progress({"phase": "replaying", "bars_processed": i, "bars_total": len(bar_index),
+                      "bar_ts": ts, "orders_attempted": result.order_attempts, "fills": len(result.trades)})
+        bar_fills: list[dict[str, Any]] = []
         current: dict[str, dict[str, Any]] = {}
         next_bars: dict[str, dict[str, Any] | None] = {}
         for market, rows in candles_by_market.items():
@@ -181,19 +257,52 @@ def run_backtest(
                 continue
             current[market] = rows[idx]
             next_bars[market] = rows[idx + 1] if idx + 1 < len(rows) else None
+        # Book the previous decision only when its execution bar arrives.
+        # No future opening price or future fill enters the current context.
+        if pending:
+            fills, rejects = settle(pending, previous, current, portfolio, config, defer_missing=True, policy=policy_view)
+            bar_fills = fills
+            result.trades.extend(fills)
+            result.rejected_signals.extend(rejects)
+            for fill in fills:
+                _sync_state_after_fill(state, portfolio, str(fill["market"]))
+        from .historical_protection import settle_protections
+        protective_fills = settle_protections(portfolio, current, config)
+        result.trades.extend(protective_fills)
+        bar_fills.extend(protective_fills)
+        for fill in protective_fills:
+            _sync_state_after_fill(state, portfolio, str(fill["market"]))
+        prices = {m: float(b.get("close", 0.0)) for m, b in current.items()}
+        if prices:
+            last_prices.update(prices)
+            # 预热数据只用于指标，不能提前开始基准收益；否则策略和买入持有
+            # 比较的起点不同，且报告会把预热天数算进用户指定的回测窗口。
+            if i >= config.warmup_bars:
+                portfolio.mark_to_market(ts, last_prices)
+                for m, price in prices.items():
+                    if price > 0:
+                        benchmark_initial.setdefault(m, price)
+                ratios = [last_prices[m] / benchmark_initial[m] if m in benchmark_initial else 1.0 for m in config.markets]
+                result.benchmark_series.append((ts, config.initial_capital_usd * sum(ratios) / max(1, len(ratios))))
+        if len(current) < len(config.markets) and "market_data_gaps" not in result.warnings:
+            result.warnings.append("market_data_gaps")
+        previous.update(current)
         if i < config.warmup_bars:
-            prices = {m: float(b.get("close", 0.0)) for m, b in current.items()}
-            if prices:
-                portfolio.mark_to_market(ts, prices)
             continue
+        # Every market callback for this timestamp sees the same historical
+        # prefix. Build it once per timestamp, not once per market. The old
+        # placement inside the market loop multiplied list slicing/copying by
+        # the size of the universe (10 markets => roughly 10x duplicate work).
+        rows_so_far = {
+            m: _rows_until_ts_indexed(rows, ts, row_indexes[m])
+            for m, rows in candles_by_market.items()
+        }
+        tf_rows_so_far = _timeframe_rows_until_ts(
+            tf_rows, rows_so_far, config.tf, ts, timeframe_indexes
+        )
         for market in config.markets:
             if market not in current:
                 continue
-            rows_so_far = {
-                m: _rows_until_ts_indexed(rows, ts, row_indexes[m])
-                for m, rows in candles_by_market.items()
-            }
-            tf_rows_so_far = _timeframe_rows_until_ts(tf_rows, rows_so_far, config.tf, ts, timeframe_indexes)
             # Mirror authoritative NAV into MockState so the strategy's
             # ``ctx.portfolio`` NAV accessors (equity_usd / cash_usd /
             # summary / ledger) return real, current values during replay,
@@ -220,40 +329,70 @@ def run_backtest(
                 timeframe_bars_by_market=tf_rows_so_far,
                 policy_obj=policy_view,
                 config=strategy_view,
+                strategy_root=strategy_root,
             )
-            decision = _resolve_strategy_decision(strategy_run(ctx))
-            result.decisions.append(_decision_row(ts, market, decision))
-            result.order_attempts += len(pending)
-            fills, rejects = settle(pending, current, next_bars, portfolio, config)
-            result.trades.extend(fills)
-            result.rejected_signals.extend(rejects)
-            for fill in fills:
-                _sync_state_after_fill(state, portfolio, str(fill.get("market") or market))
+            pending_before = len(pending)
+            try:
+                decision = _resolve_strategy_decision(strategy_run(ctx))
+            except Exception as exc:
+                exc.market = market
+                exc.bar_ts = ts
+                exc.receipt = {"market": market, "bar_ts": ts, "bars_processed": i,
+                    "orders_attempted": result.order_attempts + len(ctx.trading.attempts),
+                    "recorded_fills": len(result.trades), "performance_evidence": False}
+                raise
+            if result.execution_mode == "agent":
+                from .....strategies.agent_task import prepare_agent_task
+                decision = prepare_agent_task(decision, ctx,
+                    context_config=strategy_view.extras.get("agent_context", {}),
+                    roles=strategy_view.extras.get("subagents", ()))
+            if _status_of(decision) == "error":
+                raise RuntimeError(f"strategy returned error at {ts} ({market}): {_reason_of(decision)}")
+            decision_row = _decision_row(ctx.clock.ts, market, decision)
+            decision_row.update(order_attempts=len(ctx.trading.attempts),
+                orders_submitted=len(pending) - pending_before, action_counts=action_counts(decision))
+            for event in ctx.trading.attempts:
+                event["trigger_market"] = market
+            result.order_events.extend(ctx.trading.attempts)
+            if result.execution_mode == "agent":
+                decision_row["input_sources"] = ", ".join((decision.context.get("published") or {}).keys())
+                decision_row["selected_roles"] = ", ".join(decision.metadata.get("selected_roles", ()))
+                decision_row["agent_execution"] = "not_run"
+            result.decisions.append(decision_row)
+            # Preserve explicit SDK signals as historical chart evidence. Never
+            # infer GBS from an order side or from assistant prose.
+            for event in ctx.audit.events():
+                if event.get("kind") != "strategy.signal":
+                    continue
+                signal = event.get("payload") or {}
+                payload = signal.get("payload") or {}
+                result.signals.append({"ts": ctx.clock.ts, "market": signal.get("market") or market,
+                    "signal_kind": signal.get("signal_kind"), "confidence": signal.get("confidence"),
+                    "reason": signal.get("reasoning_ref"), "price": payload.get("price"),
+                    "label": payload.get("label"), "position": payload.get("position")})
+            result.order_attempts += len(ctx.trading.attempts)
             row = dict(current[market])
             row.update({
                 "market": market,
                 "decision_status": _status_of(decision),
                 "decision_reason": _reason_of(decision),
-                "fills": len(fills),
+                "fills": sum(1 for fill in bar_fills if fill["market"] == market),
                 "cash": portfolio.cash,
                 "equity": portfolio.equity(),
+                "position_qty": portfolio.position(market).qty,
             })
             for name, values in indicators.get(market, {}).items():
                 idx = row_indexes[market].get(ts)
                 row[name] = values[idx] if idx is not None and idx < len(values) else None
             result.ohlcv_rows.append(row)
-        prices = {m: float(b.get("close", 0.0)) for m, b in current.items()}
-        if prices:
-            equity = portfolio.mark_to_market(ts, prices)
-            result.equity_series.append((ts, equity))
-            bench_now = _benchmark_value_from_current(current, config.markets)
-            bench_equity = config.initial_capital_usd
-            if benchmark_start:
-                bench_equity = config.initial_capital_usd * bench_now / benchmark_start
-            result.benchmark_series.append((ts, bench_equity))
 
     if bar_index:
         last_ts = bar_index[-1]
+        if pending:
+            # Explicit legacy end-of-data assumption: signal-close settlement.
+            fills, rejects = settle(pending, previous, {}, portfolio, config, policy=policy_view)
+            result.trades.extend(fills)
+            result.rejected_signals.extend(rejects)
         last_prices = {
             market: float(rows[-1].get("close", 0.0))
             for market, rows in candles_by_market.items()
@@ -265,7 +404,7 @@ def run_backtest(
             side = "sell" if pos.qty > 0 else "buy"
             price = last_prices.get(market, pos.avg_price)
             fill = {
-                "ts": last_ts,
+                "ts": int(candles_by_market[market][-1]["ts"]),
                 "market": market,
                 "side": side,
                 "qty": abs(pos.qty),
@@ -278,11 +417,14 @@ def run_backtest(
                 "reason": "forced_close",
                 "intent_id": "forced_close",
                 "forced_close": True,
+                "engine_generated": True,
             }
             portfolio.apply_fill(fill)
             result.trades.append(fill)
         portfolio.mark_to_market(last_ts, last_prices)
-    result.equity_series = list(portfolio.equity_series)
+    # The last valuation includes forced-close fees; one authoritative value
+    # per timestamp is shared by metrics, CSV and every chart consumer.
+    result.equity_series = list(dict(portfolio.equity_series).items())
     result.final_portfolio = portfolio.snapshot()
     return result
 
@@ -295,7 +437,9 @@ def _load_run_fn(strategy_root: Path | None) -> Any:
         # script execution. Replay still receives only the isolated MockCtx.
         from .....strategies.package import load_package_from_dir
         from .....strategies.runner import StrategyRunner
-        return StrategyRunner._load_entrypoint(load_package_from_dir(strategy_root))
+        from .....strategies.agent_task_mode import agent_task_requested
+        package = load_package_from_dir(strategy_root)
+        return StrategyRunner._load_entrypoint(package, prefer_agent_builder=agent_task_requested(package.manifest))
     main_path = strategy_root / "main.py"
     module_name = f"nerya_backtest_{strategy_root.name}"
     spec = importlib.util.spec_from_file_location(module_name, main_path)
@@ -349,7 +493,9 @@ def _timeframe_rows_until_ts(
     for market, by_tf in timeframe_candles_by_market.items():
         target = out.setdefault(market, {})
         for tf, rows in by_tf.items():
-            target[tf] = _rows_until_ts_indexed(rows, ts, timeframe_indexes.get(market, {}).get(tf) or _ts_index(rows))
+            from .data_cache import _tf_seconds
+            latest_open = ts + _tf_seconds(primary_tf) - _tf_seconds(tf)
+            target[tf] = _rows_until_ts_indexed(rows, latest_open, timeframe_indexes.get(market, {}).get(tf) or _ts_index(rows))
     return out
 
 
@@ -504,4 +650,3 @@ def _benchmark_value_from_current(current: dict[str, dict[str, Any]], markets: l
         if row:
             vals.append(float(row.get("close", 0.0)))
     return sum(vals) / len(vals) if vals else 0.0
-

@@ -1,0 +1,8 @@
+node_modules/
+runtime/
+.runtime-build-*/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/icons/
+__pycache__/
+tests/__pycache__/

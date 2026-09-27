@@ -173,7 +173,9 @@ def test_install_skill_records_script_scan_findings(tmp_path) -> None:
 
     assert report.static_findings
     assert report.static_findings[0]["rule_id"] == "dangerous-script-pattern"
-    report_path = paths.skills_pending / "script_skill" / "install_report.json"
+    assert report.installed_at == paths.skills_installed / "script_skill"
+    assert not (paths.skills_pending / "script_skill").exists()
+    report_path = paths.skills_installed / "script_skill" / "install_report.json"
     report_json = report_path.read_text(encoding="utf-8")
     assert "dangerous-script-pattern" in report_json
 

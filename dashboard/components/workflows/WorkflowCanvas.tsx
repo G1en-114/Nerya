@@ -1,44 +1,36 @@
 "use client";
 
 import { ChoiceSelect } from "../ChoiceSelect";
+import { Icon as NeryaGlyph } from "../icons";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent } from "react";
 import { useLocale } from "next-intl";
+import { copy as i18nCopy, type ResourceTranslator } from "../../lib/i18n";
 import type { WorkflowEdge, WorkflowGraph, WorkflowKind, WorkflowNode, WorkflowPosition } from "../../lib/workflowTypes";
 import styles from "./WorkflowStudio.module.css";
 import { cardTitle, cardPurpose, cardFacts } from "../../lib/workflowPresentation";
+import { RoleAvatar } from "../RoleAvatar";
+import { resolveWorkflowRole } from "../../lib/roleAvatars";
 
-export function useWorkflowText() {
-  const locale = useLocale();
-  return useCallback((zh: string, en: string) => locale.toLowerCase().startsWith("zh") ? zh : en, [locale]);
+export function useWorkflowText(): ResourceTranslator {
+  const zh = useLocale().toLowerCase().startsWith("zh");
+  return useCallback((key: string, values?: Record<string, unknown>) =>
+    i18nCopy(zh, key, values), [zh]);
 }
-const KIND_NAMES: Record<WorkflowKind, [string, string]> = {
-  strategy: ["策略", "Strategy"], source: ["数据源", "Data source"], script: ["脚本", "Script"],
-  agent: ["Agent", "Agent"], scheduler: ["调度器", "Scheduler"], account: ["账户", "Account"],
-  risk: ["风控", "Risk gate"], evidence: ["复盘证据", "Evidence"], proposal: ["变更提案", "Proposal"],
-  validation: ["验证", "Validation"], approval: ["人工审批", "Approval"], apply: ["版本应用", "Apply"], observation: ["持续观察", "Observation"],
+const KIND_NAMES: Record<WorkflowKind, string> = { strategy: "copy.workflowKinds.001", source: "copy.workflowKinds.002", script: "copy.workflowKinds.003", agent: "copy.workflowKinds.004", scheduler: "copy.workflowKinds.005", account: "copy.workflowKinds.006", risk: "copy.workflowKinds.007", evidence: "copy.workflowKinds.008", proposal: "copy.workflowKinds.009", validation: "copy.workflowKinds.010", approval: "copy.workflowKinds.011", apply: "copy.workflowKinds.012", observation: "copy.workflowKinds.013" };
+export function kindName(kind: WorkflowKind, t: ResourceTranslator) {
+  return t(KIND_NAMES[kind]);
+}
+// Node semantics are shared; graph connectors below remain data visualisations.
+const NODE_ICONS: Record<WorkflowKind, import('../icons').IconName> = {
+  strategy: 'strategies', source: 'globe', script: 'code', agent: 'agents',
+  scheduler: 'clock', account: 'wallet', risk: 'shield', evidence: 'document',
+  proposal: 'filePlus', validation: 'circleCheck', approval: 'shield',
+  apply: 'save', observation: 'refresh',
 };
-export function kindName(kind: WorkflowKind, t: (zh: string, en: string) => string) {
-  return t(...KIND_NAMES[kind]);
-}
 export function WorkflowIcon({ kind, size = 18 }: { kind: WorkflowKind; size?: number }) {
-  const paths: Record<string, string> = {
-    strategy: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
-    source: "M4 6c0-4 16-4 16 0s-16 4-16 0v12c0 4 16 4 16 0V6 M4 12c0 4 16 4 16 0",
-    script: "m8 6-6 6 6 6 M16 6l6 6-6 6 M14 3l-4 18",
-    agent: "M5 7h14v13H5z M12 3v4 M9 12h.01 M15 12h.01 M9 16h6 M2 11v5 M22 11v5",
-    scheduler: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2",
-    account: "M3 5h16v4 M3 5v15h18V9H3 M16 13h5v4h-5z",
-    risk: "m12 2 8 4v6c0 5-8 10-8 10S4 17 4 12V6z m-4 10 3 3 5-6",
-    evidence: "M5 3h14v18H5z M8 7h8 M8 11h8 M8 15h5",
-    proposal: "M4 4h10v16H4z M17 3v9 M13 7h8 M7 9h4 M7 13h4",
-    validation: "m3 12 5 5 12-12 M4 3h5 M3 3v5 M21 16v5h-5",
-    approval: "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M2 21v-3a7 7 0 0 1 11-5 M14 18l3 3 5-7",
-    apply: "M3 3h18v18H3z M7 3v6h10V3 M7 21v-8h10v8",
-    observation: "M3 12a9 9 0 0 1 16-6 M21 3v5h-5 M21 12A9 9 0 0 1 5 18 M3 21v-5h5",
-  };
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[kind]} /></svg>;
+  return <NeryaGlyph name={NODE_ICONS[kind]} size={size} />;
 }
 export function nodeSummary(node: WorkflowNode) {
   if (node.description) return node.description;
@@ -147,17 +139,17 @@ export function WorkflowCanvas({ graph, selectedId, onSelect, onMove, onConnect,
   }
   return <div className={styles.canvasWrap}>
     <div className={styles.canvasToolbar}>
-      <ChoiceSelect aria-label={t("定位节点", "Find a node")} value={nodeFilter} onValueChange={(value) => { setNodeFilter(value); focusNode(value); }}>
-        <option value="">{t("定位节点…", "Find a node…")}</option>
+      <ChoiceSelect aria-label={t("copy.components_workflows_WorkflowCanvas.001")} value={nodeFilter} onValueChange={(value) => { setNodeFilter(value); focusNode(value); }}>
+        <option value="">{t("copy.components_workflows_WorkflowCanvas.002")}</option>
         {graph.nodes.map((node) => <option key={node.id} value={node.id}>{kindName(node.kind, t)} · {cardTitle(node, t)}</option>)}
       </ChoiceSelect>
       <span className={styles.toolbarSpacer} />
-      <button type="button" onClick={() => zoomBy(1 / 1.2)} aria-label={t("缩小", "Zoom out")}>−</button>
+      <button type="button" onClick={() => zoomBy(1 / 1.2)} aria-label={t("copy.components_workflows_WorkflowCanvas.003")}><NeryaGlyph name="minus" size={18} /></button>
       <span className={styles.zoomLabel}>{Math.round(camera.zoom * 100)}%</span>
-      <button type="button" onClick={() => zoomBy(1.2)} aria-label={t("放大", "Zoom in")}>+</button>
-      <button type="button" onClick={fit}>{t("适应画布", "Fit view")}</button>
+      <button type="button" onClick={() => zoomBy(1.2)} aria-label={t("copy.components_workflows_WorkflowCanvas.004")}><NeryaGlyph name="plus" size={18} /></button>
+      <button type="button" onClick={fit}>{t("copy.components_workflows_WorkflowCanvas.005")}</button>
     </div>
-    <div ref={viewport} className={styles.canvas} data-testid="workflow-canvas" role="region" aria-label={t("工作流画布，可拖动背景平移", "Workflow canvas. Drag the background to pan.")}
+    <div ref={viewport} className={styles.canvas} data-testid="workflow-canvas" role="region" aria-label={t("copy.components_workflows_WorkflowCanvas.006")}
       onPointerDown={(event) => begin(event, (event.target as Element).closest<HTMLElement>("[data-drag-node]")?.dataset.dragNode)}
       onPointerMove={move} onPointerUp={finishDrag} onPointerCancel={() => { drag.current = null; setPreview(null); }}
       onKeyDown={(event) => { if (event.key === "Escape") setConnecting(null); }}>
@@ -193,20 +185,20 @@ export function WorkflowCanvas({ graph, selectedId, onSelect, onMove, onConnect,
         {nodes.map((node) => <article key={node.id} data-workflow-node={node.id} data-kind={node.kind}
           className={`${styles.node} ${selectedId === node.id ? styles.selectedNode : ""} ${connecting === node.id ? styles.connectingNode : ""}`}
           style={{ left: node.position.x, top: node.position.y, width: WIDTH, height: HEIGHT } as CSSProperties}>
-          <div className={styles.nodeTop}><span className={styles.nodeIcon}><WorkflowIcon kind={node.kind} /></span><span>{kindName(node.kind, t)}</span>
-            {onMove && <button type="button" data-drag-node={node.id} className={styles.grip} aria-label={`${t("移动", "Move")} ${node.title}`} title={t("拖动，或用方向键移动", "Drag, or use arrow keys to move")}
+          <div className={styles.nodeTop}><span className={styles.nodeIcon}>{node.kind === "agent" ? <RoleAvatar role={resolveWorkflowRole(node)} size={27} alt="" /> : <WorkflowIcon kind={node.kind} />}</span><span>{kindName(node.kind, t)}</span>
+            {onMove && <button type="button" data-drag-node={node.id} className={styles.grip} aria-label={`${t("copy.components_workflows_WorkflowCanvas.007")} ${node.title}`} title={t("copy.components_workflows_WorkflowCanvas.008")}
               onKeyDown={(event) => { const directions: Record<string, WorkflowPosition> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = directions[event.key]; if (delta) { event.preventDefault(); onMove(node.id, { x: node.position.x + delta.x, y: node.position.y + delta.y }); } }}>⠿</button>}
           </div>
-          <button className={styles.nodeBody} type="button" onClick={() => onSelect(node)} aria-label={`${t("编辑详情", "View details")}: ${cardTitle(node, t)}`} aria-pressed={selectedId === node.id}>
+          <button className={styles.nodeBody} type="button" onClick={() => onSelect(node)} aria-label={`${t("copy.components_workflows_WorkflowCanvas.009")}: ${cardTitle(node, t)}`} aria-pressed={selectedId === node.id}>
             <strong title={cardTitle(node, t)}>{cardTitle(node, t)}</strong><span title={cardPurpose(node, t)}>{cardPurpose(node, t)}</span>
           </button>
           <div className={styles.nodeBottom}><span className={styles.nodeRef}>{cardFacts(node, t)}</span>
-            {onConnect && !node.id.startsWith("scheduler:installed/") && <button type="button" className={styles.port} aria-label={`${t("说明连线", "Annotate connection")}: ${node.title}`} title={t("选择两个卡片添加说明连线（不改变执行）", "Select two cards to annotate a relationship (does not change execution)")} onClick={() => connect(node.id)} />}
+            {onConnect && !node.id.startsWith("scheduler:installed/") && <button type="button" className={styles.port} aria-label={`${t("copy.components_workflows_WorkflowCanvas.010")}: ${node.title}`} title={t("copy.components_workflows_WorkflowCanvas.011")} onClick={() => connect(node.id)} />}
           </div>
         </article>)}
       </div>
-      {connecting && <div className={styles.connectHint} role="status">{t("选择另一张卡片的圆形端口。说明连线不会改变执行逻辑。", "Choose another card’s circular port. Annotation edges do not change execution.")} <button onClick={() => setConnecting(null)}>{t("取消", "Cancel")}</button></div>}
+      {connecting && <div className={styles.connectHint} role="status">{t("copy.components_workflows_WorkflowCanvas.012")} <button onClick={() => setConnecting(null)}>{t("copy.components_workflows_WorkflowCanvas.013")}</button></div>}
     </div>
-    <div className={styles.legend}><span><i />{t("代码调用 / 数据访问", "Code / data access")}</span><span><i className={styles.dashed} />{t("声明 / 配置绑定", "Declared / configured")}</span><span><i className={styles.annotation} />{t("手工说明", "Annotation")}</span><span className={styles.toolbarSpacer} />{graph.nodes.length} {t("个节点", "nodes")} · {graph.edges.length} {t("条关系", "edges")}</div>
+    <div className={styles.legend}><span><i />{t("copy.components_workflows_WorkflowCanvas.014")}</span><span><i className={styles.dashed} />{t("copy.components_workflows_WorkflowCanvas.015")}</span><span><i className={styles.annotation} />{t("copy.components_workflows_WorkflowCanvas.016")}</span><span className={styles.toolbarSpacer} />{graph.nodes.length} {t("copy.components_workflows_WorkflowCanvas.017")} · {graph.edges.length} {t("copy.components_workflows_WorkflowCanvas.018")}</div>
   </div>;
 }

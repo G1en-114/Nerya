@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import { useMemo, useState } from "react";
 import { useLocale } from "next-intl";
@@ -13,27 +14,27 @@ export function PositionExposure({ positions, unavailable = false, onMarket }: {
   const locale = useLocale(), zh = locale.startsWith("zh");
   const summary = useMemo(() => positionExposure(positions), [positions]);
   const [all, setAll] = useState(false);
-  return <section className={styles.exposure} data-testid="position-exposure" aria-label={zh ? "仓位结构" : "Position exposure"}>
-    <h3>{zh ? "仓位结构" : "Position exposure"}</h3>
-    {unavailable ? <p className={styles.note}>{zh ? "仓位数据暂不可用，无法判断敞口。" : "Positions are unavailable. Exposure cannot be determined."}</p>
-      : !summary.total ? <p className={styles.note}>{zh ? "没有已记录的持仓。" : "No positions recorded."}</p>
-      : !summary.known ? <p className={styles.note}>{zh ? "仓位未提供名义价值。明细仍可查看，不推算资产占比。" : "No notional values supplied. Positions remain available; no allocation is inferred."}</p>
+  return <section className={styles.exposure} data-testid="position-exposure" aria-label={i18nCopy(zh, "copy.components_finance_PositionExposure.001")}>
+    <h3>{i18nCopy(zh, "copy.components_finance_PositionExposure.002")}</h3>
+    {unavailable ? <p className={styles.note}>{i18nCopy(zh, "copy.components_finance_PositionExposure.003")}</p>
+      : !summary.total ? <p className={styles.note}>{i18nCopy(zh, "copy.components_finance_PositionExposure.004")}</p>
+      : !summary.known ? <p className={styles.note}>{i18nCopy(zh, "copy.components_finance_PositionExposure.005")}</p>
       : <>
-        <p className={styles.label}>{summary.missing ? (zh ? "已知名义价值" : "Known gross notional") : (zh ? "总名义价值" : "Gross notional")}</p>
+        <p className={styles.label}>{summary.missing ? (i18nCopy(zh, "copy.components_finance_PositionExposure.006")) : (i18nCopy(zh, "copy.components_finance_PositionExposure.007"))}</p>
         <p className={styles.total}>{financeMoney(summary.gross, locale)}</p>
-        <dl className={styles.directions}>{(["long", "short", "unknown"] as const).filter((side) => side !== "unknown" || summary.directions.unknown > 0).map((side) => <div key={side}><dt>{side === "long" ? (zh ? "多头" : "Long") : side === "short" ? (zh ? "空头" : "Short") : (zh ? "方向未确认" : "Unknown side")}</dt><dd>{financeMoney(summary.directions[side], locale)}</dd></div>)}</dl>
+        <dl className={styles.directions}>{(["long", "short", "unknown"] as const).filter((side) => side !== "unknown" || summary.directions.unknown > 0).map((side) => <div key={side}><dt>{side === "long" ? (i18nCopy(zh, "copy.components_finance_PositionExposure.008")) : side === "short" ? (i18nCopy(zh, "copy.components_finance_PositionExposure.009")) : (i18nCopy(zh, "copy.components_finance_PositionExposure.010"))}</dt><dd>{financeMoney(summary.directions[side], locale)}</dd></div>)}</dl>
         <div className={styles.assets}>{(all ? summary.markets : summary.markets.slice(0, 5)).map((item) => {
           const share = summary.gross > 0 ? item.value / summary.gross * 100 : 0;
-          const label = item.market || (zh ? "市场未提供" : "Unknown market");
-          return <button key={item.market} type="button" className={styles.asset} disabled={!onMarket || !item.market} onClick={() => onMarket?.(item.market)} aria-label={zh ? `筛选 ${label} 仓位` : `Filter ${label} positions`}>
+          const label = item.market || (i18nCopy(zh, "copy.components_finance_PositionExposure.011"));
+          return <button key={item.market} type="button" className={styles.asset} disabled={!onMarket || !item.market} onClick={() => onMarket?.(item.market)} aria-label={i18nCopy(zh, "copy.components_finance_PositionExposure.012", { value0: label })}>
             <span className={styles.assetLine}><strong>{label}</strong><span>{financeNumber(share, locale, 1)}%</span></span>
-            <span className={styles.track} role="meter" aria-label={zh ? `${label} 占已知名义价值比例` : `${label} share of known notional`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={share}><span style={{ width: `${share}%` }} /></span>
+            <span className={styles.track} role="meter" aria-label={i18nCopy(zh, "copy.components_finance_PositionExposure.013", { value0: label })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={share}><span style={{ width: `${share}%` }} /></span>
             <span className={styles.value}>{financeMoney(item.value, locale)}</span>
           </button>;
         })}</div>
-        {summary.markets.length > 5 ? <button className={styles.more} type="button" onClick={() => setAll((value) => !value)}>{all ? (zh ? "收起资产" : "Show fewer") : (zh ? `查看全部 ${summary.markets.length} 个市场` : `Show all ${summary.markets.length} markets`)}</button> : null}
-        {summary.missing ? <p className={styles.warning} role="status">{zh ? `${summary.missing} / ${summary.total} 个仓位缺少名义价值，以上比例仅覆盖已知部分。` : `${summary.missing} of ${summary.total} positions have no notional value. Shares cover known values only.`}</p> : null}
-        <p className={styles.note}>{zh ? "按报告的名义价值绝对值统计，不是净资产占比。点击市场筛选仓位。" : "Absolute reported notional, not a share of account equity. Select a market to filter positions."}</p>
+        {summary.markets.length > 5 ? <button className={styles.more} type="button" onClick={() => setAll((value) => !value)}>{all ? (i18nCopy(zh, "copy.components_finance_PositionExposure.014")) : (i18nCopy(zh, "copy.components_finance_PositionExposure.015", { value0: summary.markets.length }))}</button> : null}
+        {summary.missing ? <p className={styles.warning} role="status">{i18nCopy(zh, "copy.components_finance_PositionExposure.016", { value0: summary.missing, value1: summary.total })}</p> : null}
+        <p className={styles.note}>{i18nCopy(zh, "copy.components_finance_PositionExposure.017")}</p>
       </>}
   </section>;
 }

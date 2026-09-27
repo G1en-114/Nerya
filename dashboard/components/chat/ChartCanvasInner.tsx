@@ -1,8 +1,10 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import { useEffect, useRef } from "react";
 import { useLocale } from "next-intl";
 import { cleanSeries } from "../../lib/financialChart";
+import { chartColor } from "../../lib/chartColor";
 import { chartTime, financeNumber } from "../../lib/financeDisplay";
 import {
   ColorType,
@@ -76,7 +78,7 @@ const DEFAULT_COLORS = {
 
 function chartPalette() {
   const css = getComputedStyle(document.documentElement);
-  const token = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
+  const token = (name: string, fallback: string) => chartColor(css.getPropertyValue(name), fallback);
   return { ...DEFAULT_COLORS, up: token("--ok", DEFAULT_COLORS.up), down: token("--err", DEFAULT_COLORS.down),
     line: token("--violet-2", DEFAULT_COLORS.line), marker: token("--warn", DEFAULT_COLORS.marker),
     histogramPositive: token("--fluid", DEFAULT_COLORS.histogramPositive),
@@ -306,7 +308,7 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
         s.applyOptions({ priceFormat: { type: "custom", minMove, formatter: (value: number) => financeNumber(value, locale, Math.abs(value) >= 1 ? 2 : undefined) } });
       }
     }
-    const hint = locale.startsWith("zh") ? "移动指针查看时间和数值；触屏长按查看。" : "Hover or long-press to inspect time and values.";
+    const hint = i18nCopy(locale.startsWith("zh"), "copy.components_chat_ChartCanvasInner.001");
     if (readoutRef.current) readoutRef.current.textContent = hint;
     chart.subscribeCrosshairMove((event) => {
       const readout = readoutRef.current;

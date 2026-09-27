@@ -1,0 +1,29 @@
+.tooltip {
+  z-index: 1200;
+  max-width: 240px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: #202124;
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  box-shadow: 0 2px 6px #0003;
+}
+
+.collapseControl {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar:hover .collapseControl,
+.collapseControl:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .collapseControl {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}

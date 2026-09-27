@@ -1,13 +1,13 @@
 """Shared helper for wallet providers backed by a Node/TypeScript skill.
 
-Bitget, Binance-Web3 agentic wallet, and the Coinbase CDP TS SDK all ship
-as Node modules. We invoke them via ``node <entry>`` with a JSON command
+This legacy protocol is implemented by Nerya-specific wrappers, not arbitrary
+official SDK package entry points. Invoke ``node <entry>`` with a JSON command
 on stdin and a JSON response on stdout. Nothing is installed for the
 operator — if the skill directory is absent we raise
 :class:`WalletDependencyError` with the exact ``git clone`` / ``npm
 install`` line they should run.
 
-Wire protocol (identical for every TS wallet):
+Legacy wrapper wire protocol (new integrations use the external v1 adapter):
 
     # --- stdin (JSON, one line) ---
     {"command": "balance",
@@ -22,8 +22,9 @@ Supported commands (every provider should implement at least these):
 * ``quote``    → {"expected_out": float, "min_out": float,
                   "price_impact_bps": int, "gas_cost_usd": float,
                   "tx_unsigned": any}
-* ``swap``     → {"ok": bool, "tx_hash": str, "amount_out": float,
-                  "reason": str}
+* ``swap``     → {"status": str, "tx_hash": str, "amount_out": float,
+                  "confirmed": bool, "amount_out_source": str}
+* ``get_execution_status`` → the same result, querying an existing send only
 
 Minimal skill template (``dist/index.js``)::
 
@@ -71,6 +72,7 @@ class NodeSkillRef:
     entry: str           # default entry path inside the skill directory
     package: str         # npm package (falls back to node if absent)
     skill_path: str = "" # where the user cloned it
+    env_overrides: dict[str,str] | None = None
 
     def install_hint(self) -> str:
         pieces = []
@@ -120,7 +122,7 @@ class NodeSkillRef:
                 ["node", str(entry)],
                 input=proc_input.encode("utf-8"),
                 cwd=self.skill_path,
-                env=os.environ.copy(),
+                env={**os.environ,**(self.env_overrides or {})},
                 capture_output=True,
                 timeout=timeout_s,
                 check=False,

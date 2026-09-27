@@ -9,7 +9,7 @@ before drafting `plugin.py`. Design brief:
 
 | Need | Surface |
 |---|---|
-| Repeatable playbook the model follows (research steps, checklists) | `evolve_skill_proposal` (skill) |
+| Repeatable playbook the model follows (research steps, checklists) | `skill_manage` (direct Skill save) |
 | Prompt / config / policy tweak | `self_modify` channels |
 | New native **tool** the model calls (data lookup, integration action) | plugin (`ctx.register_tool`) |
 | Observe/transform **every tool call** (audit, redaction, spill) | plugin (`tools/*` waterfall) |

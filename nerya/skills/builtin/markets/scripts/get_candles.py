@@ -58,6 +58,7 @@ from nerya.core.truth import (
 from nerya.workspace.artifact_store import ArtifactStore
 
 from ._connector import public_connector, venue_of, workspace_root
+from datetime import datetime, timezone
 
 
 # Reasonable defaults: "1d for the last 60 days" is the K-line a human
@@ -125,7 +126,7 @@ def _build_chart(
     chart_id = stable_chart_id(
         "markets",
         "get_candles",
-        {"market": market, "venue": venue, "interval": interval, "n": len(candles)},
+        {"market": market, "venue": venue, "interval": interval, "candles": candles},
     )
 
     block = build_chart_block(
@@ -136,14 +137,17 @@ def _build_chart(
         source={
             "skill": "markets",
             "action": "get_candles",
-            "as_of": "",  # filled by caller via ts_ms; left blank for stable id
+            "as_of": datetime.fromtimestamp(candles[-1]["time"], tz=timezone.utc).isoformat(),
         },
         insights=_summarise(candles),
         path=path,
         ctx=ctx,
         chart_id=chart_id,
     )
-    return block.as_dict()
+    result = block.as_dict()
+    result.update(market=market, venue=venue, interval=interval)
+    result["instrument"] = {"market": market, "venue": venue, "interval": interval}
+    return result
 
 
 def _summarise(candles: list[dict[str, Any]]) -> list[str]:

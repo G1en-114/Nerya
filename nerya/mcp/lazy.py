@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
 from ..tools.registry import ToolRegistry
-from ..tools.tool_errors import collect_schema_issues, format_schema_validation_error
 from ..tools.types import (
     PermissionScope,
     RiskLevel,
@@ -128,6 +127,18 @@ class LazyMcpState:
     #: and avoids re-rendering schemas) with ``from_cache=True`` set on
     #: the response. Mutable; reset by :meth:`reset_session`.
     describe_response_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    _registry: Any = field(default=None, repr=False, compare=False)
+
+    def namespace_signature(self, server_id: str) -> str | None:
+        if self._registry is None:
+            return None
+        import hashlib
+        import json
+        wanted = set(self.namespace_index.get(server_id, ()))
+        descriptors = sorted((d for d in self._registry.list_tools() if d.name in wanted), key=lambda d: d.name)
+        payload = [(d.name,d.description,d.input_schema,d.risk.value,d.permission_scope.value,d.auto_approve) for d in descriptors]
+        return hashlib.sha256(json.dumps(payload,sort_keys=True,default=str).encode()).hexdigest()
 
     _lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False, compare=False,
@@ -271,6 +282,11 @@ def get_or_create_session_state(
         if st is None:
             st = LazyMcpState()
             _SESSION_STATES[key] = st
+        else:
+            _SESSION_STATES.pop(key)
+            _SESSION_STATES[key] = st
+        while len(_SESSION_STATES) > 256:
+            _SESSION_STATES.pop(next(iter(_SESSION_STATES)))
         return st
 
 
@@ -298,11 +314,16 @@ def pull_session_cache_into(
     promoted = 0
     with target._lock, source._lock:
         for ns in source.described_namespaces:
+            payload = source.describe_response_cache.get(ns)
+            signature = target.namespace_signature(ns)
+            if target._registry is not None and (ns not in target.namespace_index or not payload or payload.get("schema_signature") != signature):
+                target.described_namespaces.discard(ns)
+                target.describe_response_cache.pop(ns,None)
+                continue
             if ns not in target.described_namespaces:
                 target.described_namespaces.add(ns)
                 promoted += 1
-        for ns, payload in source.describe_response_cache.items():
-            if ns not in target.describe_response_cache:
+            if payload is not None:
                 target.describe_response_cache[ns] = payload
     return promoted
 
@@ -330,8 +351,7 @@ def push_state_into_session_cache(
                 target.described_namespaces.add(ns)
                 persisted += 1
         for ns, payload in source.describe_response_cache.items():
-            if ns not in target.describe_response_cache:
-                target.describe_response_cache[ns] = payload
+            target.describe_response_cache[ns] = payload
     return persisted
 
 
@@ -379,10 +399,12 @@ def attach_lazy_state(
     bootstrap mid-session does not erase the model's earlier describes).
     """
 
+    state._registry = registry
     existing = getattr(registry, "lazy_mcp_state", None)
     if not isinstance(existing, LazyMcpState):
         setattr(registry, "lazy_mcp_state", state)
         return state
+    existing._registry = registry
     # Merge — bootstrap may be re-run after a connector edit.
     for sid, names in state.namespace_index.items():
         existing.namespace_index[sid] = list(names)
@@ -472,6 +494,10 @@ def _make_describe_handler(
         # the registry scan + schema dict copy.
         with state._lock:
             cached = state.describe_response_cache.get(ns)
+            signature = state.namespace_signature(ns)
+            if cached is not None and signature is not None and cached.get("schema_signature") != signature:
+                state.describe_response_cache.pop(ns,None)
+                cached = None
         if cached is not None:
             # Re-mark described (idempotent) and surface the cache hit
             # so the model + transcripts can tell this was a no-op
@@ -519,6 +545,7 @@ def _make_describe_handler(
         # instantly.
         with state._lock:
             state.describe_response_cache[ns] = {
+                "schema_signature": state.namespace_signature(ns),
                 "tools": tools_payload,
                 "hint": hint_text,
             }
@@ -544,169 +571,69 @@ def _make_describe_handler(
 _MCP_CALL_RESERVED_KEYS = frozenset({"namespace", "tool", "args"})
 
 
-def _make_call_handler(
-    *, registry: ToolRegistry, state: LazyMcpState,
-) -> Callable[[ToolCall], ToolResult]:
-    def handler(call: ToolCall) -> ToolResult:
-        args = call.arguments or {}
-        ns = str(args.get("namespace") or "").strip()
-        tool = str(args.get("tool") or "").strip()
-        # Accept both nested arguments (preferred) and flat top-level
-        # arguments (fallback). Models often emit
-        # mcp_call(namespace="yahoo", tool="get_stock_info", ticker="TSLA")
-        # before they learn the nested ``args={...}`` shape, so promote
-        # extra top-level fields into ``args`` instead of rejecting them.
-        underlying_args_raw = args.get("args")
-        if underlying_args_raw is None:
-            # No explicit ``args`` — promote any extra top-level
-            # parameters to the underlying tool's args.
-            extras = {
-                k: v for k, v in args.items()
-                if k not in _MCP_CALL_RESERVED_KEYS
-            }
-            underlying_args: dict[str, Any] = extras
-        elif isinstance(underlying_args_raw, dict):
-            # Explicit ``args`` wins, but if there are also extras at
-            # the top level, merge them in (extras lose) for symmetry
-            # with the no-args branch. This is defensive — well-behaved
-            # callers won't mix the two styles.
-            extras = {
-                k: v for k, v in args.items()
-                if k not in _MCP_CALL_RESERVED_KEYS
-            }
-            underlying_args = {**extras, **underlying_args_raw}
-        else:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=META_CALL_TOOL,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=(
-                        "args must be an object/dict (or omitted; pass "
-                        "tool args at the top level instead)"
-                    ),
-                ),
-            )
-        if not ns or not tool:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=META_CALL_TOOL,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message="namespace and tool arguments are required",
-                ),
-            )
+def resolve_mcp_call(call: ToolCall, *, registry: ToolRegistry) -> ToolCall | ToolResult:
+    """Resolve routing only; execution and target validation belong to the executor."""
+    args = call.arguments or {}
+    ns = str(args.get("namespace") or "").strip()
+    tool = str(args.get("tool") or "").strip()
 
-        snap = state.snapshot()
-        names = snap["namespaces"].get(ns, [])
-        # The MCP descriptor public name format is mcp__<server>__<tool>.
-        # We accept either the bare tool name or the fully-qualified
-        # public name to make the meta-tool ergonomic.
-        candidates = [
-            n for n in names
-            if n == tool or n.endswith(f"__{tool}") or n == f"mcp__{ns}__{tool}"
-        ]
-        if not candidates:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=META_CALL_TOOL,
-                error=ToolError(
-                    kind=ToolErrorKind.NOT_FOUND,
-                    message=(
-                        f"unknown MCP tool {tool!r} in namespace {ns!r}; "
-                        f"available: {names}"
-                    ),
-                ),
-            )
-        public_name = candidates[0]
-        descriptor = registry.find(public_name)
-        if descriptor is None:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=META_CALL_TOOL,
-                error=ToolError(
-                    kind=ToolErrorKind.UNKNOWN_TOOL,
-                    message=(
-                        f"tool {public_name!r} is in the namespace index "
-                        "but missing from the registry — registry was "
-                        "mutated since bootstrap"
-                    ),
-                ),
-            )
-
-        issues = collect_schema_issues(underlying_args, descriptor.input_schema)
-        if issues:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=public_name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=format_schema_validation_error(public_name, issues),
-                    detail={
-                        "namespace": ns,
-                        "tool": public_name,
-                        "issues": [dict(i) for i in issues],
-                        "schema": descriptor.input_schema,
-                    },
-                    retryable=True,
-                    recovery_hint={
-                        "action": "fix_arguments_and_retry",
-                        "tool_name": public_name,
-                    },
-                ),
-            )
-
-        # Forward by constructing a child ToolCall so the underlying
-        # handler sees its own arguments rather than ours.
-        child_call = ToolCall(
-            name=public_name,
-            arguments=dict(underlying_args),
-            id=call.id,
-            turn_id=call.turn_id,
-            iteration=call.iteration,
-            caller=f"mcp_call:{ns}",
-            parent_call_id=call.id,
-            metadata={"via": META_CALL_TOOL, "mcp_namespace": ns},
+    def error(kind: ToolErrorKind, message: str) -> ToolResult:
+        return ToolResult.from_error(
+            tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=kind, message=message, retryable=False),
         )
-        try:
-            inner = descriptor.handler(child_call)
-        except Exception as exc:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=META_CALL_TOOL,
-                error=ToolError(
-                    kind=ToolErrorKind.EXECUTION_ERROR,
-                    message=f"{type(exc).__name__}: {exc}",
-                    detail={"namespace": ns, "tool": public_name},
-                ),
-            )
-        # The descriptor handler may be sync or async; we only support
-        # sync handlers here because mcp_call is itself a sync tool. If
-        # an MCP descriptor returns an awaitable in the future, the
-        # executor's normal path would await it — for the meta-tool
-        # short-circuit we surface a typed error.
-        if not isinstance(inner, ToolResult):
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=META_CALL_TOOL,
-                error=ToolError(
-                    kind=ToolErrorKind.EXECUTION_ERROR,
-                    message=(
-                        "underlying MCP handler returned a non-ToolResult "
-                        f"({type(inner).__name__}); use the executor path "
-                        "instead of mcp_call for async tools"
-                    ),
-                    detail={"namespace": ns, "tool": public_name},
-                ),
-            )
-        # Tag the inner result with provenance so transcripts can tell
-        # this was a lazy-routed call.
-        inner.metadata.setdefault("via_mcp_call", True)
-        inner.metadata.setdefault("mcp_namespace", ns)
-        inner.metadata.setdefault("mcp_underlying_tool", public_name)
-        return inner
 
-    return handler
+    underlying = args.get("args")
+    if underlying is not None and not isinstance(underlying, dict):
+        return error(ToolErrorKind.SCHEMA_VALIDATION, "args must be an object/dict or omitted")
+    if not ns or not tool:
+        return error(ToolErrorKind.SCHEMA_VALIDATION, "namespace and tool arguments are required")
+    state = getattr(registry, "lazy_mcp_state", None)
+    names = state.snapshot()["namespaces"].get(ns, []) if isinstance(state, LazyMcpState) else []
+    # Prefer exact names; never choose the first ambiguous suffix match.
+    exact = [n for n in names if n == tool or n == f"mcp__{ns}__{tool}"]
+    candidates = exact or [n for n in names if n.endswith(f"__{tool}")]
+    if len(candidates) != 1:
+        return error(
+            ToolErrorKind.NOT_FOUND,
+            f"unknown or ambiguous MCP tool {tool!r} in namespace {ns!r}; available: {names}",
+        )
+    descriptor = registry.find(candidates[0])
+    if descriptor is None:
+        return error(ToolErrorKind.UNKNOWN_TOOL, f"tool {candidates[0]!r} missing from registry")
+    if server_id_of(descriptor) != ns or descriptor.name in META_TOOL_NAMES:
+        return error(ToolErrorKind.PERMISSION_DENIED, "target is not a tool in the requested MCP namespace")
+    extras = {k: v for k, v in args.items() if k not in _MCP_CALL_RESERVED_KEYS}
+    return ToolCall(
+        name=descriptor.name,
+        arguments={**extras, **(underlying or {})},
+        id=call.id,
+        turn_id=call.turn_id,
+        iteration=call.iteration,
+        caller=call.caller,
+        started_at=call.started_at,
+        parent_call_id=call.parent_call_id,
+        metadata={
+            **call.metadata,
+            "via": META_CALL_TOOL,
+            "via_mcp_call": True,
+            "mcp_namespace": ns,
+            "mcp_underlying_tool": descriptor.name,
+            "mcp_parent_call_id": call.id,
+        },
+    )
+
+
+def _call_requires_executor(call: ToolCall) -> ToolResult:
+    """A registry handler has no permission/approval context; never dispatch here."""
+    return ToolResult.from_error(
+        tool_use_id=call.id, name=call.name,
+        error=ToolError(
+            kind=ToolErrorKind.PERMISSION_DENIED,
+            message="mcp_call requires NativeToolExecutor to enforce the target tool permissions",
+            retryable=False,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -717,12 +644,9 @@ def _make_call_handler(
 def make_meta_tools(
     *, registry: ToolRegistry, state: LazyMcpState,
 ) -> list[ToolDescriptor]:
-    """Build the three eager meta-tool descriptors.
+    """Build discovery tools and dispatch resolved by NativeToolExecutor."""
 
-    They are intentionally cheap, READ-only, and ``auto_approve=True``
-    so the permission engine never gates them.
-    """
-
+    state = attach_lazy_state(registry, state)
     return [
         ToolDescriptor(
             name=META_NAMESPACES_TOOL,
@@ -835,21 +759,15 @@ def make_meta_tools(
                 # args.
                 "additionalProperties": True,
             },
-            handler=_make_call_handler(registry=registry, state=state),
-            # Per-call risk depends on the underlying tool; READ here is
-            # conservative — the handler itself is just dispatch glue.
+            handler=_call_requires_executor,
+            # Unknown targets are conservatively effects for name-only consumers
+            # (checkpoint replay/dedup). Executor/orchestrator resolve exact calls.
             risk=RiskLevel.READ,
             permission_scope=PermissionScope.NETWORK,
-            read_only=True,
-            is_concurrency_safe=True,
+            read_only=False,
+            is_concurrency_safe=False,
             namespace="native",
             tags=("mcp", "meta", "lazy_loader"),
-            # auto_approve is False here because the underlying tool may
-            # be a network mutation; we let the executor's permission
-            # engine see this call. Read-only MCP tools (the common
-            # case) still ride the underlying descriptor's auto_approve
-            # when invoked the normal way; mcp_call is the explicit
-            # bypass path.
             auto_approve=False,
             lazy=False,
         ),
@@ -879,6 +797,7 @@ __all__ = [
     "pull_session_cache_into",
     "push_state_into_session_cache",
     "reset_session_cache",
+    "resolve_mcp_call",
     "server_id_of",
     "session_cache_size",
 ]

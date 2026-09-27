@@ -33,6 +33,13 @@ def is_cancelled(token: object | None) -> bool:
         return True
 
 
+def raise_if_cancelled(token: object | None, deadline: float | None = None) -> None:
+    if is_cancelled(token):
+        raise CancelledError(getattr(token, "reason", "") or "cancelled")
+    if deadline is not None and time.time() >= deadline:
+        raise CancelledError("deadline_exceeded")
+
+
 @dataclass
 class CancelToken:
     """Cooperative cancellation flag.
@@ -152,8 +159,20 @@ def signal_cancel(key: str, *, reason: str = "operator_interrupt") -> bool:
 # ---------------------------------------------------------------------------
 
 
+class _SteerText(str):
+    """Text-compatible receipt; confirmed only after insertion into transcript."""
+    def __new__(cls, text, callback=None):
+        instance = super().__new__(cls, text)
+        instance._callback = callback
+        return instance
+
+    def confirm(self):
+        callback, self._callback = self._callback, None
+        if callback:
+            callback()
+
+
 _STEER_MAX_PENDING = 16
-_STEER_MAX_CHARS = 4_000
 
 
 @dataclass
@@ -168,21 +187,21 @@ class SteerInbox:
 
     Like :class:`CancelToken`, the inbox is passive and process-local:
     the HTTP layer pushes via :func:`signal_steer`, the loop polls.
-    Bounded (``16`` pending messages of up to ``4000`` chars) so a
+    Bounded to 16 pending messages so a
     misbehaving caller cannot balloon the transcript.
     """
 
     _messages: list[str] = field(default_factory=list, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def push(self, text: str) -> bool:
+    def push(self, text: str, *, on_consumed=None) -> bool:
         clean = str(text or "").strip()
         if not clean:
             return False
         with self._lock:
             if len(self._messages) >= _STEER_MAX_PENDING:
                 return False
-            self._messages.append(clean[:_STEER_MAX_CHARS])
+            self._messages.append(_SteerText(clean, on_consumed))
         return True
 
     def drain(self) -> list[str]:
@@ -215,7 +234,7 @@ def unregister_steer_inbox(key: str) -> None:
         _STEER_REGISTRY.pop(key, None)
 
 
-def signal_steer(key: str, message: str) -> bool:
+def signal_steer(key: str, message: str, *, on_consumed=None) -> bool:
     """Queue an operator message for the live turn (if any).
 
     Returns whether a registered inbox accepted the message — ``False``
@@ -229,7 +248,7 @@ def signal_steer(key: str, message: str) -> bool:
         inbox = _STEER_REGISTRY.get(key)
     if inbox is None:
         return False
-    return inbox.push(message)
+    return inbox.push(message, on_consumed=on_consumed)
 
 
 __all__ = [

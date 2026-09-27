@@ -106,7 +106,7 @@ def _script_evidence(files: dict[str, str], scripts: list[str]) -> dict[str, dic
     evidence: dict[str, dict[str, Any]] = {}
     for path in scripts:
         row: dict[str, Any] = {"imports": set(), "agents": set(), "market": False,
-                               "news": False, "dispatch": False, "team": False, "trading": False, "publishes": False, "parallel_agents": set(), "source_ids": set(), "dispatch_choices": [], "can_stop": False, "called_modules": set()}
+                               "news": False, "dispatch": False, "team": False, "trading": False, "publishes": False, "parallel_agents": set(), "source_ids": set(), "dispatch_choices": [], "can_stop": False, "called_modules": set(), "published_names": set(), "read_names": set()}
         try:
             tree = ast.parse(files[path])
         except SyntaxError:
@@ -157,6 +157,8 @@ def _script_evidence(files: dict[str, str], scripts: list[str]) -> dict[str, dic
                 row["dispatch_choices"].append(choice)
             row["team"] |= name == "ctx.team.run"
             row["publishes"] |= name == "ctx.inputs.publish" or (canonical.endswith("StrategyAgentTask.dispatch") and any(kw.arg == "context" for kw in item.keywords))
+            if name in {"ctx.inputs.publish", "ctx.inputs.read"} and item.args and isinstance(item.args[0], ast.Constant):
+                row["published_names" if name.endswith("publish") else "read_names"].add(str(item.args[0].value))
             if name == "ctx.inputs.source" and item.args and isinstance(item.args[0], ast.Constant):
                 row["source_ids"].add(str(item.args[0].value))
             if name == "ctx.subagents.run_many":
@@ -197,7 +199,7 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
         for index, value in pairs:
             raw = _object(value)
             ref = str(raw.get("id") or (index if raw else value))
-            title = str(raw.get("title") or raw.get("name") or value)
+            title = str(raw.get("title") or raw.get("name") or raw.get("id") or value)
             node = _node("source", f"{key}/{ref}", title, config=value, path=[key, index],
                          x=30, y=390 + len(sources) * 166,
                          subtitle=str(raw.get("capability") or raw.get("provider") or key))
@@ -251,14 +253,19 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
                 edges.append(_edge(_id("script", path), node["id"], "dispatch", origin="static"))
         if not has_dispatch:
             edges.append(_edge(root["id"], node["id"], "declares", origin="manifest"))
+    # Older prompt-driven strategies are editable Agent instruction nodes too.
+    for index, prompt_path in enumerate(sorted(p for p in files if p.startswith("prompts/") and p.endswith(".md"))):
+        add(_node("agent", f"prompt/{prompt_path}", PurePosixPath(prompt_path).stem,
+                  file=prompt_path, content=files[prompt_path], config={},
+                  x=650, y=agent_y + index * 176, subtitle="strategy instructions"))
     for name_value in _items(manifest.get("subagents")):
         name = str(name_value)
         path = f"subagents/{name}.agent.md"
         prompt = files.get(path)
-        node = _node("agent", f"role/{name}", name, file=path if prompt is not None else None,
+        node = _node("agent", f"role/{name}", name, file=path,
                      content=prompt, config={"name": name}, x=650, y=agent_y,
                      subtitle="package prompt" if prompt is not None else "workspace Agent",
-                     href="/agents" if prompt is None else None)
+                     href=None)
         add(node)
         agent_y += 176
         called = False
@@ -290,6 +297,12 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
         add(_node("account", f"wallet/{wallet}", wallet, config=wallet, path=["wallet_id"],
                   x=960, y=320 + len(accounts) * 166, subtitle="wallet reference", href="/accounts"))
         edges.append(_edge("risk:policy", f"account:wallet/{wallet}", "wallet_binding"))
+    for writer, proof in evidence.items():
+        for reader, consumer in evidence.items():
+            shared = proof["published_names"] & consumer["read_names"]
+            if writer != reader and shared:
+                edges.append(_edge(_id("script", writer), _id("script", reader), "script_output",
+                                   label=", ".join(sorted(shared)), origin="static"))
     # Project executable input/team configuration. Annotation edges remain
     # display-only, and an unused declared role is never labelled as executed.
     if agent_mode or has_dispatch:
@@ -383,7 +396,7 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
     if len(nodes) + len(evolution["nodes"]) > MAX_NODES:
         raise WorkflowError(f"Workflow exceeds {MAX_NODES} nodes")
     return {"strategy": graph, "evolution": evolution, "manifest": manifest,
-            "revision": package_revision(files), "legacy": not bool(manifest.get("entrypoint") and schedule)}
+            "revision": package_revision(files), "legacy": not bool(manifest.get("entrypoint"))}
 
 
 def _evolution_graph(manifest: dict[str, Any], files: dict[str, str]) -> dict[str, Any]:

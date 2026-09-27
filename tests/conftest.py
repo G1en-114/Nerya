@@ -1,9 +1,8 @@
 """Shared pytest configuration.
 
-SecretVault.put() refuses to store secrets under the built-in default
-passphrase, so any test whose flow vaults credentials needs a real one.
-Set it here once; tests that exercise the default-passphrase fallback
-delete the variable explicitly (monkeypatch.delenv).
+Use a deterministic Vault passphrase for the general test suite so tests do
+not leave per-workspace keyring files unless they explicitly exercise local
+Vault bootstrapping. Bootstrap tests delete this variable with monkeypatch.
 """
 
 import os

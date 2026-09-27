@@ -115,7 +115,7 @@ def test_memsearch_install_refuses_when_disabled(tmp_path, monkeypatch):
     assert called is False
 
 
-def test_memory_vector_config_route_enables_without_installing(tmp_path, monkeypatch):
+def test_retired_vector_config_route_never_installs(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     client = SimpleNamespace(config=cfg)
     route_map = {(method, path): handler for method, path, handler in routes_memory.routes()}
@@ -133,9 +133,9 @@ def test_memory_vector_config_route_enables_without_installing(tmp_path, monkeyp
         {"enabled": True, "paths": ["memory"]},
     )
 
-    assert out["ok"] is True
-    assert out["enabled"] is True
-    assert cfg.get("memory.vector_search.enabled") is True
+    assert out["ok"] is False
+    assert out["error"] == "builtin_memory_only"
+    assert not cfg.get("memory.vector_search.enabled")
     assert called is False
 
 
@@ -226,7 +226,7 @@ def test_memory_vector_config_plaintext_falls_back_when_vault_missing(tmp_path):
 # subprocess so the test stays hermetic.
 
 
-def test_memory_test_returns_all_three_backends_when_disabled(tmp_path):
+def test_memory_test_returns_only_builtin(tmp_path):
     """Smoke-only: probe defaults to "memory test", all three backends
     report status (builtin ok, memsearch/agentmemory disabled). This is
     the shape the dashboard renders inside the testResults panel."""
@@ -240,14 +240,9 @@ def test_memory_test_returns_all_three_backends_when_disabled(tmp_path):
     assert out["ok"] is True
     assert out["query"] == "memory test"
     backends = {b["backend"]: b for b in out["backends"]}
-    assert set(backends.keys()) == {"builtin", "memsearch", "agentmemory"}
+    assert set(backends.keys()) == {"builtin"}
     # builtin is always reachable; entries default to 0 in a clean tmp_path.
     assert backends["builtin"]["ok"] is True
-    # memsearch is disabled by default.
-    assert backends["memsearch"]["ok"] is False
-    # agentmemory is not selected → enabled flag reports False.
-    assert backends["agentmemory"]["ok"] is False
-    assert backends["agentmemory"].get("enabled") is False
 
 
 def test_memory_test_accepts_custom_query(tmp_path):
@@ -277,8 +272,7 @@ def test_external_install_run_reports_missing_npm(tmp_path, monkeypatch):
     out = route_map[("POST", "/memory/external/install/run")](client, {})
 
     assert out["ok"] is False
-    assert out["error"] == "npm_missing"
-    assert "Node.js" in out["detail"]
+    assert out["error"] == "builtin_memory_only"
 
 
 def test_agentmemory_prefetch_handles_compact_smart_search(tmp_path, monkeypatch):
@@ -334,7 +328,7 @@ def test_agentmemory_prefetch_handles_compact_smart_search(tmp_path, monkeypatch
     assert chunks[1].source == "mem_def"
 
 
-def test_external_install_run_invokes_subprocess_when_npm_present(tmp_path, monkeypatch):
+def test_retired_install_never_invokes_subprocess_even_with_npm(tmp_path, monkeypatch):
     """Happy path: npm is on PATH → we invoke ``npm install -g <pkg>``
     and surface returncode + stdout/stderr tails to the dashboard."""
 
@@ -364,15 +358,6 @@ def test_external_install_run_invokes_subprocess_when_npm_present(tmp_path, monk
 
     out = route_map[("POST", "/memory/external/install/run")](client, {})
 
-    assert out["ok"] is True
-    assert out["returncode"] == 0
-    assert "added 137 packages" in (out["stdout_tail"] or "")
-    # Mirror memsearch's install: invoked via the resolved executable,
-    # not a shell — guards against shell-injection from install_command.
-    assert captured["cmd"][0] == "C:\\tools\\npm.CMD"
-    assert captured["cmd"][1:3] == ["install", "-g"]
-    # Parsed package name should come from the default install_command
-    # (``npx @agentmemory/agentmemory``).
-    assert captured["cmd"][3] == "@agentmemory/agentmemory"
-    # Bounded by a 5-minute timeout to keep the dashboard responsive.
-    assert captured["timeout"] == 300
+    assert out["ok"] is False
+    assert out["error"] == "builtin_memory_only"
+    assert captured == {}

@@ -1,23 +1,8 @@
-"""Orchestrator for Nerya memory providers.
+"""Legacy provider orchestrator retained for import compatibility.
 
-At most **one external** :class:`MemoryProvider` plus the
-**always-on builtin** can be active per workspace at any
-time. The manager enforces this rule, fans out lifecycle events,
-gathers recalled chunks for the LLM context, and is the single
-surface the agent kernel and the dashboard talk to.
-
-Why a separate manager (and not a free function)?
-
-* The 1+1 rule needs a single point of truth — making it the manager's
-  invariant means no caller can sidestep it.
-* External providers can be heavy (network, big indexes); ``initialize``
-  / ``shutdown`` need careful sequencing.
-* The dashboard wants a unified ``GET /memory/providers`` view with
-  availability, capability flags and current-active state. The
-  manager owns that materialised view.
-* Every dispatch (``prefetch``, ``sync_turn``, hooks) is best-effort:
-  one provider's failure must not blow up the agent turn. The manager
-  swallows exceptions, logs them, and keeps going.
+The native Agent uses MemoryRuntime and the operator API exposes built-in
+memory only. This module is not a selectable runtime backend. Keep it for
+historical integrations until the compatibility API is formally retired.
 """
 
 from __future__ import annotations

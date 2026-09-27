@@ -29,6 +29,8 @@ class StrategyLimits:
     max_stale_seconds: int = 30
     approval_threshold_usd: float = 0.0
     kill_switch: bool = False
+    # Optional per-strategy requirement; omission never invents TP/SL.
+    require_protection: bool = False
     # Manifest ``policy`` caps. These were previously surfaced only as
     # advisory prompt context to agents (``max_daily_notional_usd`` /
     # ``max_open_positions``); the Risk Gate now enforces them as hard
@@ -78,6 +80,9 @@ def load_strategy(paths: WorkspacePaths, strategy_id: str) -> Strategy:
     # Risk Gate can enforce them as hard gates. ``limits.yml`` wins when
     # both declare a value (operator override).
     policy_raw = s.get("policy") if isinstance(s.get("policy"), dict) else {}
+    require_protection = limits_raw.get("require_protection", policy_raw.get("require_protection", False))
+    if not isinstance(require_protection, bool):
+        raise TradingError("require_protection must be a boolean")
     max_daily = float(
         limits_raw.get("max_daily_notional_usd")
         or policy_raw.get("max_daily_notional_usd")
@@ -100,6 +105,7 @@ def load_strategy(paths: WorkspacePaths, strategy_id: str) -> Strategy:
         max_stale_seconds=int(limits_raw.get("max_stale_seconds", 30)),
         approval_threshold_usd=float(limits_raw.get("approval_threshold_usd", 0)),
         kill_switch=bool(limits_raw.get("kill_switch", False)),
+        require_protection=require_protection,
         max_daily_notional_usd=max_daily,
         max_open_positions=max_positions,
     )

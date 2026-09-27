@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { clientApi } from "../lib/clientApi";
+import { authHeaders, handleAuthFailure } from "../lib/auth";
 import type {
   ReadinessCheck,
   SetupReadinessEnvelope,
@@ -24,6 +25,54 @@ function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
 }
 
+/** Readiness reads are local. Only this explicit click issues a model request. */
+export function SavedModelTest({ revision, dirty = false, disabled = false }: { revision?: string; dirty?: boolean; disabled?: boolean }) {
+  const zh = useLocale().startsWith("zh");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ revision: string; ok: boolean; detail: string } | null>(null);
+  const current = result && (!revision || result.revision === revision) ? result : null;
+  async function testSaved() {
+    if (busy || dirty || disabled) return;
+    setBusy(true);
+    let testedRevision = revision || "";
+    try {
+      if (!testedRevision) {
+        const config = await clientApi.llmConfig() as Awaited<ReturnType<typeof clientApi.llmConfig>> & { revision?: string };
+        testedRevision = config.revision || "";
+      }
+      if (!testedRevision) throw new Error(zh ? "请刷新设置以获取已保存版本。" : "Refresh settings to load the saved revision.");
+      const response = await fetch("/api/proxy/llm/messages/probe", {
+        method: "POST", headers: authHeaders({ "content-type": "application/json" }), cache: "no-store",
+        body: JSON.stringify({ revision: testedRevision, caller: "settings:connection-test" }),
+      });
+      if (response.status === 401 || response.status === 403) {
+        handleAuthFailure(response.status);
+        throw new Error(zh ? "请重新登录。" : "Please sign in again.");
+      }
+      const body = await response.json();
+      if (!response.ok || !body.ok || body.revision !== testedRevision) {
+        throw new Error(body.error === "llm_config_changed"
+          ? (zh ? "配置已变化，请刷新后重新测试。" : "Configuration changed. Refresh and test again.")
+          : (zh ? "连接测试失败；设置仍已保存。请检查 URL、凭据和模型。" : "Connection test failed; settings remain saved. Check URL, credentials and model."));
+      }
+      setResult({ revision: testedRevision, ok: true, detail: [body.provider, body.model].filter(Boolean).join(" · ") });
+    } catch (error) {
+      setResult({ revision: testedRevision, ok: false, detail: error instanceof Error ? error.message : String(error) });
+    } finally { setBusy(false); }
+  }
+  return <div className="my-3 space-y-2 rounded-lg border border-[color:var(--line)] p-3" data-testid="saved-model-test">
+    <div className="flex flex-wrap items-center gap-2">
+      <Pill tone={dirty ? "warn" : current ? (current.ok ? "ok" : "danger") : "warn"}>
+        {dirty ? (zh ? "有未保存更改" : "Unsaved changes") : busy ? (zh ? "测试中" : "Testing") : current ? (current.ok ? (zh ? "测试成功" : "Test passed") : (zh ? "测试失败" : "Test failed")) : (revision ? (zh ? "已保存 · 未测试" : "Saved · Untested") : (zh ? "未测试" : "Untested"))}
+      </Pill>
+      <button type="button" className="btn btn-secondary" disabled={disabled || dirty || busy} onClick={() => void testSaved()}>{zh ? "测试已保存连接" : "Test saved connection"}</button>
+      {(revision || current?.revision) && <code className="text-xs text-[color:var(--text-muted)]">{(revision || current?.revision || "").slice(0, 10)}</code>}
+    </div>
+    <p className="text-xs text-[color:var(--text-muted)]">{zh ? "点击后发送一条短模型请求，可能产生少量费用。读取就绪状态和保存设置不会自动测试。" : "Sends a short model request when clicked; a small charge may apply. Reading readiness and saving settings do not run this test."}</p>
+    {current && !dirty && <p role="status" className="break-words text-xs">{current.detail}</p>}
+  </div>;
+}
+
 /**
  * Setup readiness card — first-run checklist.
  *
@@ -38,14 +87,16 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(true);
+  const [revision, setRevision] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const next = await clientApi.setupReadiness();
+        const [next, config] = await Promise.all([clientApi.setupReadiness(), clientApi.llmConfig()]);
         if (cancelled) return;
         setEnv(next);
+        setRevision((config as typeof config & { revision?: string }).revision || "");
         setError(null);
       } catch (e) {
         if (cancelled) return;
@@ -147,6 +198,7 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
           ))}
         </ul>
       ) : null}
+      {open && <SavedModelTest revision={revision} />}
     </Card>
   );
 }

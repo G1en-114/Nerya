@@ -9,9 +9,10 @@ from statistics import mean, pstdev
 from typing import Any
 
 from .engine import BacktestResult
+from .order_evidence import execution_evidence
 
 
-ENGINE_VERSION = "backtest_skill_v1"
+ENGINE_VERSION = "backtest_skill_v3_order_evidence"
 
 
 def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
@@ -104,13 +105,44 @@ def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
     errors = sum(counts.get(status, 0) for status in ("error", "failed", "unknown"))
     activity = counts.get("ok", 0) + counts.get("dispatch", 0)
     metrics["evaluation_mode"] = cfg.evaluation_mode
+    metrics["execution_mode"] = result.execution_mode
+    metrics["performance_evidence"] = cfg.evaluation_mode == "trading" and result.execution_mode == "script"
+    reason_counts: dict[str, int] = defaultdict(int)
+    for decision in result.decisions:
+        reason_counts[str(decision.get("reason") or decision.get("status") or "unknown")] += 1
     metrics["replay"] = {
         "decisions": len(result.decisions), "status_counts": dict(counts),
         "errors": errors, "observations_or_dispatches": activity,
         "order_attempts": result.order_attempts,
         "agent_execution": "not_run", "schedule_execution": "not_run",
         "scope": "historical_code_replay_only",
+        "dispatches": counts.get("dispatch", 0),
+        "skipped": counts.get("skip", 0) + counts.get("hold", 0),
+        "inputs_validated": result.execution_mode == "agent",
+        "reason_counts": dict(sorted(reason_counts.items(), key=lambda item: -item[1])[:20]),
+        "trigger_kind": "market.candle_closed",
+        **execution_evidence(result),
     }
+    metrics["flags"].extend(result.warnings)
+    evidence = metrics["replay"]
+    metrics["benchmark_method"] = "equal_weight_buy_hold_last_known_close"
+    metrics["execution_limits"] = {"max_open_trades": cfg.max_open_trades, "allow_short": cfg.allow_short}
+    if cfg.evaluation_mode == "trading" and result.execution_mode == "script":
+        if not result.order_attempts:
+            metrics["flags"].append("no_order_attempts")
+        elif not evidence["orders_filled"]:
+            metrics["flags"].append("no_orders_filled")
+        if evidence["orders_rejected"]:
+            metrics["flags"].append("orders_rejected")
+        if evidence["sdk_errors"]:
+            metrics["flags"].append("sdk_order_errors")
+        if not evidence["order_accounting_ok"]:
+            metrics["flags"].append("order_accounting_mismatch")
+    if result.execution_mode == "agent":
+        metrics["flags"].append("agent_dispatch_replay_not_model_execution")
+        if cfg.evaluation_mode == "trading":
+            metrics["verdict"] = "WARN"
+            metrics["flags"].append("agent_trading_performance_not_evaluated")
     if errors:
         metrics["verdict"] = "FAIL"
         metrics["flags"].append("strategy_returned_errors")
@@ -123,6 +155,15 @@ def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
             metrics["flags"].append("observation_order_attempt")
         if not activity:
             metrics["flags"].append("no_observation_or_dispatch_exercised")
+    elif result.execution_mode == "script" and metrics["verdict"] == "FAIL" and not errors:
+        # Explain a failed performance gate without mislabelling a successful
+        # replay as an engine error. Preserve the existing scoring policy.
+        if metrics["total_return_pct"] < 0:
+            metrics["flags"].append("negative_net_return")
+        if not metrics["flags"]:
+            metrics["flags"].append("benchmark_capture_below_threshold")
+    if evidence["sdk_errors"] or not evidence["order_accounting_ok"]:
+        metrics["verdict"] = "FAIL"
     return metrics
 
 
@@ -402,7 +443,8 @@ def _max_streak(values: list[bool], target: bool) -> int:
 def _exposure_pct(rows: list[dict[str, Any]]) -> float:
     if not rows:
         return 0.0
-    return sum(1 for r in rows if int(r.get("fills", 0) or 0) > 0) / len(rows) * 100.0
+    # Holding time is not the fraction of bars containing a fill.
+    return sum(1 for r in rows if abs(float(r.get("position_qty", 0) or 0)) > 1e-12) / len(rows) * 100.0
 
 
 def _per_market(result: BacktestResult) -> dict[str, dict[str, Any]]:
@@ -425,4 +467,3 @@ def _strip_internal(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
     out.pop("peak_unix", None)
     return out
-

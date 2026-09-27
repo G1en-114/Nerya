@@ -8,17 +8,16 @@ from pathlib import Path
 from ..agent.command_store import CommandError
 from ..agent.history_mutations import HistoryMutationError
 from ..agent.workbench import session_view
+from ..core.runtime_identity import BUILD_ID, SDK_BUILD_ID, STARTED_AT
 
-_STARTED = time.time()
-_ROOT = Path(__file__).resolve().parents[1]
 # Capture code identity once, never claim that on-disk edits changed a live process.
-_BUILD = hashlib.sha256(b"".join(p.read_bytes() for p in sorted(_ROOT.rglob("*.py")))).hexdigest()[:16]
+_STARTED, _BUILD = STARTED_AT, BUILD_ID
 
 
 def runtime_info(client, _query):
-    return {"ok": True, "protocol_version": 1, "build_id": _BUILD, "started_at": _STARTED,
+    return {"ok": True, "protocol_version": 1, "build_id": _BUILD, "sdk_build_id": SDK_BUILD_ID, "started_at": _STARTED,
             "workspace_id": hashlib.sha256(str(client.config.paths.root.resolve()).encode()).hexdigest()[:24],
-            "capabilities": ["conversation_commands", "session_view", "evidence_delivery", "user_interactions", "plan_mode"]}
+            "capabilities": ["conversation_commands", "session_view", "evidence_delivery", "user_interactions", "plan_mode", "goal_mode"]}
 
 
 def view(client, query):

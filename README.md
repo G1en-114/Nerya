@@ -1,618 +1,142 @@
-<p align="center">
-<img src="branding/banner.png" alt="Nerya" width="100%" />
-</p>
-
 <div align="center">
+
+<img src="branding/logo.png" alt="Nerya" width="88" />
 
 # Nerya
 
-### A local investment-research Agent Team that self-evolves your trading strategies.
+### One idea. A team to build it.
 
-Nerya runs a full investment-research desk on your machine. A strategy lead routes the
-work while market, on-chain, news, and technical analysts gather the evidence, a risk
-critic stress-tests every thesis, and a portfolio manager checks exposure. The desk
-drafts strategies, runs them through the Risk Gate and Approval Gate, then turns each
-session's evidence into operator-approved patches for prompts, skills, scripts,
-triggers, and strategy configs, so every strategy comes back sharper than the last.
+Your local Agent strategy workspace — research, build, backtest and review in one conversation.
+
+**1.0.0 Beta** · `1.0.0-beta.1`
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm--NC--1.0-blue.svg?style=flat-square)](https://polyformproject.org/licenses/noncommercial/1.0.0)
-[![Commercial license](https://img.shields.io/badge/Commercial%20use-license%20required-orange.svg?style=flat-square)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square)](https://www.python.org/downloads/)
-![Paper trading default](https://img.shields.io/badge/trading-paper%20by%20default-success.svg?style=flat-square)
-![CEX + DEX](https://img.shields.io/badge/CEX%20%2B%20DEX-Binance%20%C2%B7%20Bybit%20%C2%B7%20OKX%20%C2%B7%20Hyperliquid%20%C2%B7%20PancakeSwap%20%C2%B7%20Jupiter-8b5cf6.svg?style=flat-square)
-![SDK: Python + TS](https://img.shields.io/badge/SDK-Python%20%2B%20TypeScript-3178c6.svg?style=flat-square)
+[Website](https://neryaai.github.io/) · [Documentation](https://neryaai.github.io/docs.html) · [Desktop downloads](https://github.com/NeryaAI/Nerya/releases) · [Build status](https://github.com/NeryaAI/Nerya/actions/workflows/desktop.yml)
+
+[![Desktop CI](https://github.com/NeryaAI/Nerya/actions/workflows/desktop.yml/badge.svg)](https://github.com/NeryaAI/Nerya/actions/workflows/desktop.yml)
+[![Version](https://img.shields.io/badge/version-1.0.0--beta.1-7961e8)](VERSION)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE)
 
 </div>
 
----
-
-## Latest updates
-
-- **Mainstream quant framework compatibility** — strategies written for
-  Freqtrade (`IStrategy`) and VNpy (`CtaTemplate`) now run on Nerya's own
-  runtime: `nerya strategy import-external` (or the agent's
-  `strategy_import_external` tool) wraps uploaded source in a regular
-  strategy package, with dependency-free framework shims, freqtrade-style
-  ROI / stoploss / exit-signal execution, vnpy bar replay with an
-  order→intent bridge, and full backtest replay. Every order still goes
-  through Risk Gate. See `docs/strategy-framework-compat.md`.
-- **Git and WebDAV workspace sync** — push or pull a Nerya workspace from the
-  dashboard or workspace API while keeping runtime state local and explicit.
-- **Unified durable memory** — session memory, reflection writes, compaction,
-  native tools, and the memory API now share one scoped `MemoryRuntime` and
-  projection model instead of maintaining separate recall paths. SQLite is
-  canonical; Markdown and JSONL are rebuildable projections.
-- **Isolated strategy tuning reviews** — tuning evaluates the selected strategy
-  package and its evidence scope without leaking unrelated runtime context into
-  the review.
-- **Production trading hardening** — derivative orders now carry exchange-aware
-  precision, contract sizing, reduce-only, leverage, margin mode, position index,
-  and native stop-loss/take-profit parameters through the CCXT bridge.
-- **Deeper finance workflows** — new bundled expert-investor, finance-creator,
-  and quant-strategy-loop skills add research lenses and repeatable strategy
-  iteration without bloating the always-on agent prompt.
-
-### Current agent loop contract
-
-The main loop is skill-routed and bounded: ordinary chat can answer directly;
-research requests run `research_run`, delegate source work to
-`web_researcher`/`web_search_fetch`, and persist structured captures under
-`state/research_data` before the root turn writes its final answer. Large tool
-results are compressed into structured summaries while preserving the fields
-needed for the next step. Strategy work follows
-`strategy_draft → strategy_validate → strategy_submit_proposal → strategy_backtest`.
-Token, stock, market, and daily conversation routes share the same loop and
-error handling. Paper/live execution remains separate and fail-closed behind
-Risk Gate plus human Approval Gate.
-
----
-
-## From request to evolving strategy
+Describe your trading idea and its constraints. Nerya brings researchers, strategy authors and reviewers into the same workspace. Follow the tools as they run, inspect the evidence, open the strategy and backtest details, and decide what happens next.
 
-> _"I have **$500** in a paper account. Make me money on BTC. Don't blow it up."_
-
-The strategy lead opens a `TeamRun` from that request. Market, on-chain, news, and
-technical analysts gather evidence. The risk critic challenges the plan. The
-execution planner writes a runnable strategy package. The portfolio manager checks
-exposure before the operator approves the run.
-
-The `strategy_author` skill writes the first package: trigger route, sub-agent
-prompts, candle source, account binding, risk limits, and session ledger. Nerya runs
-it on paper until you enable live trading and approve the intent.
-
-After the session closes, Nerya journals decisions, reviews fills, and writes
-redacted, evidence-linked findings through `MemoryRuntime`. The evolution layer
-may turn those findings into candidate proposals. You sign or reject executable
-changes; applied proposals carry rollback snapshots and post-apply observation.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="branding/screenshots/1.0.0-beta/strategy-en-dark.gif" />
+  <img src="branding/screenshots/1.0.0-beta/strategy-en-light.gif" alt="Nerya strategy conversation and workflow, English" width="100%" />
+</picture>
 
----
+*Recorded from the website's isolated product tour. It uses example data, not a live account or verified investment performance. [Recording provenance](branding/screenshots/1.0.0-beta/README.md).*
 
-## Strategy lifecycle
+## From idea to a traceable workflow
 
-1. You describe the market, account, budget, and risk limit.
-2. The strategy lead assigns research, risk, execution, and portfolio checks.
-3. Agents write evidence to the blackboard and pass decisions through the mailbox.
-4. The execution planner produces a strategy package with triggers, prompts, data
-   sources, limits, and history.
-5. The trading kernel submits intents through Risk Gate and Approval Gate.
-6. Reflection writes scoped memory. Evolution stages candidate bundles. The operator
-   signs executable changes before promotion.
-
----
-
-## The six pillars behind the loop
-
-<p align="center">
-<img src="branding/feature-grid.png" alt="Nerya core pillars: Agent Team, Strategy Evolution, Typed Memory, SKILL.md First, Trading Kernel, SDK + Gateway" width="100%" />
-</p>
-
----
-
-## Nerya compared
-
-|   | Generic agent frameworks | Nerya |
-|---|---|---|
-| **Agent work** | Single planner or loose function calls | Durable investment-research desk: strategy lead, market/on-chain/news/technical analysts, risk critic, portfolio manager, shared blackboard, task board, mailbox, gates |
-| **Strategy creation** | Manual prompt-to-code handoff | `strategy_author` builds triggers, prompts, data sources, account binding, limits, and ledgers |
-| **Strategy evolution** | Operator rewrites prompts after failures | Reflection drafts typed proposals. Operator signs. Runtime applies them with rollback snapshots. |
-| **Trading execution** | Tool calls against exchange SDKs | Risk Gate, Approval Gate, paper/live separation, virtual ledger, reconciliation |
-| **Memory** | Vector snippets with weak meaning | Scoped SQLite records with evidence, lifecycle, redaction, and rebuildable Markdown / JSONL projections |
-| **Connectors** | One SDK per venue | Binance, Bybit, OKX, Hyperliquid, PancakeSwap, Jupiter, generic EVM, plus 100+ via CCXT. Missing one? Ask the agent to author it. |
-| **Security** | Key handling left to each integration | Vault-only secrets, `vault://` refs in context, prompt firewall, signer policy, script sandbox |
-| **Ops** | Roll your own supervisor | One-line install; auto-registers systemd / launchd / NSSM host services |
-
----
-
-## Screenshots
-
-### Operator home
+**Build a strategy.** Describe the market, entry and exit logic, time horizon and constraints. Agents prepare the strategy package and validate it. Script strategies, script-driven Agent strategies and event-driven Agent strategies share the workspace, with readable workflow nodes, parameters and run history.
 
-<img src="branding/screenshots/dashboard-home.png" alt="Operator overview" />
+**Research as a team.** Delegate market data, news and technical research to specialized Agents. A reviewer can challenge assumptions while the lead combines the evidence. Open source material and research reports without losing the conversation.
 
-Total equity, today's P&L, active strategies, open positions, setup-readiness
-checklist (LLM provider, trading account, risk policy, wallet/exchange in green / yellow
-/ red), and a live candle chart for the venue you configured.
+**Inspect more than a text reply.** Strategy cards, backtest curves, market charts and research reports are part of the conversation. Open their details in workspace tabs. Backtest views include available candle history, entry/exit markers, protection levels, trades and execution evidence; missing data remains visible rather than being presented as a complete result.
 
-<br/>
+**Review and iterate.** Inspect a particular run and its logs before changing a strategy. Optional review schedules produce evidence-linked recommendations and candidate changes. Review and trading authorization are distinct from editing ordinary Skill or Agent resources: those resources can be edited and saved directly.
 
-### Agent workspace
+**Keep the workspace local.** Strategies, cached market history, reports and configuration live in your workspace. Credentials are stored encrypted in the local Vault and referenced by identifier. Configured model providers, market services and external tools still receive the requests needed to perform your tasks; local storage does not make those services offline.
 
-<img src="branding/screenshots/dashboard-chat.png" alt="Agent workspace" />
+## What is in 1.0.0 Beta?
 
-> _"Draft a BTC strategy. Run the team review. Paper-trade it. Propose the next version."_
+| Area | In the workspace |
+| --- | --- |
+| Agent conversation | Streaming replies, available thinking output, tool execution, progress, follow-up messages and recoverable errors |
+| Strategies | Script and Agent execution, timer/event workflow nodes, strategy editing, import/export and run details |
+| Backtesting | Reusable local historical data, preflight checks, coverage information, per-market charts and trade records |
+| Research | Market cards, technical charts, evidence-linked reports and multi-Agent research |
+| Skills & Agents | `SKILL.md` playbooks, lazy-loaded references, reusable scripts and direct resource editing |
+| Integrations | Configurable model providers, exchange/wallet connections, MCP and external Agent access |
+| Desktop | Tauri host with bundled Python, Node, the web workspace and Chromium; native build pipelines for three operating systems |
+| Interface | English/Chinese, light/dark themes, workspace tabs and settings-based account/model configuration |
 
-Each message runs one agent turn. The planner picks a route, calls tools, and writes
-artifacts to disk. Use the same workspace to create subagents, schedule triggers,
-review strategy sessions, and open evolution proposals. Per-message controls:
+Research categories and execution support are not interchangeable. Crypto exchanges use the configured connectors; wallet and prediction-market operations depend on the relevant provider and credentials. Futures and A-share research examples do not imply that every broker, order type or instrument is executable.
 
-| Knob          | Purpose                                                            |
-|---------------|--------------------------------------------------------------------|
-| Think mode    | Force the planner to draft a plan before tool calls                |
-| Model tier    | `light` / `medium` / `high` / `intent` for cost vs. capability      |
-| YOLO          | Skip extra reviews on cheap turns                                  |
-| Iteration cap | Hard ceiling on agent loops per message                            |
-| Tool budget   | Maximum tool calls before the kernel ends the turn                 |
-| Turn budget   | LLM token budget for this turn                                     |
+## Install the desktop app
 
-Starter prompts ship with the dashboard: a BTC scalping strategy, an NVIDIA
-agent team, a long-cycle crypto strategy, and a macro news desk.
+Choose a **completed release** on [GitHub Releases](https://github.com/NeryaAI/Nerya/releases), then download the installer matching your operating system and CPU.
 
-### Self-evolution review desk
+| Platform | Architecture | Release files |
+| --- | --- | --- |
+| macOS | Apple Silicon / ARM64 | `.dmg`, `.pkg` |
+| macOS | Intel / x64 | `.dmg`, `.pkg` |
+| Windows | x64 | NSIS `.exe`, Windows Installer `.msi` |
+| Linux | x64 | `.deb`, `.AppImage` |
 
-<img src="branding/screenshots/dashboard-self-evolution.png" alt="Self-evolution replay and proposal review" />
+Desktop installers contain the application's Python and Node runtimes, web server and browser engine. You do not need to install a development toolchain to use them. Windows installers include the offline WebView2 installer. Linux still depends on distribution-provided desktop/browser libraries; the build baseline is Ubuntu 22.04. See [desktop installation and build notes](desktop/README.md).
 
-Replay the entire evolution run in one place: trigger, role prompt, structured
-input, model call, proposed file change, validation preview, optimizer scoring,
-and lineage context. This is the operator-facing review surface before any
-proposal is approved or promoted.
-
-### Other dashboard surfaces
+The beta pipeline uses an ad-hoc macOS signature and unsigned Windows packages unless a separate signing process is supplied. These are **not** notarized Apple Developer ID releases or Windows reputation-approved installers. Follow your organization's security policy; do not disable OS security protections to install an untrusted build.
 
-- `setup` reuses the same onboarding flow as `nerya setup --tui`: password, LLM, gateway, memory, browser, trading account, and web search.
-- `skills` treats `SKILL.md` as the definition: browse built-ins, workspace overrides, installed skills, and repo imports from one place.
-- `memory` keeps typed notebook entries, evidence, profile state, and optional backends such as `memsearch` or `agentmemory`.
-- `portfolio` merges exchange accounts and wallets into one reporting ledger with balances, exposure, reconciliation, and equity history.
-- `agents` manages durable role-typed subagents with per-role skill allowlists, prompt overrides, and persistent workspace personas.
-- `gateway` centralises Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, and webhook delivery with `vault://` secret refs.
-
-> The dashboard ships under `dashboard/` (Next.js 14, App Router, `:18380`). Run it
-> locally with the one-liner below. No cloud account, no telemetry phone-home.
-
----
-
-## Feature highlights
-
-### Agent Team
-
-A `TeamRun` gives the strategy lead a durable investment-research desk for the trade.
-The analysts divide the coverage, the risk critic owns the downside, and the portfolio
-manager owns exposure:
-
-- typed members: strategy lead, market analyst, on-chain analyst, news analyst,
-  technical analyst, risk critic, execution planner, portfolio manager
-- research coverage split across price and regime, on-chain flows, news and sentiment,
-  and technicals, then synthesized into one defensible thesis
-- per-role skill allowlist + denylist. `execution_planner` cannot touch `trading`
-- task board with dependencies, locks, priorities, owners
-- mailbox for inter-agent messages, plus a shared blackboard for evidence
-- leader synthesis: the lead waits for required reports, resolves conflicts, emits a
-  decision memo
-- gates: plan-artefact gate, all-tasks-complete gate, verification gate, optional
-  human approval gate
+On first launch, configure a model, add an account when needed, and configure the administrator password for external access. New workspaces contain **no default strategies or scheduled trades**. The account, model and access settings remain available afterward in Settings. Upgrades do not silently erase an existing workspace.
 
-Two templates ship today: `market_analysis_team`, `strategy_design_team`. New
-ones register in `BUILTIN_TEMPLATES` in `nerya/teams/templates.py`.
-
-### Strategy and agent evolution
+## Try a first task
 
-Nerya's strategies are not static. Every closed session becomes evidence the agent uses
-to sharpen the next version and adapt to the current regime. Nerya keeps strategy code,
-prompts, triggers, limits, sessions, and reviews under one workspace. After a strategy
-run closes, reflection writes scoped, redacted, evidence-linked findings through
-`MemoryRuntime`. `nerya/evolution/` can rank those findings and open typed proposals:
+> Research BTC/USDT using the available historical data. Build a script strategy with explicit entry and exit rules, validate it, and run a historical backtest. Show the strategy workflow, data coverage and trade details. Do not start live trading.
 
-```
-learning_update        evidence snapshot; does not mutate runtime state
-prompt_patch           unified diff of an agent / subagent prompt
-script_proposal        new script + manifest in workspace/scripts/pending/
-skill_proposal         new skill directory in workspace/skills/pending/
-trigger_route_patch    unified diff to workspace/triggers/routes.yml
-strategy_config_patch  unified diff to strategies/<id>/strategy.yml
-risk_limit_suggestion  advisory only; never overwrites limits.yml
-```
+Or ask for a research-only result:
 
-`promotion.py` rejects patches that touch `accounts.yml`, `limits.yml`, the vault,
-signer policy, or `live_trading_enabled`. Each applied proposal carries a
-`rollback.py` snapshot.
+> Compare BTC and ETH market conditions. Split the research between price action and news, cite the evidence, and produce a report with market charts. Explain any missing data.
 
-### Memory
+Model access and market-data availability depend on your configured services. A backtest is historical simulation, not a promise of future performance. Inspect the strategy code, parameters, coverage, fees and trading permissions before execution.
 
-```
-workspace/memory/
-├── memory.db                       canonical scoped records
-├── global.md                       rebuildable global projection
-├── index.jsonl                     rebuildable activity projection
-├── mistakes.md                     redacted review projection
-└── strategy_learnings/<id>.md      strategy projection
-```
+## Run from source
 
-SQLite records are canonical and scoped by trusted runtime context, not model input.
-Markdown and JSONL are rebuildable views for audit and versioning. Content scanning,
-stable keys, evidence references, lifecycle, and bounded recall apply before anything
-reaches a prompt.
-
-### Skills
-
-Every capability lives under `nerya/skills/builtin/<name>_skill/`:
-
-```
-SKILL.md       when to use, workflow, examples
-scripts/       executable helpers, JSON in, JSON out
-references/    lazy-loaded methodology and research playbooks
-templates/     code and config templates
-```
-
-Thirty built-ins ship today across five families:
-
-- **Trading & strategy**: `trading`, `strategy_author`, `backtest`, `triggers`,
-  `tasks`, `quant-strategy-loop`
-- **Market & data**: `markets`, `market_data_routing`, `news_social`, `research`, `analysis`
-- **Research & valuation**: `market_research`, `quant_research`, `equity_research`,
-  `dcf_valuation`, `sec_filings`, `research_report`, `expert_investors`, `finance`,
-  `finance-creators`
-- **Agents, memory & growth**: `agents`, `team`, `memory`, `evolve`, `llm`, `self_modify`
-- **Build & connect**: `coding`, `browser`, `notify`, `plugin_author`
-
-The research and valuation family is a full investment-research desk in itself:
-multi-source market research, factor and signal validation, equity deep-dives, DCF
-valuation, SEC filings, named-investor lenses, and report generation.
-
-### Trading kernel
-
-```
-TradeIntent → RiskGate → ApprovalGate → PaperExecution | LiveConnector
-                                                 │
-                                                 ▼
-                              VirtualLedger · positions · PnL · reconciliation
-```
-
-- Risk Gate checks live status, limits, ledger, confidence, slippage, staleness,
-  duplicates, conflicts. One failure stops the order.
-- Approval Gate routes over-threshold intents to the operator queue.
-- Strategy History logs trigger, context, decision, intent, risk verdict, execution,
-  messages, outcome, review, reflection. One JSONL session per run.
-- CCXT adapter for Binance, Bybit, OKX, Hyperliquid. On-chain support: BSC
-  (PancakeSwap v2), Solana (Jupiter), generic EVM via `eth_account`.
-
-### Adding a new exchange
-
-Missing a venue? Ask the agent:
-
-> **You:** Add Bitget perpetual futures. Use these API docs: https://bitgetlimited.github.io/apidoc/en/
-
-The `coding` skill checks the CCXT bridge first (100+ venues already wired). For a
-supported venue, the agent registers an alias. For a new venue, the agent drops a
-`workspace/providers/<id>/provider.py` file with a `SPEC` constant, calls
-`ConnectorRegistry.reload_providers()` for hot-reload, and verifies with
-`connector_view`. The daemon keeps running. The source tree stays clean. Once the
-venue stabilises, a maintainer can lift the workspace file into `nerya/connectors/`.
-
-### Triggers
-
-`workspace/triggers/routes.yml` maps `kind` to a target (main agent, sub-agent, or
-direct skill). Built-in kinds: cron, webhook, gateway inbound, price breakout,
-funding spike, news keyword, whale wallet, strategy session close, manual operator.
-Idempotency keys, dry-run, dedupe are built in.
-
-### Gateway
-
-Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, generic webhook.
-
-- `GET /gateway/platforms` returns the support matrix.
-- `POST /gateway/inbound` accepts normalized inbound messages.
-- `POST /gateway/send` dispatches outbound through native or webhook channels.
-- Trade notifications fan out through `messaging/pipeline.py` to every configured channel.
-- Telegram keeps the `typing` indicator open until the agent turn closes.
-
-### SDKs
-
-The SDKs never touch keys, exchanges, or RPCs. They are thin clients over the local
-daemon. The daemon enforces every skill permission, risk gate, and approval gate.
-
-```python
-from nerya_sdk import connect
-
-client = connect()
-client.triggers.emit(
-    source="script",
-    kind="price.breakout",
-    payload={"symbol": "BTC", "price": 82_000},
-    target="subagent:market_analyst",
-    strategy_id="btc_momentum",
-)
-```
-
-```ts
-import { connect } from "@nerya/sdk";
-
-const nerya = connect({ baseUrl: "http://127.0.0.1:18317", caller: "script:my_bot" });
-await nerya.trading.submitIntent({
-  strategy_id: "btc_momentum",
-  account_id: "paper_main",
-  market: "PAPER:BTCUSDT",
-  side: "buy",
-  size: 0.01,
-  size_unit: "base",
-  order_type: "market",
-  confidence: 0.6,
-  reasoning: "ts-sdk demo",
-});
-```
-
----
-
-## Quick start
-
-### One-liner install
+The source workflow is for developers and server deployments. Use the Node and Python versions pinned in `.node-version` and `.python-version`.
 
 ```bash
-# macOS / Linux
-curl -LsSf https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.sh | sh
-
-# Windows PowerShell
-iwr https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.ps1 -UseBasicParsing | iex
+git clone https://github.com/NeryaAI/Nerya.git
+cd Nerya
+uv venv
+uv pip install -e ".[dev,mcp,trading,prediction,browser]"
+npm ci
+npm --prefix desktop ci
 ```
 
-If the repo is still private, anonymous `raw.githubusercontent.com` requests will
-return `404`. The commands above are the canonical public-launch URLs.
-
-The installer is idempotent. It:
-
-1. installs [`uv`](https://github.com/astral-sh/uv) if missing,
-2. clones Nerya into `~/.nerya/src` and runs `uv sync --extra trading`,
-3. drops a `nerya` shim into `~/.local/bin` (POSIX) or `%USERPROFILE%\.local\bin` (Windows),
-4. initialises a workspace at `~/nerya-ws`,
-5. registers a host service (`systemd --user`, `launchd`, or NSSM) so the local API
-   boots with the machine on port `18317`.
-
-### Beginner mode
+For desktop development:
 
 ```bash
-nerya setup --tui      # rich text wizard for password, LLM key, gateway, memory, account
-nerya setup --web      # same wizard in the browser at http://127.0.0.1:18380/setup
+npm --prefix desktop run dev
 ```
 
-Every domain except the LLM model carries a safe default. Hit Enter through every
-prompt and you get a working install. Then open the dashboard and chat:
+The desktop launcher manages its local services. A source build additionally requires Rust and the platform's native build dependencies. For a web-only deployment, use the existing [CLI and MCP guide](MCP.md) and `nerya --help`; the web dashboard remains independent of Tauri.
 
-> **You:** I have $500 in a paper account. Make me money on BTC. Don't blow it up.
->
-> **Nerya:** _Starts a `TeamRun`, gathers analyst notes, drafts a
-> `demo_btc_5m_scalper` strategy package, wires up `binance:BTCUSDT` candles, binds
-> `paper_main`, sets a 0.4% max-drawdown guard, schedules the trigger every 5
-> minutes, and asks you to approve._
-
-### Manual quick start (no installer)
+## Build, verify and release
 
 ```bash
-# 0. install dependencies
-uv sync --extra trading
-
-# 1. create a workspace
-python -m nerya.cli.app init --workspace ~/.nerya
-
-# 2. inspect installed skills
-python -m nerya.cli.app skill list
-
-# 3. run the vertical slice demo (paper trading, no live keys)
-python sdk/python/examples/price_tracker.py --workspace ~/.nerya
-
-# 4. review the resulting strategy session
-python -m nerya.cli.app strategy history btc_momentum --workspace ~/.nerya
-
-# 5. reflect and generate evolution proposals
-python -m nerya.cli.app reflect  --workspace ~/.nerya
-python -m nerya.cli.app evolve   --workspace ~/.nerya
-python -m nerya.cli.app proposals list --workspace ~/.nerya
+python scripts/release_version.py
+npm run typecheck --workspace @nerya/dashboard
+npm run check:i18n --workspace @nerya/dashboard
+python -m unittest discover -s desktop/tests -v
+npm --prefix desktop run build
+python desktop/scripts/verify_runtime.py
+python desktop/scripts/smoke.py --access-port 0
 ```
 
-### Open the local dashboard (Windows)
+Run Python commands in the project virtual environment. macOS additionally provides `node desktop/scripts/installer.mjs` after building the app. [The desktop guide](desktop/README.md) contains exact native bundle commands and installer-payload checks.
 
-```powershell
-pwsh -File .\scripts\windows\start-local.ps1 -OpenDashboard
+The [desktop workflow](.github/workflows/desktop.yml) builds on Windows, Linux, Apple Silicon macOS and Intel macOS separately. It checks version consistency, locked dependencies, frontend types, Python distribution contents, desktop unit tests and the packaged runtime. Installer payload smoke tests use temporary workspaces and fake credentials, without calling a model or placing a trade. A build is not considered verified merely because the Rust compiler exits successfully.
+
+Push a tag matching `VERSION` (for example `v1.0.0-beta.1`) to request a release. Only after the required workflow jobs succeed does the release job publish the installers, SHA-256 checksums and build metadata. Normal pushes and pull requests build artifacts but do not publish a release. Native notification prompts, OS trust dialogs and broker-specific live execution still require their own acceptance testing.
+
+## Project layout
+
+```text
+nerya/              Python Agent runtime, APIs, connectors and trading services
+nerya/skills/       Built-in SKILL.md playbooks, references and executable helpers
+nerya/sdk/          Runtime strategy, trading and trigger APIs
+sdk/               Python and TypeScript client SDKs
+dashboard/         Next.js conversation and strategy workspace
+desktop/           Tauri shell, portable runtime packaging and native smoke tests
+tests/             Runtime regression tests
+.github/workflows/ Validation, native desktop builds and release publication
 ```
 
-The launcher is idempotent. Re-run it whenever. API on `:18317`, dashboard on
-`:18380`, logs in `~/.nerya/logs/`.
+## Security and licensing
 
----
+Live execution requires the corresponding configuration and authorization; do not bypass the trading risk and approval gates. Vault encryption protects stored credentials, not a compromised running process. Keep backups of your workspace and its encryption key, and never commit account secrets, `.env` files or live trading state.
 
-## Architecture
-
-```
-┌──────────────────────────── Nerya runtime ────────────────────────────┐
-│                                                                        │
-│   ┌──────────────────┐   ┌─────────────┐   ┌──────────────────────┐    │
-│   │ Trigger router   │──►│ Nerya kernel│──►│ Skills runtime         │   │
-│   │ schedule / NL /  │   │  agent loop │   │ registry + dispatch    │   │
-│   │ webhook / gateway│   │  + planner  │   │ permissions + manifest │   │
-│   └──────────────────┘   └──────┬──────┘   └───────────┬──────────┘    │
-│                                 │                      │               │
-│                                 ▼                      ▼               │
-│   ┌─────────────┐   ┌─────────────┐   ┌──────────────────────────┐    │
-│   │ LLM gateway │   │ Subagents + │   │  Trading kernel           │   │
-│   │ tiers +     │   │ Agent Team  │   │  intents → Risk Gate →    │   │
-│   │ budget +    │   │ blackboard +│   │  Approval Gate →           │   │
-│   │ adapters    │   │ mailbox     │   │  paper / live execution    │   │
-│   └─────────────┘   └─────────────┘   └──────────────┬───────────┘    │
-│                                                       │               │
-│   ┌─────────────┐   ┌─────────────┐   ┌──────────┐   │               │
-│   │ Messaging   │   │ Security    │   │ MCP /    │   │               │
-│   │ Gateway     │   │ vault +     │   │ ACP      │   │               │
-│   │ pipeline    │   │ signer +    │   │ bridges  │   │               │
-│   │             │   │ firewall    │   │          │   │               │
-│   └─────────────┘   └─────────────┘   └──────────┘   ▼               │
-│                              Strategy history + journals + proposals  │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌───────────────────────── Nerya workspace (files only) ────────────────┐
-│  state/ journals/ inbox/ outbox/ memory/ vault/ approvals/             │
-│  strategies/<id>/{strategy.yml, limits.yml, history/, sessions/}       │
-│  skills/{enabled.yml, installed/, pending/}                            │
-│  scripts/{pending/, approved/, rejected/}                              │
-│  evolution/proposals/                                                  │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-Code lives in the repo. Runtime state (strategies, journals, sessions, approvals,
-memory, vault, proposals) lives in your workspace directory. Back it up and audit
-it as ordinary files.
-
----
-
-## SDKs
-
-| Surface  | Path                                  | Purpose                                                                     |
-|----------|---------------------------------------|-----------------------------------------------------------------------------|
-| Python   | `sdk/python/nerya_sdk/`               | Thin client over the local daemon. Triggers, trading, LLM, strategy, memory. |
-| TypeScript | `sdk/typescript/` → `@nerya/sdk`    | Same surface. Node, Bun, and Edge friendly.                                  |
-| MCP      | `nerya/mcp/`                          | Optional stdio/HTTP server; shared CLI tool catalog with explicit exposure policy.         |
-| ACP      | `nerya/acp/`                          | Agent-to-agent bridges for inter-swarm communication.                        |
-
-External agents can use `nerya tools list|describe|call`, `nerya agent`, and `nerya config`. MCP is **disabled by default** (`mcp.enabled: false`). Settings → MCP & external agents manages administrator-password OAuth2, the shared public `/mcp` endpoint, all Skill definitions and Agent assignments, and OpenAI Secure MCP Tunnel. Strategy, Skill and configuration changes remain reviewable proposals. See the [MCP and CLI integration guide](MCP.md) for installation, write permissions, and client configuration.
-
-```bash
-# Python SDK examples
-python sdk/python/examples/price_tracker.py          # trigger → sub-agent → paper fill
-python sdk/python/examples/news_alpha_watcher.py     # light + high LLM filter chain
-python sdk/python/examples/direct_order_strategy.py  # direct order, still via Risk Gate
-python sdk/python/examples/funding_spike_trigger.py  # perp funding spike trigger
-python sdk/python/examples/whale_wallet_trigger.py   # whale wallet activity trigger
-```
-
----
-
-## Safety
-
-- Paper trading is the default. Live trading stays off unless
-  `runtime.live_trading_enabled: true` **and** the Approval Gate signs off.
-- No raw secrets reach agent context. Only `secret_ref` and redacted previews.
-  `SecretVault` resolves `vault://` refs in-memory for one call, then discards them.
-- No direct exchange calls from agent-authored code. Every external call goes through
-  a registered skill, then a connector, then a signer.
-- Scripts run in a sandbox: whitelisted imports, JSON I/O, manual approval before
-  first run, no bypass of Trading SDK or Risk Gate.
-- Evolution can mutate prompts, scripts, skills, routes, strategy configs. It cannot
-  mutate `limits.yml`, `live_trading_enabled`, signer policy, or secret policy.
-  `promotion.py` rejects protected diffs.
-
----
-
-## Repo modules
-
-| Module               | Role                                                                                                |
-|----------------------|-----------------------------------------------------------------------------------------------------|
-| `agent/`             | Kernel, planner, context builder, memory, working memory, reflection                                |
-| `subagents/`         | Per-role runtimes with skill allow/denylists, budget caps, parallel dispatcher, result aggregator   |
-| `teams/`             | Durable Agent Team: config, store, mailbox, blackboard, templates, orchestrator, gates, aggregator  |
-| `triggers/`          | Cron + trigger router, `schedules.yml`, idempotency, dry-run                                        |
-| `skills/`            | `SKILL.md` kernel + 30 built-in skills across trading, data, investment research, agents, and build |
-| `trading/`           | TradeIntent, RiskGate, ApprovalGate, paper execution, virtual ledger, positions, PnL, reconciliation |
-| `connectors/`        | CCXT adapter (Binance/Bybit/OKX/Hyperliquid), native EVM/BSC/Solana, dynamic provider spec          |
-| `wallet/`            | Self-custody, OKX OS, Bitget, Binance Agentic, Coinbase wallet providers                            |
-| `llm/`               | ModelRouter, OpenAI/Anthropic/Gemini/Ollama adapters, credential pool, compression, tiers, budget   |
-| `security/`          | Vault, signer, prompt firewall, redaction, structured-output validator, script sandbox              |
-| `evolution/`         | Reflection engine, typed proposals, operator-signed promotion, snapshot rollback                    |
-| `strategy_history/`  | Per-strategy JSONL ledgers, session artifacts, replay                                                |
-| `messaging/`         | Universal gateway: Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, webhooks            |
-| `mcp/`, `acp/`       | Optional MCP server + ACP adapter for bridging skills to external agent ecosystems                       |
-| `install/`           | Cross-platform service (systemd, launchd, NSSM) installer                                           |
-| `sdk/`               | In-process InternalClient + Trigger, Trading, LLM, Strategy, Message, Skill surfaces                |
-
----
-
-## Run the tests
-
-```bash
-python -m pytest tests/
-```
-
-500+ tests cover: skill manifests, trigger router (dedupe, dry-run, sub-agent
-routing), schedule operator lifecycle, Trading SDK (risk gate, kill switch, over-size,
-paper fill, strategy session creation), LLM gateway and OpenRouter-style routing,
-model catalog refresh, secret redaction, script sandbox, reflection and evolution,
-strategy history and explain-trade, sub-agent and agent-kernel turns, dynamic
-connector discovery, CEX live-signed order placement (Binance, Bybit, OKX,
-Hyperliquid), DEX live-signed swaps (BSC PancakeSwap, Solana Jupiter), MCP and ACP
-adapters, dev-mode journaling, and the service installer.
-
-The suite runs without network. LLM adapters use `FakeTransport`. Exchanges use
-`mock_exchange.py` and `mock_chain.py`. End-to-end LLM behavior is driven by
-deterministic `<<MOCK_DECISION:{…}>>` hooks.
-
-The current runtime smoke set covers daily chat, investment research, strategy
-validation/build, token analysis, stock analysis, and paper/mock order intent.
-
----
-
-## Ports
-
-One local port by default: `18317`. Local daemon, host service, dashboard proxy,
-SDK target all share it. Pass `--port` to `nerya serve` or `nerya service install`
-and point the dashboard and SDKs at the new URL via the `NERYA_API` environment
-variable.
-
----
-
-## Status
-
-- ✅ Vertical slice end-to-end: `init → skill list → trigger → sub-agent turn →
-  TradeIntent → Risk Gate → paper fill → strategy history → review → reflect →
-  proposals`.
-- ✅ Agent Team Phase 1–4 live: durable team core, templates, orchestrator,
-  planner/kernel integration, skill and HTTP surface. Phase 5
-  (snapshot/replay/team-close memory) deferred.
-- ✅ CEX live-signed order placement and cancellation for Binance, Bybit, OKX, and
-  Hyperliquid. DEX swaps for BSC PancakeSwap v2 and Solana Jupiter.
-- ✅ Cross-platform one-line installer with service registration.
-- ✅ Dashboard (Next.js 14): Setup wizard, Chat, Strategies, Evolution, Memory,
-  Skills, Workflows, Inbox, Portfolio, Gateway, Env Vault, Settings.
-- 🚧 Agent Team Phase 5: snapshot and replay.
-- 🚧 More native gateway adapters: Feishu rich cards, Discord slash commands,
-  WhatsApp Business.
-
----
-
-## License
-
-Nerya is released under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
-The full text lives in [`LICENSE`](LICENSE).
-
-- ✅ **Free for personal use**: study, research, hobby projects, experiments,
-  writing papers, running it against your own paper or live account with your
-  own money. Read it, modify it, fork it, share it.
-- ✅ **Free for nonprofits, schools, and public-interest organizations**: the
-  license is explicit about this.
-- ❌ **Commercial use needs a separate license**, including hosting Nerya as a
-  managed/SaaS service, embedding it in a paid product, running it inside a
-  for-profit firm's trading or fund-management operations, or selling
-  Nerya-powered strategy execution to third parties.
-
-Need a commercial license? Open a GitHub issue describing your use case, or email
-the maintainers. See the [Commercial Use Addendum](LICENSE) at the end of the
-LICENSE file.
-
----
-
-<div align="center">
-
-Built for operators who want a local Agent Team that can research, trade, learn
-from its mistakes, and evolve its own strategies, without ever handing over the
-hot keys.
-
-<sub>Nerya · Evolutionary Brain</sub>
-
-</div>
+Nerya is licensed under [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use requires a separate license. Bundled third-party components retain their own licenses. This beta is software for research and strategy operations, not investment advice or a guarantee against financial loss.

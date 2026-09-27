@@ -102,10 +102,6 @@ _PROPOSAL_ONLY_CONFIG_FILES = {
     "messages/channels.yaml",
     "policies/planner.yml",
     "policies/tier_policy.yml",
-    # Skill allow-list is a capability surface — route through
-    # evolve_core_config_patch like the other runtime config files.
-    "skills/enabled.yml",
-    "skills/enabled.yaml",
     "ui/workspace.yml",
     "workspace/ui.yml",
 }
@@ -141,6 +137,8 @@ def _proposal_required_tools(path: str) -> list[str]:
     p = _normalise_mutation_path(path)
     if not p or p.startswith("evolution/proposals/"):
         return []
+    if p in {"skills/enabled.yml", "skills/enabled.yaml"}:
+        return ["skill_manage"]
     if p in _PROPOSAL_ONLY_CONFIG_FILES:
         return ["evolve_core_config_patch"]
     if fnmatch.fnmatchcase(p, "strategies/*") or fnmatch.fnmatchcase(p, "strategies/**/*"):
@@ -155,6 +153,28 @@ def _proposal_required_result(
     tools: list[str],
 ) -> ToolResult:
     primary = tools[0] if tools else "proposal tool"
+    if primary == "skill_manage":
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_DENIED,
+                message=(
+                    f"direct mutation of {path!r} is managed by skill_manage. "
+                    "Do not edit the Skill enablement file manually; call "
+                    "skill_manage with enable/disable/delete instead. No proposal "
+                    "or Action Inbox step is required."
+                ),
+                retryable=False,
+                recovery_hint={
+                    "next_required_action": {
+                        "tool": "skill_manage",
+                        "path": path,
+                        "reason": "managed_skill_mutation",
+                    }
+                },
+            ),
+        )
     return ToolResult.from_error(
         tool_use_id=call.id,
         name=call.name,

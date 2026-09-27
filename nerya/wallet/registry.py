@@ -153,7 +153,15 @@ PROVIDERS: dict[str, dict[str, Any]] = {
                     "Pointer to a workspace signer policy entry. Leave "
                     "blank to keep the wallet read-only."
                 ),
-                placeholder="local:my_signer",
+                placeholder="vault://my_signer",
+            ),
+            _field(
+                'jupiter_url','Jupiter API URL',kind='url',required=False,sensitive=False,
+                placeholder='https://api.jup.ag/swap/v1',
+            ),
+            _field(
+                'jupiter_api_key_ref','Jupiter API key vault reference',kind='public',required=False,sensitive=False,
+                placeholder='vault://jupiter-api-key',
             ),
             _field(
                 "rpc_urls.ethereum", "Ethereum RPC URL", kind="url",
@@ -335,6 +343,12 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             ),
         ],
         "advanced_credential_fields": [
+            _field('signer_ref','Signer vault reference',kind='public',required=False,sensitive=False,
+                   placeholder='vault://wallet-signing-key'),
+            _field('rpc_urls.ethereum','Ethereum RPC',kind='url',required=False,sensitive=False),
+            _field('rpc_urls.base','Base RPC',kind='url',required=False,sensitive=False),
+            _field('rpc_urls.bsc','BSC RPC',kind='url',required=False,sensitive=False),
+            _field('rpc_urls.solana','Solana RPC',kind='url',required=False,sensitive=False),
             _field(
                 "api_key", "OKX Open API Key", kind="secret", required=False,
                 description="Advanced: only needed for signed OKX Web3 Open API calls.",
@@ -713,7 +727,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "docs": "https://byreal.io",
             "repo": "https://github.com/byreal-git/byreal-agent-skills",
             "npm": "https://www.npmjs.com/package/@byreal-io/byreal-cli",
-            "config": "wallet.byreal.{cli_path, rpc_url, keypair_path}",
+            "config": "wallet.byreal.{cli_path, rpc_url, keypair_path, signer_ref}",
         },
         "runtime": "node",
         "auth_cli": {
@@ -777,11 +791,15 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         ],
         "advanced_credential_fields": [
             _field(
+                'signer_ref','Solana signer vault reference',kind='public',
+                required=False,sensitive=False,placeholder='vault://solana-signer',
+                description='Explicit signing identity for router swaps; alternatively set keypair_path.',
+            ),
+            _field(
                 "keypair_path", "Byreal keypair path", kind="public",
                 sensitive=False, required=False,
                 description=(
-                    "Optional path to the local Solana keypair directory "
-                    "(default ~/.config/byreal/keys/)."
+                    "Explicit Solana keypair JSON file. Execution uses this wallet, not a CLI global default."
                 ),
             ),
         ],
@@ -789,7 +807,61 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 
-def _capabilities_for(name: str) -> WalletCapabilities | None:
+PROVIDERS['external']={
+    'id':'external','label':'External wallet / DEX adapter','runtime':'process',
+    'description':'Versioned JSON adapter for an explicitly installed wallet or DEX integration.',
+    'credential_fields':[
+        _field('command','Adapter argv',kind='public',required=True,sensitive=False,
+               description='JSON argv array, e.g. ["python3", "/absolute/path/adapter.py"].'),
+    ],
+    'market_data_sources':[_market_source('external_onchain','EXTERNAL_ONCHAIN','External adapter token candles',market_format='chain:token',fetch_method='get_token_klines',description='Configured external adapter candles or public USD token data')],
+}
+PROVIDERS['evm_v2']={
+    'id':'evm_v2','label':'EVM V2 DEX router','runtime':'python',
+    'description':'Explicit Router02-compatible DEX, wrapped native token, RPC and signer.',
+    'credential_fields':[_field(k,k,kind='public',required=True,sensitive=False)
+                         for k in ('chain','router','wrapped_native','native_symbol','signer_ref')],
+}
+for _provider in ('self_custody','metamask','bitget','coinbase','binance_agentic','evm_v2','external'):
+    _entry=PROVIDERS[_provider]
+    _entry.setdefault('advanced_credential_fields',[]).extend(
+        _field(k,k,kind='public',required=False,sensitive=False)
+        for k in ('backend','wallet_address','rpc_urls','dex_routes','funding_tokens','token_symbols')
+        if k not in {f['name'] for f in _entry.get('credential_fields',[])+_entry.get('advanced_credential_fields',[])})
+PROVIDERS['bitget']['advanced_credential_fields'].append(_field('signer_ref','Signer vault reference',kind='public',required=False,sensitive=False))
+PROVIDERS['coinbase']['advanced_credential_fields'].append(_field('wallet_secret','CDP v2 wallet secret',kind='secret',required=False))
+PROVIDERS['binance_agentic']['advanced_credential_fields'].append(_field('cli_path','baw CLI path',kind='public',required=False,sensitive=False))
+PROVIDERS['external']['advanced_credential_fields'].extend(_field(k,k,kind='public',required=False,sensitive=False) for k in ('chains','timeout_s','env_refs'))
+
+# Trusted plugins register factories for their workspace only. No imports from
+# user-supplied config strings, and no replacement of built-in adapters.
+_CUSTOM_PROVIDERS={}
+
+
+def register_wallet_provider(name,factory,*,workspace,metadata=None):
+    import re
+    if not re.fullmatch(r'[a-z][a-z0-9_-]{1,63}',name) or name in PROVIDERS:
+        raise ValueError('wallet provider name is invalid or reserved')
+    if not callable(factory):raise ValueError('wallet provider factory must be callable')
+    root=str(Path(workspace).resolve());key=(root,name)
+    if key in _CUSTOM_PROVIDERS:raise ValueError('wallet provider already registered in workspace')
+    entry=(factory,dict(metadata or {}))
+    _CUSTOM_PROVIDERS[key]=entry
+    def dispose():
+        if _CUSTOM_PROVIDERS.get(key) is entry:_CUSTOM_PROVIDERS.pop(key,None)
+    return dispose
+
+
+def provider_catalog(workspace=None):
+    catalog=dict(PROVIDERS)
+    if workspace is not None:
+        root=str(Path(workspace).resolve())
+        for (scope,name),(_,metadata) in list(_CUSTOM_PROVIDERS.items()):
+            if scope==root:catalog[name]={**metadata,'id':name,'label':metadata.get('label',name),'runtime':'plugin'}
+    return catalog
+
+
+def _capabilities_for(name: str,workspace=None) -> WalletCapabilities | None:
     """Best-effort static capability lookup without a full config.
 
     Instantiates the provider with an empty config to reach its static
@@ -798,7 +870,7 @@ def _capabilities_for(name: str) -> WalletCapabilities | None:
     ``readiness_report`` path is free to retry with the real config.
     """
     try:
-        provider = build_provider(name, {})
+        provider = build_provider(name, {},workspace=workspace)
     except Exception:
         return None
     try:
@@ -807,7 +879,7 @@ def _capabilities_for(name: str) -> WalletCapabilities | None:
         return None
 
 
-def list_providers() -> list[dict[str, Any]]:
+def list_providers(*,workspace=None) -> list[dict[str, Any]]:
     """Return the static provider catalog (not instantiated).
 
     Each entry is enriched with the provider's static capability
@@ -816,10 +888,10 @@ def list_providers() -> list[dict[str, Any]]:
     matrix without having to actually construct credentials.
     """
     out: list[dict[str, Any]] = []
-    for name, entry in PROVIDERS.items():
+    for name, entry in provider_catalog(workspace).items():
         item = dict(entry)
         item.setdefault("installed", True)
-        caps = _capabilities_for(name)
+        caps = _capabilities_for(name,workspace)
         item["capabilities"] = caps.to_dict() if caps else None
         item["stability"] = (
             caps.execution_profile if caps is not None else "experimental"
@@ -891,6 +963,19 @@ def build_provider(
     """Instantiate the given provider, applying cfg without installing anything."""
     name_l = (name or "").lower()
     cfg = dict(cfg or {})
+    custom=_CUSTOM_PROVIDERS.get((str(Path(workspace).resolve()),name_l)) if workspace else None
+    if custom:
+        provider=custom[0](cfg,workspace=workspace,vault_passphrase=vault_passphrase)
+        for method in ('readiness','capabilities','get_balance','quote','swap','get_execution_status'):
+            if not callable(getattr(provider,method,None)):raise WalletProviderNotFound('adapter missing '+method)
+        return provider
+    if name_l == 'external':
+        from .providers.external import ExternalWallet
+        return ExternalWallet(config=cfg,workspace=str(workspace or ''))
+    if name_l == 'evm_v2':
+        from .providers.evm_v2 import EvmV2Wallet
+        return EvmV2Wallet(config=cfg,workspace=str(workspace or ''),signer_ref=str(cfg.get('signer_ref') or ''),
+            rpc_urls=dict(cfg.get('rpc_urls') or {}),vault_passphrase=vault_passphrase or '')
     if name_l == "self_custody":
         return SelfCustodyWallet(
             signer_ref=str(cfg.get("signer_ref") or ""),
@@ -946,6 +1031,7 @@ def build_provider(
             vault_passphrase,
         )
         return BitgetWalletSkill(
+            workspace=str(workspace or ''),
             skill_path=str(cfg.get("skill_path") or ""),
             entry=str(cfg.get("entry") or BitgetWalletSkill.entry),
             repo=str(cfg.get("repo") or BitgetWalletSkill.repo),
@@ -972,6 +1058,8 @@ def build_provider(
             config=cfg,
         )
     if name_l == "coinbase":
+        if cfg.get('wallet_secret_ref'):
+            cfg['wallet_secret']=_resolve(cfg['wallet_secret_ref'],workspace,vault_passphrase)
         api_key = _resolve(cfg.get("api_key_name_ref") or cfg.get("api_key_name"),
                             workspace, vault_passphrase)
         api_priv = _resolve(cfg.get("api_private_key_ref") or cfg.get("api_private_key"),
@@ -1266,8 +1354,8 @@ def readiness_report(
     """
     out: list[dict[str, Any]] = []
     bindings = list_configured_providers(config)
-    for name in PROVIDERS:
-        static = dict(PROVIDERS[name])
+    for name,entry in provider_catalog(workspace).items():
+        static = dict(entry)
         static.setdefault("installed", True)
         wallet_cfg = ((config or {}).get("wallet") or {})
         cfg = dict((wallet_cfg.get(name) or {}))
@@ -1354,6 +1442,9 @@ class WalletRegistry:
         self._cached: dict[str, WalletProvider] = {}
 
     def get(self, name: str, cfg: dict[str, Any] | None = None) -> WalletProvider:
+        if name not in PROVIDERS:
+            # A plugin can unload/re-register without changing its config.
+            return build_provider(name,cfg,workspace=self.workspace,vault_passphrase=self.vault_passphrase)
         # Cache key must include the effective config: two calls with the
         # same provider name but different bindings must not share one
         # instance (per-account credential overrides would silently leak

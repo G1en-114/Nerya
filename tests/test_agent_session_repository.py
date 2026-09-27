@@ -344,24 +344,21 @@ def test_turn_checkpoint_repository_session_lease_serializes_turns(tmp_path):
     con.close()
 
 
-def test_turn_checkpoint_repository_size_limit_and_session_cascade(tmp_path):
+def test_turn_checkpoint_repository_large_roundtrip_and_session_cascade(tmp_path):
     con = connect(tmp_path / "nerya.db")
     repo = AgentSessionRepository(con)
     repo.upsert_session(session_id="s1", title="Session")
 
-    with pytest.raises(ValueError, match="exceeds size limit"):
-        repo.save_turn_checkpoint(
-            "s1",
-            turn_id="t1",
-            checkpoint={"payload": "x" * 100},
-            max_bytes=16,
-        )
-
+    payload = {"version": 1, "turn_id": "t1", "payload": "证据" * 600000}
     assert repo.save_turn_checkpoint(
         "s1",
         turn_id="t1",
-        checkpoint={"version": 1, "turn_id": "t1"},
+        checkpoint=payload,
     )
+    con.close()
+    con = connect(tmp_path / "nerya.db")
+    repo = AgentSessionRepository(con)
+    assert repo.peek_turn_checkpoint("s1")["checkpoint"] == payload
     con.execute("DELETE FROM agent_sessions WHERE session_id='s1'")
     assert repo.peek_turn_checkpoint("s1") is None
     con.close()

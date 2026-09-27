@@ -19,10 +19,10 @@ Two consumers:
 * :func:`mcp_dispatch` — single chokepoint used by the FastMCP wrapper
   to invoke a tool by name (used by the bridge above).
 
-The bridge uses the same permission engine as the agent loop. Remote
-exposure is constrained independently through ``allow_mutating``,
-``allow_exec`` and allow/deny tool lists; the executor mode remains one of
-``default``, ``auto`` or ``yolo``.
+Authenticated remote clients inherit the main agent's workspace capability
+policy and execution mode (``default``, ``auto`` or ``yolo``). Saved MCP-only
+write switches and allow/deny lists no longer restrict that tool surface.
+Explicit policy objects remain supported for callers embedding this library.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Optional
 
 from ..tools import (
@@ -169,35 +169,63 @@ class NativeMCPPolicy:
 
 
 def policy_from_config(config: Any) -> NativeMCPPolicy:
-    """Read ``mcp.native_tools.*`` and ``runtime.mode`` to build a policy."""
+    """Trust authenticated external agents as workspace operators.
 
-    data = (getattr(config, "data", None) or {}) or {}
-    mcp_cfg = (data.get("mcp") or {}) if isinstance(data, dict) else {}
-    native_cfg = (mcp_cfg.get("native_tools") or {}) if isinstance(mcp_cfg, dict) else {}
-    runtime_cfg = (data.get("runtime") or {}) if isinstance(data, dict) else {}
-
-    mode_str = str(native_cfg.get("mode") or "default").lower()
+    Retired mcp.native_tools restrictions (including saved management-only
+    allowlists) must not silently restrict upgraded workspaces. The shared
+    permission engine and the handlers still enforce workspace/risk boundaries.
+    Explicit NativeMCPPolicy objects remain available to library callers.
+    """
+    data = getattr(config, "data", None) or {}
+    runtime_cfg = data.get("runtime", {}) or {}
     try:
-        mode = PermissionMode(mode_str)
+        mode = PermissionMode(str(runtime_cfg.get("permission_mode", "auto")).lower())
     except ValueError:
         mode = PermissionMode.DEFAULT
-
-    return NativeMCPPolicy(
-        mode=mode,
-        allow_mutating=bool(native_cfg.get("allow_mutating", False)),
-        allow_exec=bool(native_cfg.get("allow_exec", False))
-        or bool(runtime_cfg.get("live_trading_enabled", False))
-        and bool(native_cfg.get("inherit_live_trading", False)),
-        deny_tools=tuple(native_cfg.get("deny_tools") or ()),
-        allow_tools=tuple(native_cfg["allow_tools"])
-        if isinstance(native_cfg.get("allow_tools"), (list, tuple))
-        else None,
-    )
+    return NativeMCPPolicy(mode=mode, allow_mutating=True, allow_exec=True)
 
 
 # ---------------------------------------------------------------------------
 # Build / dispatch
 # ---------------------------------------------------------------------------
+
+
+class _MCPApprovalResolver:
+    """Keep exact pending approvals resumable on an external client's retry.
+
+    No remote permission bypass: the shared coordinator validates scope,
+    payload fingerprint, expiry and one-shot consumption of the UI decision.
+    """
+
+    def __init__(self, config: Any):
+        import threading
+        from ..tools.tool_approvals import ToolApprovalScope
+        self.config = config
+        self.scope = ToolApprovalScope(session_id="mcp_" + uuid.uuid4().hex, actor_id="mcp")
+        self.pending: dict[str, Any] = {}
+        self.lock = threading.RLock()
+
+    def resolve(self, call, descriptor, decision):
+        from ..tools.tool_approvals import ToolApprovalCoordinator, ToolApprovalScope, tool_permission_fingerprint
+        from .inbound_sessions import active_call
+        trace = active_call()
+        scope = ToolApprovalScope(session_id=trace.session_id, actor_id=trace.source) if trace else self.scope
+        fingerprint = scope.session_id + ":" + tool_permission_fingerprint(call.name, call.arguments)
+        with self.lock:
+            coordinator = self.pending.get(fingerprint)
+            if coordinator is None:
+                coordinator = ToolApprovalCoordinator(self.config, scope=scope,
+                    turn_id=trace.call_id if trace else "mcp_" + uuid.uuid4().hex)
+            result = coordinator.resolve(replace(call, turn_id=coordinator.turn_id), descriptor, decision)
+            if result.request:
+                coordinator.resume_approval_id = str(result.request.get("approval_id", ""))
+                # Bound abandoned pending requests; evicted ones require fresh approval.
+                if fingerprint not in self.pending and len(self.pending) >= 256:
+                    self.pending.pop(next(iter(self.pending)))
+                self.pending[fingerprint] = coordinator
+            else:
+                self.pending.pop(fingerprint, None)
+            return result
 
 
 def _make_dispatcher(
@@ -210,34 +238,39 @@ def _make_dispatcher(
     ``descriptor``."""
 
     def _fn(**payload: Any) -> dict[str, Any]:
+        from .inbound_sessions import active_call
+        trace = active_call()
         call = ToolCall(
             name=descriptor.name,
             arguments=dict(payload),
-            id=f"toolu_mcp_{uuid.uuid4().hex[:10]}",
-            turn_id="mcp",
+            id=f"toolu_mcp_{uuid.uuid4().hex}",
+            turn_id=trace.call_id if trace else "mcp_" + uuid.uuid4().hex,
             iteration=0,
-            caller=caller,
+            caller=trace.source if trace else caller,
         )
+        if trace:
+            trace.native_start(call)
         try:
             result: ToolResult = executor.execute(call)
-        except Exception as exc:  # pragma: no cover - defensive
+            body = _result_as_mcp_dict(result, descriptor=descriptor)
+        except Exception:  # pragma: no cover - defensive
             _LOG.exception("MCP dispatch crashed for %s", descriptor.name)
-            return {
-                "ok": False,
-                "error": {
-                    "code": type(exc).__name__,
-                    "message": str(exc),
-                    "tool": descriptor.name,
-                },
-            }
-        return _result_as_mcp_dict(result, descriptor=descriptor)
+            body = {"ok": False, "error": {"code": "internal", "message": "Native tool execution failed", "tool": descriptor.name}}
+        if trace:
+            try:
+                trace.native_finish(call, body)
+            except Exception:
+                # A failed observer must never turn a completed mutation into a
+                # retryable tool failure. The outer trace still finalizes it.
+                _LOG.warning("Native MCP trace update failed")
+        return body
 
     _fn.__name__ = native_mcp_tool_name(descriptor.name)
     _fn.__doc__ = descriptor.description
     return _fn
 
 
-def _result_as_mcp_dict(result: ToolResult, *, descriptor: ToolDescriptor) -> dict[str, Any]:
+def _result_as_mcp_dict(result: ToolResult, *, descriptor: Optional[ToolDescriptor] = None) -> dict[str, Any]:
     """Render :class:`ToolResult` into the dict shape MCP clients expect."""
 
     body: dict[str, Any] = {
@@ -269,10 +302,11 @@ def _result_as_mcp_dict(result: ToolResult, *, descriptor: ToolDescriptor) -> di
             "detail": result.error.detail,
             "retryable": result.error.retryable,
         }
-    body["descriptor"] = {
-        "risk": descriptor.permission_scope.value,
-        "result_kind": descriptor.result_kind,
-    }
+    if descriptor is not None:
+        body["descriptor"] = {
+            "risk": descriptor.permission_scope.value,
+            "result_kind": descriptor.result_kind,
+        }
     return body
 
 
@@ -291,11 +325,18 @@ def build_native_mcp_registry(
 
     policy = policy or policy_from_config(config)
     permission_engine = PermissionEngine()
-    permission_context = PermissionContext(mode=policy.mode)
+    from ..tools.capability_policy import normalise_tool_policy
+
+    data = getattr(config, "data", None) or {}
+    native = (data.get("agent", {}) or {}).get("native", {}) or {}
+    permission_context = PermissionContext(
+        mode=policy.mode, tool_policy=normalise_tool_policy(native.get("tool_policy")),
+    )
     executor = NativeToolExecutor(
         registry=registry,
         permission_engine=permission_engine,
         permission_context=permission_context,
+        approval_resolver=_MCPApprovalResolver(config) if getattr(config, "paths", None) else None,
     )
 
     descriptors: Iterable[ToolDescriptor] = registry.list_tools()

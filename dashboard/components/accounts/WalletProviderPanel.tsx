@@ -27,9 +27,11 @@ function capabilityTone(status?: string): "ok" | "warn" | "neutral" {
 export function WalletProviderPanel({
   onChanged,
   bare = false,
+  connectionOnly = false,
 }: {
   onChanged?: () => void;
   bare?: boolean;
+  connectionOnly?: boolean;
 }) {
   const t = useTranslations("walletSetup");
   const [providers, setProviders] = useState<WalletProviderInfo[]>([]);
@@ -58,10 +60,10 @@ export function WalletProviderPanel({
   // read-only until the operator explicitly enables trading on the
   // /accounts/<id> page. Operators uneasy with that can flip to
   // ``paper`` / ``shadow`` here before saving.
-  const [autoCreateAccount, setAutoCreateAccount] = useState(true);
+  const [autoCreateAccount, setAutoCreateAccount] = useState(!connectionOnly);
   const [accountMode, setAccountMode] = useState<
     "paper" | "shadow" | "canary" | "live"
-  >("live");
+  >("shadow");
   const [accountIdHint, setAccountIdHint] = useState("");
   const [initialBalance, setInitialBalance] = useState("");
   const [lastAccountId, setLastAccountId] = useState("");
@@ -253,7 +255,7 @@ export function WalletProviderPanel({
     account_id_hint?: string;
     initial_balance_usd?: number;
   } {
-    if (!autoCreateAccount) return {};
+    if (connectionOnly || !autoCreateAccount) return { auto_create_account: false };
     const trimmed = accountIdHint.trim();
     const balance = initialBalance.trim();
     const args: {
@@ -691,7 +693,7 @@ export function WalletProviderPanel({
                           : t("noBindings")}
                       </td>
                       <td className="flex flex-wrap justify-end gap-1.5">
-                        <button
+                        <button type="button"
                           onClick={() => void install(provider)}
                           disabled={busy === `auth:${provider.id}`}
                           className="btn-ghost text-[11px] py-0.5"
@@ -699,7 +701,7 @@ export function WalletProviderPanel({
                         >
                           {busy === `auth:${provider.id}` ? authBusyLabel(provider) : authActionLabel(provider)}
                         </button>
-                        <button
+                        <button type="button"
                           onClick={() => void selectProvider(provider, { openDialog: true })}
                           className="btn-ghost text-[11px] py-0.5 text-accent-300"
                         >
@@ -727,7 +729,7 @@ export function WalletProviderPanel({
                   {t("plaintextVaultHint")}
                 </div>
               </div>
-              <button
+              <button type="button"
                 disabled={busy === `save:${selected.id}`}
                 onClick={() => {
                   setDialogOpen(false);
@@ -814,21 +816,21 @@ export function WalletProviderPanel({
                   </div>
                 ) : null}
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button
+                  <button type="button"
                     onClick={() => void startWalletAuth()}
                     disabled={busy === `auth:${selected.id}`}
                     className="btn-ghost text-xs text-accent-300"
                   >
                     {busy === `auth:${selected.id}` ? authBusyLabel(selected) : authActionLabel(selected)}
                   </button>
-                  <button
+                  <button type="button"
                     onClick={() => void verifyWalletAuth()}
                     disabled={busy === `verify:${selected.id}`}
                     className="btn-ghost text-xs"
                   >
                     {busy === `verify:${selected.id}` ? t("verifying") : t("verifyAuth")}
                   </button>
-                  <button
+                  <button type="button"
                     onClick={() => void refreshWalletAuthStatus()}
                     disabled={busy === `status:${selected.id}`}
                     className="btn-ghost text-xs"
@@ -866,7 +868,7 @@ export function WalletProviderPanel({
              * forces them to fill the /accounts form a second time
              * to mirror the wallet they just configured).
              */}
-            <div className="mt-3 rounded border border-brand-500/15 bg-ink-950/30 p-3">
+            <div hidden={connectionOnly} className="mt-3 rounded border border-brand-500/15 bg-ink-950/30 p-3">
               <label className="flex items-start gap-2 text-xs text-ink-200">
                 <input
                   type="checkbox"
@@ -1018,14 +1020,14 @@ export function WalletProviderPanel({
                 />
                 {t("activateDefault")}
               </label>
-              <button
+              <button type="button"
                 onClick={() => void saveBinding()}
                 disabled={busy === `save:${selected.id}`}
                 className="btn-ghost text-xs text-accent-300"
               >
                 {busy === `save:${selected.id}` ? t("saving") : t("saveBinding")}
               </button>
-              <button
+              <button type="button"
                 onClick={() => void testAccountBalance()}
                 disabled={
                   !autoCreateAccount ||

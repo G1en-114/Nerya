@@ -14,24 +14,30 @@ from .selector import select_assets_for_signals
 from .signals import collect_signals
 
 
-def evolve(config: Config) -> dict[str, Any]:
-    reflection = run_reflection(config.paths, config=config)
+def evolve(config: Config, *, strategy_id: str | None = None, isolated: bool = False) -> dict[str, Any]:
+    reflection = run_reflection(config.paths, strategy_ids=[strategy_id] if strategy_id else [] if isolated else None, config=config)
     if not reflection["ok"] or not reflection["has_evidence"]:
         return {
             "status": "collection_failed" if not reflection["ok"] else "no_evidence",
             "reflection": reflection, "proposal": None, "signals": [], "selected_assets": {},
         }
-    signals = collect_signals(config.paths, persist=True)
+    signals = collect_signals(config.paths, strategy_id=strategy_id, persist=True)
+    if isolated and not strategy_id:
+        signals = [s for s in signals if not s.get("strategy_id")]
     strategies = list(reflection["strategies"])
     selected = select_assets_for_signals(
-        config.paths, signals, strategy_id=strategies[0] if len(strategies) == 1 else None,
+        config.paths, signals, strategy_id=strategy_id or (strategies[0] if len(strategies) == 1 else None),
+        scope_usage_to_strategy=bool(strategy_id), include_post_apply=not bool(strategy_id),
+        require_strategy_gene_owner=isolated and bool(strategy_id),
     )
+    if isolated and not strategy_id:
+        selected = {"genes": [], "capsules": []}
     refs = list(dict.fromkeys([
         reflection["snapshot_ref"],
         *(str(ref) for signal in signals for ref in signal.get("evidence_refs") or []),
     ]))
     event = record_event(
-        config.paths, signals=[str(signal["id"]) for signal in signals],
+        config.paths, strategy_id=strategy_id, signals=[str(signal["id"]) for signal in signals],
         genes_used=[str(gene["id"]) for gene in selected.get("genes", [])],
         validation_status="not_run", outcome="candidate",
         summary="Collected evidence for review; no learning rule or strategy change has been inferred.",

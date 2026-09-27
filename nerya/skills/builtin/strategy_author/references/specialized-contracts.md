@@ -26,6 +26,11 @@ When no durable replay source exists, state the gap and required operator-approv
 
 ## Trading SDK boundaries
 
+The root Skill includes concrete signatures for config, candles, features, settled
+positions and entry/exit with supported protection. Those suffice for standard
+pure-Python indicator strategies; do not look for installed SDK source or example
+repositories with shell. Do not read more references to reconfirm them.
+
 Use `from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask`. Do not import from nerya.sdk, nerya.strategy, internal API/tool modules, exchange or LLM provider libraries. No raw HTTP, environment secrets, process spawning or private file writes. SDK access is scoped and audited.
 
 Positions come from ctx.portfolio.positions(market), a list. Iterate/select a row; never call .get on the whole list. Accounts come from ctx.config.accounts; there is no ctx.account_id. Trades, when requested and permitted, go through ctx.trading.submit_intent/open_position/close_position. There is no StrategyResult.order, StrategyResult.dispatch or StrategyResult.batch. ResultBuilder factories take keyword arguments. Never multiply raw _pct fields by 100.

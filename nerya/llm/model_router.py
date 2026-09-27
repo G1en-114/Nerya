@@ -185,6 +185,9 @@ class ModelRouter:
         )
         last_error: LLMError | None = None
         for route_index, route_cfg in enumerate(routes):
+            route_reasoning_effort = _normalise_reasoning_effort(
+                route_cfg.get("reasoning_effort")
+            )
             raw_route_provider = (route_cfg.get("provider") or "mock").lower()
             route_provider = _catalog_resolve_alias(raw_route_provider) or raw_route_provider
             route_keys = self._resolve_route_api_keys(route_cfg)
@@ -270,11 +273,19 @@ class ModelRouter:
                 sig = None
             if sig is not None:
                 params = sig.parameters
+                accepts_kwargs = any(
+                    param.kind is inspect.Parameter.VAR_KEYWORD
+                    for param in params.values()
+                )
                 if timeout_override is not None and "timeout" in params:
                     adapter_kwargs["timeout"] = float(timeout_override)
-                if reasoning_effort and "reasoning_effort" in params:
-                    adapter_kwargs["reasoning_effort"] = reasoning_effort
-                if reasoning_summary and "reasoning_summary" in params:
+                if route_reasoning_effort and (
+                    "reasoning_effort" in params or accepts_kwargs
+                ):
+                    adapter_kwargs["reasoning_effort"] = route_reasoning_effort
+                if reasoning_summary and (
+                    "reasoning_summary" in params or accepts_kwargs
+                ):
                     adapter_kwargs["reasoning_summary"] = reasoning_summary
             try:
                 res: ProviderResult = adapter(**adapter_kwargs)
@@ -303,7 +314,7 @@ class ModelRouter:
                 reasoning_text=getattr(res, "reasoning_text", "") or "",
                 reasoning_tokens=int(getattr(res, "reasoning_tokens", 0) or 0),
                 reasoning_effort=(
-                    getattr(res, "reasoning_effort", "") or reasoning_effort
+                    getattr(res, "reasoning_effort", "") or route_reasoning_effort
                 ),
             )
         if last_error is not None:

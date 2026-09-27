@@ -71,6 +71,11 @@ class WalletCapabilities:
     execution_profile: str = "stub"
     chains: tuple[str, ...] = ()
     notes: str = ""
+    swap_chains: tuple[str, ...] = ()
+    order_types: tuple[str, ...] = ("market",)
+    protection_types: tuple[str, ...] = ()
+    minimum_output: str = "unknown"
+    receipt_polling: bool = False
 
     def __post_init__(self) -> None:
         if self.execution_profile not in EXECUTION_PROFILE:
@@ -88,6 +93,11 @@ class WalletCapabilities:
             "execution_profile": self.execution_profile,
             "chains": list(self.chains),
             "notes": self.notes,
+            "swap_chains": list(self.swap_chains),
+            "order_types": list(self.order_types),
+            "protection_types": list(self.protection_types),
+            "minimum_output": self.minimum_output,
+            "receipt_polling": self.receipt_polling,
         }
 
 
@@ -222,3 +232,19 @@ class WalletProvider(Protocol):
         amount_in: float, slippage_bps: int = 50,
         receiver: str | None = None, live: bool = False, **kw: Any,
     ) -> WalletSwapResult: ...
+
+    def get_execution_status(self, *, request: dict, transaction: dict) -> WalletSwapResult:
+        """Read an existing transaction; never sign, send or re-create an order.
+
+        Custodial adapters may override to resolve an execution_ref before
+        passing the resulting hash to the shared chain receipt reader.
+        """
+        from .confirmation import read_transaction
+        return read_transaction(self.id, getattr(self, 'config', {}), request, transaction,
+                                transport=getattr(self, 'transport', None))
+
+    def get_token_klines(self, *, chain: str, token: str, interval: str = '1h', limit: int = 100, **kw):
+        """Public USD token candles; adapters may override with declared units."""
+        from ..data.onchain_klines import fetch_token_klines
+        return fetch_token_klines(chain,token,interval=interval,limit=limit,
+            **{k:kw[k] for k in ('start','end','token_mint') if k in kw})

@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: dcf_valuation
+metadata:
+  nerya:
+    catalog_parent: equity_research
 description: "Use for intrinsic value, DCF, fair value, valuation sensitivity, and price-target analysis; source data needs Financial Datasets credentials or explicit inputs."
 version: 0.1.0
 license: MIT

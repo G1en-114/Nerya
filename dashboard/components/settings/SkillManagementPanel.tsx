@@ -1,48 +1,39 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useLocale } from "next-intl";
+import { useTranslations } from "next-intl";
+import * as Dialog from "@radix-ui/react-dialog";
+import { clientApi } from "../../lib/clientApi";
+import { Markdown } from "../chat/Markdown";
 import { ErrorBanner, Pill } from "../Page";
-import { Field, SettingsGroup } from "./SettingsFields";
+import { SkillFileTree } from "./SkillFileTree";
+import { Field } from "./SettingsFields";
 import { confirm } from "../../lib/dialogs";
 import { mcpRequest, type SkillCatalog, type SkillFile, type SkillRow } from "../../lib/mcpSettings";
 
-const copy = {
-  en: { title: "Skill workspace", intro: "Browse every playbook, including nested and disabled Skills. Reading a Skill does not execute it.",
-    scope: "Scope", all: "All Skills", builtin: "Built-in Skills", workspace: "Workspace Skills", agent: "Agent assignments",
-    role: "Agent role", roleHint: "Agent Skills use shared definitions and per-role assignments. Edit shared content from All / Workspace scope.",
-    search: "Search Skills", searchHint: "Name or description", refresh: "Refresh", loading: "Loading Skills…", empty: "No Skills match this scope.",
-    read: "Read", next: "Next page", back: "Previous page", file: "Skill file", content: "Skill content", create: "New Workspace Skill", id: "Skill ID",
-    enabled: "Enabled", disabled: "Disabled", assigned: "Assigned", unassigned: "Not assigned", overrides: "Changes to a built-in Skill create a Workspace override; packaged files stay unchanged.",
-    save: "Propose content change", remove: "Propose deletion", enable: "Propose enable", disable: "Propose disable", assign: "Propose assignment", unassign: "Propose removal",
-    proposal: "Proposal created. Review it in Action Inbox before applying.", pending: "Changes are proposals, not immediate edits. Existing approval and validation gates still apply.",
-    discard: "Discard unsaved Skill content?", confirm: "Create this Skill change proposal?", confirmHint: "This stages a reviewable change. No live Skill is modified yet.",
-    redacted: "Sensitive text was redacted. This view cannot be saved back as a complete replacement.", busy: "Working…", select: "Select a Skill to read its playbook and files.",
-  },
-  zh: { title: "Skill 工作台", intro: "浏览所有说明文档，包括子级和已禁用 Skill。读取 Skill 不会执行它。",
-    scope: "范围", all: "全部 Skill", builtin: "内置 Skill", workspace: "Workspace Skill", agent: "Agent 的 Skill 分配",
-    role: "Agent 角色", roleHint: "Agent 使用共享 Skill 定义与各自的分配列表。修改共享内容请使用「全部 / Workspace」范围。",
-    search: "搜索 Skill", searchHint: "名称或说明", refresh: "刷新", loading: "正在读取 Skill…", empty: "此范围没有匹配的 Skill。",
-    read: "读取", next: "下一页", back: "上一页", file: "Skill 文件", content: "Skill 内容", create: "新建 Workspace Skill", id: "Skill ID",
-    enabled: "已启用", disabled: "已禁用", assigned: "已分配", unassigned: "未分配", overrides: "编辑内置 Skill 会创建 Workspace 覆盖版本，不修改程序自带文件。",
-    save: "提交内容变更提案", remove: "提交删除提案", enable: "提议启用", disable: "提议禁用", assign: "提议分配", unassign: "提议移除分配",
-    proposal: "提案已创建，请到 Action Inbox 审核后生效。", pending: "所有变更均为提案，不会立即修改运行中的 Skill，原有审批与验证仍然生效。",
-    discard: "放弃未保存的 Skill 内容？", confirm: "创建这项 Skill 变更提案？", confirmHint: "仅生成供审核的变更，目前不会修改正在使用的 Skill。",
-    redacted: "敏感内容已脱敏，此视图不能作为完整文件覆盖保存。", busy: "处理中…", select: "选择一个 Skill，读取其说明文档和文件。",
-  },
-};
 type Scope = "all" | "builtin" | "workspace" | "agent";
 
 export default function SkillManagementPanel() {
-  const t = copy[useLocale().startsWith("zh") ? "zh" : "en"];
+  const t = useTranslations("settings.skillManagement");
+  const common = useTranslations("common");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importSource, setImportSource] = useState("");
+  const [importSubdir, setImportSubdir] = useState("");
   const [scope, setScope] = useState<Scope>("all");
+  const [view, setView] = useState<"core" | "professional" | "all">("all");
+  const [methods, setMethods] = useState<Record<string, SkillRow[]>>({});
+  const [expanded, setExpanded] = useState<string[]>([]);
+  const [loadingMethods, setLoadingMethods] = useState("");
   const [agent, setAgent] = useState("");
-  const [roles, setRoles] = useState<{ name: string }[]>([]);
+  const [roles, setRoles] = useState<{ name: string; catalog_parent?: string }[]>([]);
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
   const [epoch, setEpoch] = useState(0);
   const [catalog, setCatalog] = useState<SkillCatalog | null>(null);
+  const [rootSkill, setRootSkill] = useState<SkillRow | null>(null);
   const [selected, setSelected] = useState<SkillRow | null>(null);
   const [file, setFile] = useState<SkillFile | null>(null);
   const [content, setContent] = useState("");
@@ -54,24 +45,59 @@ export default function SkillManagementPanel() {
   const [notice, setNotice] = useState("");
   const dirty = creating || Boolean(file && content !== file.text);
   useEffect(() => {
+    if (!dirty) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [dirty]);
+  useEffect(() => {
     const abort = new AbortController();
-    void mcpRequest<{ roles: { name: string }[] }>("/mcp-settings/roles", undefined, abort.signal).then(r => { setRoles(r.roles); setAgent(r.roles[0]?.name || ""); })
+    void mcpRequest<{ roles: { name: string; catalog_parent?: string }[] }>("/mcp-settings/roles", undefined, abort.signal).then(r => { setRoles(r.roles); setAgent(r.roles.find(role => !role.catalog_parent)?.name || r.roles[0]?.name || ""); })
       .catch(e => { if (!abort.signal.aborted) setError(e.message); });
     return () => abort.abort();
   }, []);
   useEffect(() => {
     if (scope === "agent" && !agent) return;
     const abort = new AbortController();
-    setLoading(true); setError(""); setCatalog(null); setSelected(null); setFile(null);
-    const params = new URLSearchParams({ scope, agent_id: agent, query: search, offset: String(offset), limit: "30", include_unassigned: "true" });
+    setLoading(true); setError(""); setCatalog(null); setSelected(null); setFile(null); setMethods({}); setExpanded([]);
+    const params = new URLSearchParams({ scope, view, hierarchical: "true", agent_id: agent, query: search, offset: String(offset), limit: "30", include_unassigned: "true" });
     void mcpRequest<SkillCatalog>("/skills/catalog?" + params, undefined, abort.signal).then(setCatalog)
       .catch(e => { if (!abort.signal.aborted) setError(e.message); }).finally(() => { if (!abort.signal.aborted) setLoading(false); });
     return () => abort.abort();
-  }, [scope, agent, search, offset, epoch]);
+  }, [scope, view, agent, search, offset, epoch]);
+  useEffect(() => {
+    if (dirty || busy) return;
+    const timer = window.setTimeout(() => { setSearch(query); setOffset(0); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query, dirty, busy]);
+  async function toggleMethods(row: SkillRow, loadOnly = false) {
+    if (!loadOnly && expanded.includes(row.id)) { setExpanded(ids => ids.filter(id => id !== row.id)); return; }
+    if (methods[row.id]) { if (!loadOnly) setExpanded(ids => [...ids, row.id]); return; }
+    setLoadingMethods(row.id); setBusy(true); setError("");
+    try {
+      const params = new URLSearchParams({ scope, agent_id: agent, parent: row.id, limit: "200", include_unassigned: "true" });
+      const rows: SkillRow[] = [];
+      let next: number | null = 0;
+      do {
+        params.set("offset", String(next));
+        const result: SkillCatalog = await mcpRequest<SkillCatalog>("/skills/catalog?" + params);
+        rows.push(...result.skills); next = result.next_offset;
+      } while (next !== null);
+      setMethods(previous => ({ ...previous, [row.id]: rows })); if (!loadOnly) setExpanded(ids => [...ids, row.id]);
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); setLoadingMethods(""); }
+  }
   async function navigate(action: () => void) {
-    if (dirty && !(await confirm({ title: t.discard, message: t.pending, tone: "warning" }))) return false;
+    if (dirty && !(await confirm({ title: t("discard"), message: t("discardFileHint"), tone: "warning" }))) return false;
     setCreating(false); action();
     return true;
+  }
+  async function openSkill(row: SkillRow) {
+    const loaded = await read(row);
+    if (!loaded) return;
+    const root = row.catalog_parent ? catalog?.skills.find(item => item.id === row.catalog_parent) : row;
+    setRootSkill(root || row);
+    if (root?.method_count) await toggleMethods(root, true);
   }
   async function read(row: SkillRow, name = "SKILL.md") {
     if (!(await navigate(() => undefined))) return;
@@ -87,66 +113,115 @@ export default function SkillManagementPanel() {
         if (page.revision !== result.revision) throw new Error("Skill changed during reading; refresh before editing.");
         text += page.text; result = page;
       }
-      setSelected(row); setFile({ ...result, text }); setContent(text); setCreating(false);
+      setSelected(row); setFile({ ...result, text }); setContent(text); setCreating(false); setEditing(false);
+      return true;
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   }
-  async function propose(action: "create" | "update" | "delete" | "enable" | "disable", row = selected) {
+  async function applyChange(action: "create" | "update" | "delete" | "enable" | "disable", row = selected) {
     if (!catalog || (!creating && !row)) return;
-    if (!(await confirm({ title: t.confirm, message: t.confirmHint, tone: "warning" }))) return;
+    if (action === "delete" && !(await confirm({ title: t("remove"), message: t("deleteHint", { name: `${row!.id}/${file?.file || "SKILL.md"}` }), tone: "danger" }))) return;
     setBusy(true); setError(""); setNotice("");
     try {
       const binding = action === "enable" || action === "disable";
       const revision = binding ? (scope === "agent" ? catalog.binding_revision : catalog.enabled_revision) : creating ? "missing" : file?.revision;
-      const response = await mcpRequest<{ proposal: { id: string } }>("/skills/manage", {
+      await mcpRequest<{ applied: boolean }>("/skills/manage", {
         action, skill_id: creating ? newId : row!.id, scope: creating ? "workspace" : scope,
         agent_id: scope === "agent" ? agent : "", file: binding ? "SKILL.md" : file?.file || "SKILL.md",
-        revision, content: binding || action === "delete" ? "" : content,
+        revision, content: binding || action === "delete" ? "" : creating ? content.replace(/^name:.*$/m, "name: " + newId.trim()) : content,
       });
-      setNotice(`${t.proposal} (${response.proposal.id})`);
+      setNotice(t("saved"));
       if (!binding) { setCreating(false); setSelected(null); setFile(null); setContent(""); }
+      setEpoch(value => value + 1);
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   }
-  return <SettingsGroup title={t.title} description={t.intro}>
-    <div className="space-y-4 p-4"><ErrorBanner error={error} onRetry={() => void navigate(() => setEpoch(v => v + 1))} />
-      {notice && <p role="status" className="text-sm">{notice}</p>}
-      <fieldset disabled={busy || dirty} className="grid gap-3 border-0 p-0 md:grid-cols-3">
-        <Field label={t.scope}><select className="input-dark w-full" value={scope} onChange={e => { setOffset(0); setScope(e.target.value as Scope); }}><option value="all">{t.all}</option><option value="builtin">{t.builtin}</option><option value="workspace">{t.workspace}</option><option value="agent">{t.agent}</option></select></Field>
-        {scope === "agent" && <Field label={t.role}><select className="input-dark w-full" value={agent} onChange={e => { setOffset(0); setAgent(e.target.value); }}>{roles.map(r => <option key={r.name}>{r.name}</option>)}</select></Field>}
-        <Field label={t.search}><input className="input-dark w-full" placeholder={t.searchHint} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); setSearch(query); setOffset(0); setEpoch(v => v + 1); } }} /></Field>
-        <div className="flex items-end gap-2"><button type="button" className="btn btn-ghost" onClick={() => { setSearch(query); setOffset(0); setEpoch(v => v + 1); }}>{t.search}</button><button type="button" className="btn btn-ghost" onClick={() => setEpoch(v => v + 1)}>{t.refresh}</button></div>
-      </fieldset>
-      <div className="flex flex-wrap items-center gap-3"><button type="button" className="btn btn-ghost" disabled={busy || !catalog || scope === "agent"} onClick={() => void navigate(() => { setCreating(true); setSelected(null); setFile(null); setNewId("new_skill"); setContent("---\nname: new_skill\ndescription: Describe when this Skill should be used.\n---\n\n# Workflow\n\n"); })}>{t.create}</button>
-        {dirty && <button type="button" className="btn btn-ghost" onClick={() => void navigate(() => { setContent(file?.text || ""); })}>{t.discard}</button>}
-        {catalog && <span className="text-xs text-[color:var(--text-muted)]">{catalog.total} Skills</span>}
+  async function importSkill() {
+    if (!importSource.trim() || busy) return;
+    setBusy(true); setError("");
+    try {
+      const result = await clientApi.skillsInstall({ source: importSource.trim(), subdir: importSubdir.trim() || undefined });
+      if (result.error || result.ok === false || result.status === "rejected") throw new Error(String(result.error || result.status));
+      setNotice(t("imported")); setImporting(false); setImportSource(""); setImportSubdir(""); setEpoch(value => value + 1);
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  }
+  async function removeSkill(row: SkillRow) {
+    if (!await confirm({ title: t("remove"), message: t("deleteHint", { name: row.id }), tone: "danger" })) return;
+    setBusy(true); setError("");
+    try {
+      const params = new URLSearchParams({ skill_id: row.id, scope, file: "SKILL.md" });
+      const current = await mcpRequest<SkillFile>("/skills/read?" + params);
+      await mcpRequest("/skills/manage", { action: "delete", skill_id: row.id, scope, file: "SKILL.md", revision: current.revision });
+      setNotice(t("saved")); setEpoch(value => value + 1);
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  }
+  function skillRow(row: SkillRow): JSX.Element {
+    return <div key={row.id + row.source} data-skill-id={row.id} className="min-w-0 border-b border-[color:var(--line)] py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2"><button type="button" className="min-w-0 break-all text-left text-sm font-medium underline-offset-4 hover:underline" aria-pressed={selected?.id === row.id} disabled={busy || dirty} onClick={() => void openSkill(row)}>{row.id}</button><Pill tone={row.enabled ? "ok" : "neutral"}>{row.enabled ? t("enabled") : t("disabled")}</Pill></div>
+      <p className="mt-1 line-clamp-3 break-words text-xs text-[color:var(--text-muted)]">{row.description}</p>
+      <div className="mt-2 flex flex-wrap items-center gap-2"><span className="text-xs text-[color:var(--text-muted)]">{row.source === "builtin" ? t("builtin") : ["workspace", "workspace_installed"].includes(row.source) ? t("workspace") : row.source}{scope === "agent" ? ` · ${row.assigned ? t("assigned") : t("unassigned")}` : ""}</span>
+        <button type="button" className="relative inline-flex h-6 w-10 shrink-0 items-center rounded-full bg-[color:var(--line-hi)] transition-colors aria-checked:bg-brand-500 disabled:opacity-40" aria-label={scope === "agent" ? row.assigned ? t("unassign") : t("assign") : row.enabled ? t("disable") : t("enable")} role="switch" aria-checked={scope === "agent" ? Boolean(row.assigned) : row.enabled} disabled={busy || dirty} onClick={() => void applyChange((scope === "agent" ? row.assigned : row.enabled) ? "disable" : "enable", row)}><span aria-hidden className={"h-4 w-4 rounded-full bg-white transition-transform " + ((scope === "agent" ? row.assigned : row.enabled) ? "translate-x-5" : "translate-x-1")} /></button>
+        {scope !== "agent" && ["workspace", "workspace_installed"].includes(row.source) && <button type="button" className="btn btn-ghost text-danger text-xs" disabled={busy || dirty} onClick={() => void removeSkill(row)}>{common("delete")}</button>}
+        {Boolean(row.method_count) && <button type="button" className="btn btn-ghost text-xs" aria-expanded={expanded.includes(row.id)} aria-controls={`methods-${row.id}`} disabled={busy || dirty} onClick={() => void toggleMethods(row)}>{loadingMethods === row.id ? t("loading") : t("methods", { count: row.method_count || 0 })}</button>}
       </div>
-      {scope === "agent" && <p className="text-sm text-[color:var(--text-muted)]">{t.roleHint}</p>}
-      {loading && <p role="status">{t.loading}</p>}
-      {catalog?.skills.length === 0 && <p className="text-sm">{t.empty}</p>}
-      <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(16rem,1fr)_minmax(0,2fr)]">
-        <div className="max-h-[36rem] space-y-2 overflow-auto">
-          {catalog?.skills.map(row => <div key={row.id + row.source} className="rounded-lg border border-[color:var(--line)] p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2"><button type="button" className="text-left text-sm font-medium underline-offset-4 hover:underline" disabled={busy || dirty} onClick={() => void read(row)}>{row.id}</button><Pill tone={row.enabled ? "ok" : "neutral"}>{row.enabled ? t.enabled : t.disabled}</Pill></div>
-            <p className="mt-1 line-clamp-3 text-xs text-[color:var(--text-muted)]">{row.description}</p>
-            <div className="mt-2 flex flex-wrap items-center gap-2"><span className="text-xs text-[color:var(--text-muted)]">{row.source}{scope === "agent" ? ` · ${row.assigned ? t.assigned : t.unassigned}` : ""}</span>
-              <button type="button" className="btn btn-ghost text-xs" disabled={busy || dirty} onClick={() => void propose((scope === "agent" ? row.assigned : row.enabled) ? "disable" : "enable", row)}>{scope === "agent" ? row.assigned ? t.unassign : t.assign : row.enabled ? t.disable : t.enable}</button></div>
-          </div>)}
-        </div>
+      {row.catalog_parent && (view === "all" || search) && <p className="mt-1 break-all text-xs text-[color:var(--text-muted)]">{t("partOf", { name: row.catalog_parent })}</p>}
+      {expanded.includes(row.id) && <div id={`methods-${row.id}`} className="mt-2 pl-3" aria-label={t("methods", { count: methods[row.id]?.length || 0 })}>{methods[row.id]?.map(skillRow)}</div>}
+    </div>;
+  }
+  return <section className="mx-auto w-full max-w-4xl" aria-label={t("title")}>
+    <div className="space-y-5"><ErrorBanner error={error} onRetry={() => void navigate(() => setEpoch(v => v + 1))} />
+      {notice && <p role="status" className="text-sm">{notice}</p>}
+      <fieldset disabled={busy || dirty} className="grid gap-3 border-0 p-0 sm:grid-cols-2">
+
+        <Field label={t("scope")}><select className="input-dark w-full" value={scope} onChange={e => { setOffset(0); setScope(e.target.value as Scope); }}><option value="all">{t("all")}</option><option value="builtin">{t("builtin")}</option><option value="workspace">{t("workspace")}</option><option value="agent">{t("agent")}</option></select></Field>
+        {scope === "agent" && <Field label={t("role")}><select className="input-dark w-full" value={agent} onChange={e => { setOffset(0); setAgent(e.target.value); }}><optgroup label={t("primaryRoles")}>{roles.filter(r => !r.catalog_parent).map(r => <option key={r.name}>{r.name}</option>)}</optgroup><optgroup label={t("profileRoles")}>{roles.filter(r => r.catalog_parent).map(r => <option key={r.name}>{r.name}</option>)}</optgroup></select></Field>}
+        <Field label={t("search")}><input className="input-dark w-full" placeholder={t("searchHint")} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); setSearch(query); setOffset(0); setEpoch(v => v + 1); } }} /></Field>
+
+      </fieldset>
+      <details open={filtersOpen} onToggle={event => setFiltersOpen(event.currentTarget.open)}><summary className="cursor-pointer text-xs text-[color:var(--text-muted)]">{t("view")}</summary><div className="mt-3 max-w-xs"><Field label={t("view")}><select className="input-dark w-full" value={view} onChange={e => { setOffset(0); setView(e.target.value as typeof view); }}><option value="core">{t("coreView")}</option><option value="professional">{t("professionalView")}</option><option value="all">{t("allView")}</option></select></Field></div></details>
+      <div className="flex flex-wrap items-center gap-3"><button type="button" className="btn btn-ghost" disabled={busy || dirty} onClick={() => setEpoch(v => v + 1)}>{t("refresh")}</button><button type="button" className="btn btn-ghost" disabled={busy || !catalog || scope === "agent"} onClick={() => void navigate(() => { setNotice(""); setError(""); setCreating(true); setSelected(null); setFile(null); setNewId("new_skill"); setContent("---\nname: new_skill\ndescription: Describe when this Skill should be used.\n---\n\n# Workflow\n\n"); })}>{t("create")}</button>
+        <button type="button" className="btn btn-ghost" disabled={busy || dirty} onClick={() => { setError(""); setImporting(true); }}>{t("import")}</button>
+        {dirty && <button type="button" className="btn btn-ghost" onClick={() => void navigate(() => { setContent(file?.text || ""); })}>{t("discard")}</button>}
+        {catalog && <span role="status" className="text-xs text-[color:var(--text-muted)]">{t(search || view === "all" ? "entryCount" : "workflowCount", { count: catalog.total })}</span>}
+      </div>
+      {scope === "agent" && <p className="text-sm text-[color:var(--text-muted)]">{t("roleHint")}</p>}
+      {loading && <p role="status">{t("loading")}</p>}
+      {catalog?.skills.length === 0 && <p className="text-sm">{t("empty")}</p>}
+      <div className="min-w-0">
+        <div data-testid="skill-catalog" className="min-w-0">{Array.from(new Set(catalog?.skills.map(row => row.source))).map(source => <section key={source} className="mb-6"><h3 className="border-b border-[color:var(--line)] py-2 text-sm font-semibold">{source === "builtin" ? t("builtin") : source === "workspace" || source === "workspace_installed" ? t("workspace") : source}</h3>{catalog?.skills.filter(row => row.source === source).map(skillRow)}</section>)}</div>
+        <Dialog.Root open={Boolean(file) || creating} onOpenChange={open => { if (!open && !busy) void navigate(() => { setSelected(null); setFile(null); setContent(""); }); }}>
+        <Dialog.Portal>
+        <Dialog.Overlay className="ui-modal-overlay" />
+        <Dialog.Content aria-describedby={undefined} className="ui-dialog" style={{ width: "min(1120px, calc(100vw - 24px))" }}>
+        <div className="mb-4 flex items-center justify-between gap-3"><Dialog.Title className="min-w-0 break-all text-lg font-semibold">{creating ? t("create") : rootSkill?.id || selected?.id}</Dialog.Title><Dialog.Close className="btn btn-ghost" disabled={busy}>{common("close")}</Dialog.Close></div>
+        <div className={creating ? "" : "grid min-w-0 gap-5 md:grid-cols-[240px_minmax(0,1fr)]"}>
+        {!creating && file && <aside className="max-h-[65vh] min-w-0 space-y-4 overflow-auto border-b border-[color:var(--line)] pb-4 md:border-b-0 md:border-r md:pr-4">
+          {rootSkill && <button type="button" className="btn btn-ghost w-full justify-start" disabled={busy} onClick={() => void read(rootSkill)}>{t("mainSkill")}: {rootSkill.id}</button>}
+          {!!rootSkill?.method_count && <section><h3 className="mb-2 text-sm font-semibold">{t("subSkills")}</h3>{loadingMethods ? <p role="status">{t("loading")}</p> : methods[rootSkill.id]?.map(row => <button key={row.id} type="button" disabled={busy} aria-pressed={selected?.id === row.id} onClick={() => void read(row)} className={"mb-1 w-full break-all rounded px-2 py-2 text-left text-xs " + (selected?.id === row.id ? "bg-brand-500/10 text-brand-500" : "hover:bg-brand-500/10")}>{row.id}</button>)}</section>}
+          <section><h3 className="mb-2 break-all text-sm font-semibold">{selected?.id} /</h3><SkillFileTree files={file.files} selected={file.file} disabled={busy} onSelect={name => { if (selected) void read(selected, name); }} /></section>
+        </aside>}
         <div className="min-w-0 space-y-3">
-          {!file && !creating && <p className="text-sm text-[color:var(--text-muted)]">{t.select}</p>}
-          {creating && <Field label={t.id}><input className="input-dark w-full" value={newId} onChange={e => setNewId(e.target.value)} /></Field>}
-          {file && <Field label={t.file}><select className="input-dark w-full" value={file.file} disabled={busy || dirty} onChange={e => selected && void read(selected, e.target.value)}>{file.files.map(name => <option key={name}>{name}</option>)}</select></Field>}
-          {(file || creating) && <><Field label={t.content}><textarea className="input-dark min-h-[22rem] w-full font-mono text-xs leading-6" rows={18} value={content} onChange={e => setContent(e.target.value)} spellCheck={false} readOnly={busy || scope === "agent" || Boolean(file?.text.includes("***REDACTED***"))} /></Field>
-            {file?.source === "builtin" && <p className="text-sm text-[color:var(--text-muted)]">{t.overrides}</p>}
-            {file?.text.includes("***REDACTED***") && <p className="text-sm text-danger">{t.redacted}</p>}
-            {scope !== "agent" && <div className="flex flex-wrap gap-2"><button type="button" className="btn btn-primary" disabled={busy || !dirty || Boolean(file?.text.includes("***REDACTED***"))} onClick={() => void propose(creating ? "create" : "update")}>{t.save}</button>
-              {file && ["workspace", "workspace_installed"].includes(file.source) && <button type="button" className="btn btn-ghost" disabled={busy || dirty} onClick={() => void propose("delete")}>{t.remove}</button>}</div>}
+          <ErrorBanner error={error} />
+          {notice && <p role="status" className="text-sm">{notice}</p>}
+          {!file && !creating && <p className="text-sm text-[color:var(--text-muted)]">{t("select")}</p>}
+          {creating && <Field label={t("id")}><input className="input-dark w-full" value={newId} onChange={e => setNewId(e.target.value.trim())} /></Field>}
+          {file && <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[color:var(--line)] pb-3"><span className="min-w-0 break-all font-mono text-xs">{selected?.id} / {file.file}</span><div className="flex gap-2"><button type="button" className="btn btn-ghost" aria-pressed={!editing} disabled={busy} onClick={() => setEditing(false)}>{t("preview")}</button><button type="button" className="btn btn-ghost" aria-pressed={editing} disabled={busy || scope === "agent" || content.includes("***REDACTED***")} onClick={() => setEditing(true)}>{t("edit")}</button></div></div>}
+          {file && !editing && !creating && <div className="max-h-[60vh] min-w-0 overflow-auto">{/\.md$/i.test(file.file) ? <Markdown>{content.replace(/^(?:\s*<!--[\s\S]*?-->\s*)*---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim()}</Markdown> : <pre className="whitespace-pre-wrap break-words rounded bg-[color:var(--bg)] p-4 font-mono text-xs leading-6">{content}</pre>}</div>}
+          {(creating || (file && editing)) && <><Field label={t("content")}><textarea className="input-dark min-h-[22rem] w-full font-mono text-xs leading-6" rows={18} value={content} onChange={e => setContent(e.target.value)} spellCheck={false} readOnly={busy || scope === "agent" || Boolean(file?.text.includes("***REDACTED***"))} /></Field>
+            {file?.source === "builtin" && <p className="text-sm text-[color:var(--text-muted)]">{t("overrides")}</p>}
+            {file?.text.includes("***REDACTED***") && <p className="text-sm text-danger">{t("redacted")}</p>}
+            {scope !== "agent" && <div className="flex flex-wrap gap-2"><button type="button" className="btn btn-primary" disabled={busy || !dirty || (creating && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(newId)) || Boolean(file?.text.includes("***REDACTED***"))} onClick={() => void applyChange(creating ? "create" : "update")}>{t("save")}</button>
+              {file && ["workspace", "workspace_installed"].includes(file.source) && <button type="button" className="btn btn-ghost" disabled={busy || dirty} onClick={() => void applyChange("delete")}>{t("remove")}</button>}</div>}
           </>}
         </div>
+        </div>
+        </Dialog.Content></Dialog.Portal></Dialog.Root>
       </div>
-      {catalog && <div className="flex gap-2"><button type="button" className="btn btn-ghost" disabled={!offset || busy || dirty} onClick={() => setOffset(Math.max(0, offset - 30))}>{t.back}</button><button type="button" className="btn btn-ghost" disabled={catalog.next_offset === null || busy || dirty} onClick={() => setOffset(catalog.next_offset || 0)}>{t.next}</button></div>}
-      <p className="text-xs text-[color:var(--text-muted)]">{t.pending}</p>{busy && <p role="status">{t.busy}</p>}
+      {catalog && (offset > 0 || catalog.next_offset !== null) && <div className="flex gap-2"><button type="button" className="btn btn-ghost" disabled={!offset || busy || dirty} onClick={() => setOffset(Math.max(0, offset - 30))}>{t("back")}</button><button type="button" className="btn btn-ghost" disabled={catalog.next_offset === null || busy || dirty} onClick={() => setOffset(catalog.next_offset || 0)}>{t("next")}</button></div>}
+      <Dialog.Root open={importing} onOpenChange={open => { if (!busy) setImporting(open); }}><Dialog.Portal><Dialog.Overlay className="ui-modal-overlay" /><Dialog.Content className="ui-dialog p-6" aria-describedby="skill-import-help"><Dialog.Title className="text-lg font-semibold">{t("import")}</Dialog.Title><Dialog.Description id="skill-import-help" className="my-3 text-sm text-[color:var(--text-muted)]">{t("importHint")}</Dialog.Description><form className="space-y-4" onSubmit={event => { event.preventDefault(); void importSkill(); }}><ErrorBanner error={error} /><Field label={t("importSource")}><input className="input-dark w-full" value={importSource} onChange={event => setImportSource(event.target.value)} disabled={busy} required /></Field><Field label={t("importSubdir")}><input className="input-dark w-full" value={importSubdir} onChange={event => setImportSubdir(event.target.value)} disabled={busy} /></Field><div className="flex justify-end gap-2"><Dialog.Close className="btn btn-ghost" disabled={busy}>{common("cancel")}</Dialog.Close><button className="btn btn-primary" disabled={busy || !importSource.trim()}>{busy ? t("busy") : t("import")}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>
+      {busy && <p role="status">{t("busy")}</p>}
     </div>
-  </SettingsGroup>;
+  </section>;
 }

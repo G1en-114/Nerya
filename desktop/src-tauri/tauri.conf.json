@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nerya",
+  "version": "1.0.0-beta.1",
+  "identifier": "app.nerya.desktop",
+  "build": {
+    "beforeDevCommand": "node scripts/prepare.mjs --dev",
+    "beforeBuildCommand": "node scripts/prepare.mjs",
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "capabilities": [
+        "desktop"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../runtime/": "runtime/"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
+      "bundleVersion": "1.0.0b1"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "wix": {
+        "version": "1.0.0.1"
+      }
+    },
+    "shortDescription": "Nerya autonomous agent workspace",
+    "category": "Productivity"
+  }
+}

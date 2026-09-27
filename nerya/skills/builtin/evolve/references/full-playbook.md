@@ -37,20 +37,14 @@ coding skill, not here.
 1. Capture intent: what is the new skill for, what triggers it, what
    shape are its inputs/outputs?
 2. If the skill comes from a repeated or newly proven workflow, use
-   `evolve_skill_proposal` with `name`, `description`, `workflow`,
-   `triggers`, and `evidence_refs`. This stages the proposed
-   `SKILL.md` under
-   `workspace/evolution/proposals/<proposal>/after/skills/<skill>/`.
-3. For script-based use, run `scripts/propose_skill.py` with the same
-   JSON payload. It uses the same proposal writer and never activates
-   the skill directly.
-4. If you are drafting manually, sketch a SKILL.md draft in an
-   evolution proposal — *not* in `nerya/skills/builtin/`. The operator
-   promotes it.
-5. List the scripts you would need; do not write them all up front.
-   Stub the playbook first so the shape can be reviewed cheaply.
-6. Submit by writing a one-paragraph rationale alongside the draft
-   and noting any duplication with existing skills.
+   `skill_manage` with action `save`, plus `name`, `description`,
+   `workflow`, `triggers`, and `evidence_refs`. The validated
+   `SKILL.md` is saved directly into the Workspace and a new Skill is
+   enabled immediately.
+3. For an existing Workspace Skill, set `update_existing=true`; the
+   save replaces the current playbook in the same operation.
+4. List helper scripts or references in `script_notes` /
+   `reference_notes`; do not create proposal scaffolding around them.
 
 ## When to convert a workflow into a skill
 

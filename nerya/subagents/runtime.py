@@ -366,7 +366,9 @@ class SubAgentRuntime:
         return value
 
     def _max_iterations(self, spec: SubAgentSpec | None = None) -> int:
-        return int(self._execution_limit(spec, "max_iterations", 60, minimum=1))
+        # The shared Agent loop uses zero for an inherited unlimited budget.
+        # Rejecting it here broke strategy teams under the default main config.
+        return int(self._execution_limit(spec, "max_iterations", 60, minimum=0))
 
     def _max_skill_calls(self, spec: SubAgentSpec | None = None) -> int:
         return int(self._execution_limit(spec, "max_skill_calls", 120))
@@ -439,6 +441,9 @@ class SubAgentRuntime:
         if registry is None:
             return ""
         for skill_id in selected:
+            from ..tools.native.skill import skill_allowed
+            if not skill_allowed(skill_id, spec.allowed_skills):
+                continue
             try:
                 entry = registry.get(skill_id)
             except Exception:
@@ -464,8 +469,16 @@ class SubAgentRuntime:
         agent_id: str = "", continuation_text: str = "",
     ) -> dict[str, Any]:
         from .threads import AgentThreadStore
+        from .permissions import child_permission_context, permission_ceiling
+        from copy import copy
+        from dataclasses import replace
+        from threading import Event
+        from ..harness.cancellation import CancelToken
 
+        if isinstance(cancel_token, Event):
+            cancel_token = CancelToken(_flag=cancel_token)
         store = AgentThreadStore(self.config.paths)
+        saved = {}
         if agent_id:
             saved = store.load(agent_id, session_id or "")
             if saved["name"] != spec.name or saved["context_scope"] != context_scope:
@@ -473,14 +486,28 @@ class SubAgentRuntime:
             spec = store.restore_spec(saved)
             payload = dict(saved["payload"])
             strategy_id = saved.get("strategy_id")
+        executor = self.tool_executor
+        ceiling = None
+        if executor is not None and getattr(executor, "permission_context", None) is not None:
+            executor = copy(executor)
+            executor.permission_context = child_permission_context(
+                self.config, parent=self.tool_executor.permission_context,
+                saved=saved.get("permission_ceiling"), strategy_id=strategy_id)
+            ceiling = permission_ceiling(executor.permission_context)
         row = store.begin(
             spec=spec, payload=payload, session_id=session_id or "",
             parent_call_id=parent_call_id or "", strategy_id=strategy_id,
             turn_id=turn_id, context_scope=context_scope, agent_id=agent_id,
+            permission_ceiling=ceiling,
+            reuse_role=bool(session_id and (strategy_id or session_id.startswith("sched_"))
+                            and self.config.get("agent.subagents.reuse_strategy_context", True)
+                            and context_scope != EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE),
         )
         try:
+            if ceiling is not None:
+                executor.permission_context = replace(executor.permission_context, **row["permission_ceiling"])
             store.event(row, "instruction", {"text": continuation_text.strip() or row["title"]})
-            result = self._run(
+            result = replace(self, tool_executor=executor)._run(
                 spec, trigger_event_id=trigger_event_id, payload=payload,
                 strategy_id=strategy_id, session_id=session_id, turn_id=turn_id,
                 parent_call_id=parent_call_id, context_scope=context_scope,
@@ -653,6 +680,7 @@ class SubAgentRuntime:
             configured_wall = min(configured_wall, supplied_wall)
         model_provider, model_id = self._model_override(spec)
         tool_metadata = {
+            "allowed_skills": list(spec.allowed_skills or []),
             "agent_parent_session_id": session_id,
             "agent_group_id": (thread_context or {}).get("group_id"),
             "subagent": spec.name,
@@ -915,6 +943,12 @@ class SubAgentRuntime:
         )
         audit = {
             **audit_start,
+            # Public conversation only. Never persist private reasoning as replay content.
+            "conversation": redact_display_dict([
+                dict(envelope.block) for envelope in outcome.blocks
+                if isinstance(getattr(envelope, "block", None), dict)
+                and envelope.block.get("kind") in {"text", "tool_use", "tool_result"}
+            ]),
             "prompt_records": [{
                 "iteration": 0,
                 "prompt": redact_text(audit_prompt),

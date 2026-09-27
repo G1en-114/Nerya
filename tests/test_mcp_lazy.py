@@ -41,6 +41,8 @@ from nerya.mcp.lazy import (
     server_id_of,
 )
 from nerya.mcp.session_adapter import MCPSessionAdapter, register_external_mcp_tools
+from nerya.tools.executor import NativeToolExecutor
+from nerya.tools.permissions import PermissionContext, PermissionEngine
 from nerya.tools.registry import ToolRegistry
 from nerya.tools.types import (
     PermissionScope,
@@ -57,6 +59,13 @@ pytestmark = pytest.mark.smoke
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _executor(registry: ToolRegistry) -> NativeToolExecutor:
+    return NativeToolExecutor(
+        registry=registry, permission_engine=PermissionEngine(),
+        permission_context=PermissionContext(),
+    )
 
 
 def _native_tool(name: str = "native_demo") -> ToolDescriptor:
@@ -410,7 +419,7 @@ def test_mcp_call_dispatches_to_underlying_tool_handler() -> None:
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
 
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={
@@ -475,7 +484,7 @@ def test_mcp_call_validates_underlying_schema_before_dispatch() -> None:
 
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={
@@ -498,7 +507,7 @@ def test_mcp_call_accepts_fully_qualified_tool_name() -> None:
     registry, _ = _build_registry_with_two_namespaces()
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={
@@ -515,7 +524,7 @@ def test_mcp_call_unknown_tool_in_known_namespace_errors() -> None:
     registry, _ = _build_registry_with_two_namespaces()
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={"namespace": "edgar", "tool": "no_such_tool"},
@@ -543,7 +552,7 @@ def test_mcp_call_permissive_flat_args_promoted_to_underlying() -> None:
     registry, _ = _build_registry_with_two_namespaces()
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={
@@ -568,7 +577,7 @@ def test_mcp_call_permissive_explicit_args_wins_when_mixed() -> None:
     )
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={
@@ -595,7 +604,7 @@ def test_mcp_call_permissive_no_extras_no_args_works() -> None:
     )
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={"namespace": "yahoo", "tool": "quote"},
@@ -611,7 +620,7 @@ def test_mcp_call_args_must_still_be_dict_when_explicit() -> None:
     registry, _ = _build_registry_with_two_namespaces()
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             name=META_CALL_TOOL,
             arguments={
@@ -809,7 +818,7 @@ def test_phase_l_denied_tool_cannot_be_dispatched_via_mcp_call() -> None:
 
     call_tool = registry.find(META_CALL_TOOL)
     assert call_tool is not None
-    result = call_tool.handler(
+    result = _executor(registry).execute(
         ToolCall(
             id="t1", name=META_CALL_TOOL,
             arguments={

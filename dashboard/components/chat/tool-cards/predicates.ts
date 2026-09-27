@@ -32,7 +32,7 @@ export function isFileOp(block: NativeBlock): boolean {
 
 export function isShellTool(block: NativeBlock): boolean {
   const action = String(block.action || "").toLowerCase();
-  return action === "run_shell" || action === "bash";
+  return action === "run_shell" || action === "bash" || action === "script_run";
 }
 
 export const WEB_TOOLS: ReadonlySet<string> = new Set([

@@ -34,6 +34,7 @@ class FakePolymarketHttp:
             ]
         if url.endswith("/book"):
             return 200, {
+                'tick_size':'.01','min_order_size':'1','neg_risk':False,
                 "bids": [
                     {"price": "0.10", "size": "10"},
                     {"price": "0.30", "size": "2"},
@@ -84,7 +85,7 @@ def test_polymarket_slug_resolves_to_clob_token_id() -> None:
     transport = FakePolymarketHttp()
     connector = _connector(transport)
 
-    ticker = connector.get_ticker("POLYMARKET:event-slug")
+    ticker = connector.get_ticker("POLYMARKET:event-slug#Yes")
 
     assert ticker.mid == 0.325
     market_calls = [params for _, url, params in transport.calls if url.endswith("/markets")]
@@ -97,7 +98,7 @@ def test_polymarket_klines_use_clob_prices_history() -> None:
     transport = FakePolymarketHttp()
     connector = _connector(transport)
 
-    rows = connector.get_klines(TOKEN_ID, interval="1h", limit=2)
+    rows = connector.get_klines(TOKEN_ID, interval="1h", limit=2,since=1700000000000,end=1700003600000)
 
     price_history_calls = [
         (url, params) for _, url, params in transport.calls if url.endswith("/prices-history")
@@ -105,10 +106,10 @@ def test_polymarket_klines_use_clob_prices_history() -> None:
     assert price_history_calls == [
         (
             "https://clob.test/prices-history",
-            {"market": TOKEN_ID, "interval": "1d", "fidelity": 2},
+            {"market": TOKEN_ID, "startTs":1700000000,'endTs':1700003600,"fidelity": 60},
         )
     ]
     assert rows == [
         [1_700_000_000_000, 0.20, 0.20, 0.20, 0.20, 0.0],
-        [1_700_003_600_000, 0.20, 0.25, 0.20, 0.25, 0.0],
+        [1_700_003_600_000, 0.25, 0.25, 0.25, 0.25, 0.0],
     ]

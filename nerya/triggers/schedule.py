@@ -96,7 +96,7 @@ class ScheduleEntry:
     attached_skills: list[str] = field(default_factory=list)
     delivery_targets: list[dict[str, Any]] = field(default_factory=list)
     session_ttl_seconds: int | None = None
-    session_mode: str = "ephemeral"
+    session_mode: str = "reuse"
     session_id: str | None = None
     session_ids: list[str] = field(default_factory=list)
 
@@ -242,7 +242,7 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
             "session_kind": str(row.get("session_kind") or "trigger"),
             "attached_skills": list(row.get("attached_skills") or []),
             "delivery_targets": list(row.get("delivery_targets") or []),
-            "session_mode": row.get("session_mode") or "ephemeral",
+            "session_mode": row.get("session_mode") or "reuse",
             "session_id": row.get("session_id"),
             "session_ids": list(row.get("session_ids") or []),
         }
@@ -304,7 +304,7 @@ def save_schedules(paths: WorkspacePaths, entries: list[ScheduleEntry]) -> None:
             row["delivery_targets"] = [dict(t) for t in e.delivery_targets]
         if e.session_ttl_seconds is not None:
             row["session_ttl_seconds"] = int(e.session_ttl_seconds)
-        if e.session_mode and e.session_mode != "ephemeral":
+        if e.session_mode:
             row["session_mode"] = e.session_mode
         if e.session_id:
             row["session_id"] = e.session_id
@@ -316,7 +316,7 @@ def save_schedules(paths: WorkspacePaths, entries: list[ScheduleEntry]) -> None:
 
 
 def _normalise_session_mode(value: str | None) -> str:
-    raw = str(value or "ephemeral").strip().lower()
+    raw = str(value or "reuse").strip().lower()
     return _SESSION_MODE_ALIASES.get(raw, raw)
 
 

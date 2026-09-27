@@ -1,4 +1,6 @@
 """Public endpoint tests use loopback sockets and an isolated workspace only."""
+import shlex
+import sys
 import threading
 from copy import deepcopy
 
@@ -66,10 +68,13 @@ def test_disabled_bridge_does_not_require_optional_sdk(tmp_path):
     assert _runner(cfg, 18317) is None
 
 
-def test_openai_tunnel_uses_runtime_key_environment_not_arguments(tmp_path, monkeypatch):
+def test_openai_tunnel_uses_stdio_without_public_oauth_origin(tmp_path, monkeypatch):
     pytest.importorskip("mcp")
     from nerya.security.secrets import SecretVault
     cfg = configured(tmp_path)
+    # Generic HTTP MCP still uses OAuth, but the OpenAI Tunnel binds directly
+    # to stdio and must not require a browser-reachable public origin.
+    cfg.data["mcp"]["public_url"] = "http://localhost:18380"
     key = "runtime-key-for-isolated-test"
     SecretVault.open(cfg.paths.vault_enc).put(name="test_tunnel", value=key, kind="test", scope=["mcp_tunnel"])
     cfg.data["mcp"]["openai_tunnel"] = {"enabled": True, "tunnel_id": "tunnel_test12345678", "api_key_ref": "vault://test_tunnel"}
@@ -87,16 +92,20 @@ def test_openai_tunnel_uses_runtime_key_environment_not_arguments(tmp_path, monk
     result = openai_tunnel.start(cfg, api_port=19317)
     assert result["ok"] and result["running"] and not result["ready"], result
     command, kwargs = calls[0]
-    assert command[:4] == ["/test/bin/tunnel-client", "run", "--mcp.server-url", "http://127.0.0.1:19317/mcp"]
+    assert command[:3] == ["/test/bin/tunnel-client", "run", "--mcp.command"]
+    stdio_command = shlex.split(command[3])
+    assert stdio_command[:2] == [sys.executable, "-c"]
+    assert "CONTROL_PLANE_API_KEY" in stdio_command[2] and "runpy.run_module('nerya.cli.app'" in stdio_command[2]
+    assert stdio_command[3:] == ["mcp", "serve", "--transport", "stdio", "--workspace",
+                                 str(cfg.paths.root.resolve())]
     assert key not in " ".join(command)
     assert kwargs["env"]["CONTROL_PLANE_API_KEY"] == key
     assert kwargs["env"]["CONTROL_PLANE_TUNNEL_ID"] == "tunnel_test12345678"
-    assert kwargs["env"]["MCP_OAUTH_TRUSTED_ORIGINS"] == "https://public.example"
+    assert kwargs["env"]["PYTHONPATH"].endswith("/agent") or kwargs["env"]["PYTHONPATH"].endswith("\\agent")
+    assert "MCP_OAUTH_TRUSTED_ORIGINS" not in kwargs["env"]
     assert not any("AUTHORIZATION" in k or "ADMIN" in k for k in kwargs["env"])
     assert openai_tunnel.start(cfg)["running"] and len(calls) == 1
     assert not openai_tunnel.stop(cfg)["running"]
-    cfg.data["mcp"]["public_url"] = "http://localhost:18380"
-    assert not openai_tunnel.start(cfg)["ok"]
 
 
 def test_mcp_management_routes_require_admin_scope():

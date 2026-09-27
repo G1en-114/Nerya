@@ -1,7 +1,7 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: tasks
-description: "Use to create, schedule, inspect, or manage operator tasks, recurring reports, and non-strategy agent/script jobs."
+description: "Manage background tasks and automation: recurring reports, non-strategy agent/script jobs, schedules and event hooks."
 version: 0.1.0
 license: MIT
 author: Nerya
@@ -45,3 +45,7 @@ Interpret a Cron expression in its supplied timezone. For 09:00 Asia/Shanghai us
 ## Lazy References
 
 - `references/full-playbook.md` for payload examples and task-shape rules.
+- For event hooks, routing, cooldown, TTL or dead-letter inspection, load
+  `Skill(skill="triggers")`. This is the advanced automation method, not a
+  second task-creation workflow. Verify owner, idempotency and routing before
+  activation; keep background execution IDs distinct from schedule IDs.

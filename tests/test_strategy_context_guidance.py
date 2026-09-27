@@ -147,7 +147,7 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     entry = (root / "SKILL.md").read_text(encoding="utf-8")
     specialized = (root / "references/specialized-contracts.md").read_text(encoding="utf-8")
     workflows = (root / "references/workflows.md").read_text(encoding="utf-8")
-    text = entry + specialized + workflows
+    text = entry + specialized + workflows + (root / "references/authoring-contract.md").read_text()
     # Domain policy stays available through explicit lazy links, not a huge
     # always-loaded entry or copies of stale SDK examples.
     assert "references/specialized-contracts.md" in entry
@@ -174,12 +174,15 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "strategy_generate_proposal" not in entry
     assert "A ban on submission means authored draft only" in entry
     assert "A ban on running/promotion/trading does not ban implementation" in entry
-    assert "No orders” is a runtime restriction, NOT a request for an empty scaffold" in entry
-    assert "agent_task.enabled" in entry and "10–14 tool calls" in entry
-    assert "has ALREADY called AI" in entry
-    assert "No `context=` argument" in workflows
-    assert "no `ctx.session_key`" in workflows
-    assert "no `ctx.result.agent_task`" in workflows
+    assert "No orders” is a runtime restriction, NOT a request for an empty scaffold" in " ".join(entry.split())
+    # Completion is now receipt-based, not an arbitrary 10–14 call budget.
+    assert "agent_task.enabled" in entry and "actual receipts exist" in entry
+    assert "A model already awakened to decide whether AI should run is NOT a script gate" in entry
+    # The current StrategyAgentTask supports context with published evidence;
+    # retain negative checks for APIs that still do not exist.
+    assert "dispatch(context={...})" in workflows
+    assert "no `ctx.session_key`" in workflows.lower()
+    assert "no `ctx.result.agent_task`" in workflows.lower()
     assert "No network unit test or fake Agent decision is performance evidence" in (root / "references/full-playbook.md").read_text()
 
 
@@ -208,7 +211,7 @@ def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> N
     assert "editing the staged files with read_file + edit_file / write_file" in draft_desc
     assert "run strategy_validate" in draft_desc
     assert "finish with strategy_submit_proposal" in draft_desc
-    assert "skill_view" in draft_desc
+    assert "Skill" in draft_desc
     # SDK contract reminders survive on the scaffold tool.
     assert (
         "from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask"

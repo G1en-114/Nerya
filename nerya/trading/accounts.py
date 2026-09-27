@@ -214,6 +214,9 @@ class AccountProfile:
     def asdict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "label": str(self.raw.get("label") or self.id),
+            "revision": account_revision(self),
+            "provider_config": public_connection_config(self),
             "mode": self.mode,
             "venue": self.venue,
             "kind": self.kind,
@@ -234,6 +237,23 @@ class AccountProfile:
                 if isinstance(v, str) and v.startswith("vault://")
             },
         }
+
+
+def account_revision(profile: AccountProfile) -> str:
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(profile.raw, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def public_connection_config(profile: AccountProfile) -> dict[str, Any]:
+    """Only declared public form fields; never return custom auth headers."""
+    from ..connectors.provider_spec import get_registry
+    spec = get_registry().find(profile.venue)
+    raw = profile.raw.get("provider_config") or {}
+    if not spec or not isinstance(raw, dict):
+        return {}
+    return {f.name: raw[f.name] for f in spec.credential_fields
+            if not f.sensitive and f.name in raw and isinstance(raw[f.name], (str, int, float, bool))}
 
 
 def _parse_permissions(row: dict[str, Any]) -> AccountPermissions:
@@ -411,7 +431,7 @@ def _atomic_write_accounts_doc(paths: WorkspacePaths, doc: dict[str, Any]) -> No
 
 def _normalise_kind(raw_kind: str) -> str:
     k = (raw_kind or "cex").strip().lower()
-    if k not in ("cex", "dex", "chain", "perp", "futures"):
+    if k not in ("cex", "dex", "chain", "perp", "futures", "broker", "prediction_market", "data_source"):
         return "cex"
     return k
 
@@ -591,6 +611,7 @@ def upsert_account(
     account: dict[str, Any],
     *,
     operator: str | None = None,
+    connection_receipt: dict[str, Any] | None = None,
 ) -> AccountProfile:
     """Insert or update a single account row.
 
@@ -705,6 +726,10 @@ def upsert_account(
         row["provider_spec"] = str(provider_spec)
     if operator:
         row["last_modified_by"] = str(operator)
+    if "label" in account:
+        row["label"] = str(account.get("label") or aid).strip()[:120]
+    if connection_receipt is not None:
+        row["connection_receipt"] = dict(connection_receipt)
 
     doc = yaml_io.load(paths.accounts_file, default={"accounts": []}) or {}
     rows = list(doc.get("accounts") or [])

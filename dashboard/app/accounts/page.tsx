@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -86,6 +87,7 @@ function enumLabel(
 
 export default function AccountsPage() {
   const t = useTranslations("accounts");
+  const tConnection = useTranslations("accountConnection");
   const tEnum = useTranslations("accountsPage");
   const zh = useLocale().startsWith("zh");
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
@@ -243,7 +245,7 @@ export default function AccountsPage() {
   );
 
   const filtered = useMemo(() => accounts.filter(({ profile }) =>
-    (mode === "all" || profile.mode === mode) && `${profile.id} ${profile.venue} ${profile.wallet_id || ""} ${profile.status}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [accounts, mode, query]);
+    (mode === "all" || profile.mode === mode) && `${profile.label || ""} ${profile.id} ${profile.venue} ${profile.wallet_id || ""} ${profile.status}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [accounts, mode, query]);
   const paging = useListPage(filtered, `${query}:${mode}`);
 
   return (
@@ -260,10 +262,11 @@ export default function AccountsPage() {
               {showWizard ? t("closeWizard") : t("addExchange")}
             </button>
             <button
-              onClick={() => setShowAdd((s) => !s)}
+              onClick={() => setShowAdd(true)}
+              disabled={showAdd}
               className="btn-primary text-xs"
             >
-              {showAdd ? t("closeForm") : t("addAccount")}
+              {tConnection("title")}
             </button>
             <button
               onClick={load}
@@ -327,6 +330,8 @@ export default function AccountsPage() {
           <AddAccountForm
             onCancel={() => setShowAdd(false)}
             onSaved={(account) => {
+              ++generation.current;
+              setLoading(false);
               setShowAdd(false);
               setAccounts((prev) => {
                 const idx = prev.findIndex(
@@ -351,14 +356,14 @@ export default function AccountsPage() {
           description={t("allAccountsDesc")}
         >
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <SearchField value={query} onChange={setQuery} label={zh ? "搜索账户、交易所或钱包" : "Search accounts, venues or wallets"} className="w-full sm:max-w-sm" />
-            <FilterBar label={zh ? "账户模式" : "Account mode"} value={mode} onChange={setMode}
-              options={[{ value: "all", label: zh ? "全部" : "All" }, ...["paper", "shadow", "canary", "live"].map((value) => ({ value, label: value.toUpperCase() }))]} />
+            <SearchField value={query} onChange={setQuery} label={i18nCopy(zh, "copy.app_accounts_page.001")} className="w-full sm:max-w-sm" />
+            <FilterBar label={i18nCopy(zh, "copy.app_accounts_page.002")} value={mode} onChange={setMode}
+              options={[{ value: "all", label: i18nCopy(zh, "copy.app_accounts_page.003") }, ...["paper", "shadow", "canary", "live"].map((value) => ({ value, label: value.toUpperCase() }))]} />
           </div>
           {loading && !accounts.length ? <LoadingState /> : loadError && !accounts.length ? null : filtered.length === 0 ? (
             <Empty
-              label={query || mode !== "all" ? (zh ? "没有符合条件的账户" : "No matching accounts") : t("noAccounts")}
-              action={query || mode !== "all" ? <button className="btn btn-ghost" onClick={() => { setQuery(""); setMode("all"); }}>{zh ? "清除筛选" : "Clear filters"}</button> : <button className="btn btn-primary" onClick={() => setShowAdd(true)}>{t("addAccount")}</button>}
+              label={query || mode !== "all" ? (i18nCopy(zh, "copy.app_accounts_page.004")) : t("noAccounts")}
+              action={query || mode !== "all" ? <button className="btn btn-ghost" onClick={() => { setQuery(""); setMode("all"); }}>{i18nCopy(zh, "copy.app_accounts_page.005")}</button> : <button className="btn btn-primary" onClick={() => setShowAdd(true)}>{t("addAccount")}</button>}
             />
           ) : (
             <><TableViewport label={t("allAccounts")} className="max-h-[560px]">
@@ -371,7 +376,7 @@ export default function AccountsPage() {
                     <th className="text-right">{t("colTotal")}</th>
                     <th className="text-right">{t("colReserved")}</th>
                     <th className="text-right">{t("colPositions")}</th>
-                    <th><span className="sr-only">{zh ? "账户操作" : "Account actions"}</span></th>
+                    <th><span className="sr-only">{i18nCopy(zh, "copy.app_accounts_page.006")}</span></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -384,7 +389,7 @@ export default function AccountsPage() {
                             href={`/accounts/${encodeURIComponent(p.id)}`}
                             className="font-mono text-brand-200 hover:text-brand-100"
                           >
-                            {p.id}
+                            {p.label || p.id}
                           </Link>
                           <div className="mt-1 text-xs text-[color:var(--text-muted)]">{p.venue} / {p.base_currency || "USDT"}</div>
                         </td>
@@ -410,7 +415,7 @@ export default function AccountsPage() {
                           {acc.open_position_count}
                         </td>
                         <td>
-                          <ActionMenu label={`${zh ? "账户操作" : "Account actions"}: ${p.id}`} disabled={Boolean(busy)} items={[
+                          <ActionMenu label={`${i18nCopy(zh, "copy.app_accounts_page.007")}: ${p.id}`} disabled={Boolean(busy)} items={[
                             p.status === "active" && { key: "quarantine", label: t("quarantineBtn"), danger: true, onSelect: () => quarantine(p.id, "quarantined") },
                             p.status === "active" && { key: "readonly", label: t("readOnlyBtn"), onSelect: () => quarantine(p.id, "read_only") },
                             p.status !== "active" && { key: "active", label: t("reactivate"), onSelect: () => quarantine(p.id, "active") },

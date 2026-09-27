@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: llm
+metadata:
+  nerya:
+    catalog_parent: coding
 description: "Use for a separate one-shot LLM helper task such as summarizing, translating, rewriting, labeling, or drafting text."
 version: 0.1.0
 license: MIT

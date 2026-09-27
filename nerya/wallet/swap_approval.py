@@ -18,6 +18,7 @@ attempt cannot invoke the provider again, including across API processes.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import logging
 import math
 from pathlib import Path
@@ -62,14 +63,8 @@ def _meaningful_wallet_cfg(cfg: Mapping[str, Any]) -> bool:
 
 
 def _wallet_cfg(config: Config, name: str) -> dict[str, Any]:
-    wallet_cfg = config.data.get("wallet") or {}
-    direct = dict(wallet_cfg.get(name) or {})
-    if _meaningful_wallet_cfg(direct):
-        return direct
-    for binding in list_configured_providers(config.data):
-        if str(binding.get("provider") or "").strip().lower() == name:
-            return dict(binding.get("config") or {})
-    return direct
+    from .bindings import resolve_binding
+    return resolve_binding(config, {"provider":name})[2]
 
 
 def normalize_swap_request(
@@ -79,20 +74,17 @@ def normalize_swap_request(
     """Return the allow-listed, serialisable wallet swap request."""
 
     body = dict(payload or {})
-    configured = config.data.get("wallet") or {}
-    provider = str(
-        body.get("provider") or configured.get("provider") or ""
-    ).strip().lower()
-    if not provider:
-        raise ValueError("no wallet provider selected")
+    from .bindings import resolve_binding, binding_fingerprint
+    wallet_id, provider, _ = resolve_binding(config, body)
     chain = str(body.get("chain") or "ethereum").strip().lower()
+    chain = {'eth':'ethereum', 'sol':'solana', 'bnb':'bsc'}.get(chain, chain)
     token_in = str(body.get("token_in") or "").strip()
     token_out = str(body.get("token_out") or "").strip()
     if not chain:
         raise ValueError("chain is required")
     if not token_in or not token_out:
         raise ValueError("token_in and token_out are required")
-    if token_in.lower() == token_out.lower():
+    if (token_in == token_out if chain == "solana" else token_in.lower() == token_out.lower()):
         raise ValueError("token_in and token_out must differ")
     try:
         amount_in = float(body.get("amount_in") or 0.0)
@@ -101,28 +93,45 @@ def normalize_swap_request(
     if not math.isfinite(amount_in) or amount_in <= 0:
         raise ValueError("amount_in must be a finite positive number")
     try:
-        slippage_bps = int(body.get("slippage_bps") or 50)
+        slippage_bps = int(body.get("slippage_bps") if body.get("slippage_bps") is not None else 50)
+        if body.get('slippage_bps') is not None and float(body['slippage_bps']) != slippage_bps:
+            raise ValueError('slippage_bps must be an integer')
     except (TypeError, ValueError) as exc:
         raise ValueError("slippage_bps must be an integer") from exc
     if not 0 <= slippage_bps <= 5_000:
         raise ValueError("slippage_bps must be between 0 and 5000")
     receiver = str(body.get("receiver") or "").strip()
-    return {
-        "provider": provider,
-        "chain": chain,
-        "token_in": token_in,
-        "token_out": token_out,
-        "amount_in": amount_in,
-        "slippage_bps": slippage_bps,
-        "receiver": receiver,
+    request = {
+        "provider": provider, "wallet_id":wallet_id,
+        "chain": chain, "token_in":token_in, "token_out":token_out,
+        "amount_in":amount_in, "slippage_bps":slippage_bps, "receiver":receiver,
     }
+    for key in ("account_id", "strategy_id", "market", "intent_id", "source", "side", "trigger_event_id", "plan_action"):
+        if body.get(key) is not None:
+            if not isinstance(body[key], str):
+                raise ValueError(f'{key} must be a string')
+            request[key] = body[key]
+    if body.get('confidence') is not None:
+        confidence = float(body['confidence'])
+        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError('confidence must be finite and between 0 and 1')
+        request['confidence'] = confidence
+    for key in ("decimals_in", "decimals_out"):
+        if body.get(key) is not None:
+            value = int(body[key])
+            if float(body[key]) != value or not 0 <= value <= 36:
+                raise ValueError(f"{key} must be in [0,36]")
+            request[key] = value
+    request["wallet_fingerprint"] = binding_fingerprint(config,request)
+    return request
 
 
 def _provider(config: Config, request: Mapping[str, Any]):
-    name = str(request.get("provider") or "").strip().lower()
+    from .bindings import resolve_binding
+    _, name, cfg = resolve_binding(config, request)
     return build_provider(
         name,
-        _wallet_cfg(config, name),
+        cfg,
         workspace=Path(config.paths.root),
     )
 
@@ -137,6 +146,7 @@ def quote_swap(config: Config, request: Mapping[str, Any]) -> dict[str, Any]:
         token_out=str(request["token_out"]),
         amount_in=float(request["amount_in"]),
         slippage_bps=int(request["slippage_bps"]),
+        **{k:request[k] for k in ("decimals_in","decimals_out") if k in request},
     )
     return result.to_dict()
 
@@ -146,7 +156,12 @@ def prepare_swap(
     payload: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     request = normalize_swap_request(config, payload)
-    return request, quote_swap(config, request)
+    quote = quote_swap(config, request)
+    _validate_quote(quote)
+    from .bindings import binding_fingerprint
+    if binding_fingerprint(config,request)!=request['wallet_fingerprint']:
+        raise WalletPolicyDenied('wallet changed during quote; request a fresh quote')
+    return request, quote
 
 
 def request_approval(
@@ -160,6 +175,30 @@ def request_approval(
     tool_call_id: str = "",
 ) -> dict[str, Any]:
     """Persist and broadcast one frozen wallet swap approval."""
+
+    from ..trading.locks import trading_lock
+    key='wallet_approval:'+str(request.get('wallet_id') or request.get('provider'))
+    with trading_lock(config.paths,key) as acquired:
+        if not acquired:
+            raise WalletPolicyDenied('another wallet approval request is being saved')
+        return _request_approval_locked(config,request=request,quote=quote,actor_id=actor_id,
+            session_id=session_id,turn_id=turn_id,tool_call_id=tool_call_id)
+
+
+def _request_approval_locked(config,*,request,quote,actor_id,session_id='',turn_id='',tool_call_id=''):
+    provider=_provider(config,request)
+    caps=provider.capabilities() if callable(getattr(provider,'capabilities',None)) else None
+    if caps is not None and (not caps.swap.supported or (caps.swap_chains and request['chain'] not in caps.swap_chains)):
+        raise WalletPolicyDenied('provider does not support this live swap; no approval was created')
+    if request.get('strategy_id'):
+        with closing(connect(config.paths.db)) as con:
+            for row in ApprovalRepository(con).list_pending():
+                payload=_approval_payload(row)
+                if float(payload.get('expires_at') or row.get('expires_at') or 0) <= time.time():
+                    continue
+                prior=payload.get('wallet_swap') or {}
+                if prior.get('strategy_id')==request['strategy_id'] and prior.get('market')==request.get('market'):
+                    return {'ok':True,'status':'pending_approval','approval_id':row['id'],'already_pending':True}
 
     _validate_quote(quote)
     expires_s = max(1.0, float(config.get("approvals.expire_seconds", 600)))
@@ -253,6 +292,11 @@ def _validate_quote(quote: Mapping[str, Any]) -> None:
     floor check skips zero floors, such a quote approved a swap with NO
     slippage protection at all.
     """
+    if (quote.get("extra") or {}).get("synthetic"):
+        raise ValueError("synthetic quotes cannot authorize wallet execution")
+    expiry=(quote.get('extra') or {}).get('expires_at')
+    if expiry is not None and _float(expiry)<=time.time():
+        raise WalletQuoteError('quote expired; request a fresh quote')
     expected_out = _float(quote.get("expected_out"))
     min_out = _float(quote.get("min_out"))
     if expected_out <= 0:
@@ -277,6 +321,17 @@ def execute_frozen_swap(
     expires_at: float | None = None,
 ) -> dict[str, Any]:
     """Execute a claimed swap after revalidating all live controls."""
+    from ..trading.locks import trading_lock
+    chain_key=str(request.get('chain') or '')
+    # Serialize a chain across bindings: two wallet ids can share one signer.
+    with trading_lock(config.paths,'wallet_send:'+chain_key) as acquired:
+        if not acquired:
+            return {'ok':False,'error':'wallet_execution_in_progress'}
+        return _execute_locked(config,request=request,approved_quote=approved_quote,
+            approval_id_value=approval_id_value,expires_at=expires_at)
+
+
+def _execute_locked(config,*,request,approved_quote,approval_id_value,expires_at=None):
 
     if not config.live_trading_enabled():
         return {
@@ -298,14 +353,43 @@ def execute_frozen_swap(
         }
 
     frozen = normalize_swap_request(config, request)
+    if request.get("wallet_fingerprint") and frozen["wallet_fingerprint"] != request["wallet_fingerprint"]:
+        return {"ok":False,"error":"wallet_changed_requires_reapproval"}
+    if frozen.get('account_id'):
+        from ..trading.accounts import get_account_profile
+        account=get_account_profile(config.paths,frozen['account_id'])
+        if not account.is_real_money or not account.live_trading_enabled or not account.can_place_order:
+            return {'ok':False,'error':'wallet_account_not_live_enabled'}
+    from .strategy_execution import recheck_strategy
+    recheck_strategy(config,frozen)
+    from . import execution_state
+    existing=execution_state.read(config,approval_id_value)
+    if existing and existing.get('status') in ('submitting','submitted','unknown','confirmed'):
+        return {'ok':existing['status']=='confirmed' and not (existing.get('result') or {}).get('approval_policy_breach'),'status':existing['status'],'already_submitted':True,
+                'transaction':existing.get('transaction'),'result':existing.get('result')}
+    for state_path in (config.paths.state/'wallet_swaps').glob('*.json'):
+        prior=json.loads(state_path.read_text())
+        other=prior.get('request') or {}
+        if (prior.get('status') in ('submitting','submitted','unknown')
+                and other.get('chain')==frozen['chain']):
+            return {'ok':False,'error':'previous_wallet_transaction_unresolved','execution_id':prior.get('execution_id')}
     provider = _provider(config, frozen)
+    caps=provider.capabilities() if callable(getattr(provider,'capabilities',None)) else None
+    if caps is not None and (not caps.swap.supported or (caps.swap_chains and frozen['chain'] not in caps.swap_chains)):
+        raise WalletPolicyDenied('provider does not support approved swap on this chain')
     current_quote = provider.quote(
         chain=frozen["chain"],
         token_in=frozen["token_in"],
         token_out=frozen["token_out"],
         amount_in=frozen["amount_in"],
         slippage_bps=frozen["slippage_bps"],
+        **{k:frozen[k] for k in ("decimals_in","decimals_out") if k in frozen},
     ).to_dict()
+    for field in ('chain','token_in','token_out'):
+        if current_quote.get(field) != frozen[field]:
+            raise WalletQuoteError('quote does not match frozen swap assets')
+    if abs(_float(current_quote.get('amount_in'))-frozen['amount_in'])>max(1e-12,abs(frozen['amount_in'])*1e-12):
+        raise WalletQuoteError('quote amount differs from approved input')
     approved_min_out = _float(approved_quote.get("min_out"))
     current_expected_out = _float(current_quote.get("expected_out"))
     if approved_min_out <= 0:
@@ -318,6 +402,7 @@ def execute_frozen_swap(
             "approved_min_out": approved_min_out,
             "reason": "the approved quote carried no enforceable min_out floor",
         }
+    _validate_quote(current_quote)
     if current_expected_out < approved_min_out:
         return {
             "ok": False,
@@ -326,6 +411,11 @@ def execute_frozen_swap(
             "approved_min_out": approved_min_out,
             "current_quote": current_quote,
         }
+    from .bindings import binding_fingerprint
+    if config.kill_switch() or not config.live_trading_enabled():
+        return {'ok':False,'error':'live_controls_changed'}
+    if binding_fingerprint(config,frozen) != frozen['wallet_fingerprint']:
+        return {'ok':False,'error':'wallet_changed_requires_reapproval'}
 
     audit = {
         "kind": "wallet.swap.requested",
@@ -344,10 +434,26 @@ def execute_frozen_swap(
         "slippage_bps": frozen["slippage_bps"],
         "receiver": frozen.get("receiver") or None,
         "live": True,
+        **{k:frozen[k] for k in ("decimals_in","decimals_out") if k in frozen},
     }
     if approved_min_out > 0:
         kwargs["min_out"] = approved_min_out
-    result = provider.swap(**kwargs)
+    kwargs['execution_id']=approval_id_value
+    from . import execution_state
+    existing = execution_state.read(config,approval_id_value)
+    if existing and existing.get("status") in {"submitting","submitted","unknown","confirmed"}:
+        return {"ok":existing["status"]=="confirmed" and not (existing.get('result') or {}).get('approval_policy_breach'), "status":existing["status"],
+                "already_submitted":True,"transaction":existing.get("transaction"),"result":existing.get("result")}
+    execution_state.write(config,approval_id_value,status="submitting",request=frozen,approved_min_out=approved_min_out)
+    kwargs["on_broadcast"] = execution_state.broadcast_callback(config,approval_id_value)
+    try:
+        result = provider.swap(**kwargs)
+    except Exception as exc:
+        state = execution_state.read(config,approval_id_value) or {}
+        refused = isinstance(exc, (WalletPolicyDenied, WalletQuoteError, WalletDependencyError))
+        status = 'submitted' if state.get('transaction') else 'failed' if refused else 'unknown'
+        execution_state.write(config,approval_id_value,status=status,error=type(exc).__name__)
+        raise
     result_doc = result.to_dict()
     amount_out = _float(result_doc.get("amount_out"))
     below_floor = (
@@ -357,11 +463,26 @@ def execute_frozen_swap(
         and amount_out < approved_min_out
     )
     if below_floor:
+        result_doc['ok']=False
         result_doc["approval_policy_breach"] = {
             "approved_min_out": approved_min_out,
             "reported_amount_out": amount_out,
         }
-    effective_ok = bool(result_doc.get("ok")) and not below_floor
+    confirmed = (result_doc.get("extra") or {}).get("confirmed") is True
+    actual = (result_doc.get("extra") or {}).get("amount_out_source") in {"receipt", "transaction_trace", "transaction_meta"}
+    if confirmed and actual and amount_out<=0:
+        below_floor=True
+    observed_fill = confirmed and actual and amount_out > 0
+    effective_ok = bool(result_doc.get("ok")) and observed_fill and not below_floor
+    extra=result_doc.get('extra') or {}
+    status = "confirmed" if observed_fill else "failed" if below_floor or extra.get('status')=='failed' else "submitted" if result_doc.get("tx_hash") or extra.get('execution_ref') else "unknown" if extra.get('status')=='unknown' else "failed"
+    if 'reverted' in str(result_doc.get('reason') or '').lower():
+        status='failed'
+    execution_state.write(config,approval_id_value,status=status,result=result_doc)
+    if observed_fill:
+        from .strategy_execution import record_fill
+        record_fill(config,frozen,result_doc,approval_id_value)
+        execution_state.write(config,approval_id_value,booked=True)
     jsonl.append(
         config.paths.journal("wallet"),
         {
@@ -374,6 +495,7 @@ def execute_frozen_swap(
     )
     return {
         "ok": effective_ok,
+        "status": status,
         "approval_id": approval_id_value,
         "result": result_doc,
         "quote": current_quote,
@@ -383,6 +505,76 @@ def execute_frozen_swap(
             else {}
         ),
     }
+
+
+def reconcile_execution(config: Config, execution_id: str) -> dict[str, Any]:
+    """Read an already broadcast transaction; never send it again."""
+    from ..trading.locks import trading_lock
+    from . import execution_state
+    state=execution_state.read(config,execution_id) or {}
+    chain=(state.get('request') or {}).get('chain','')
+    with trading_lock(config.paths,'wallet_send:'+chain) as acquired:
+        if not acquired:
+            return {'ok':False,'status':'reconciling'}
+        return _reconcile_locked(config,execution_id)
+
+
+def _reconcile_locked(config,execution_id):
+    from . import execution_state
+    state=execution_state.read(config,execution_id)
+    if not state:
+        return {'ok':False,'error':'execution_not_found'}
+    if state.get('status') in ('confirmed','failed'):
+        if state.get('status')=='confirmed' and state.get('result'):
+            from .strategy_execution import record_fill
+            record_fill(config,state.get('request') or {},state['result'],execution_id)
+            execution_state.write(config,execution_id,booked=True)
+        return state
+    request=state.get('request') or {}
+    tx=state.get('transaction') or {}
+    result=state.get('result') or {}
+    tx_hash=tx.get('tx_hash') or result.get('tx_hash')
+    if not tx_hash and not tx.get('execution_ref') and not (result.get('extra') or {}).get('execution_ref'):
+        return {**state,'ok':False,'status':'unknown','reason':'broadcast identity unavailable; do not repeat swap'}
+    from .bindings import binding_fingerprint
+    if request.get('wallet_fingerprint') != binding_fingerprint(config,request):
+        return {**state,'ok':False,'error':'wallet_changed_requires_review'}
+    provider=_provider(config,request)
+    transaction={**((result.get('extra') or {}).get('transaction') or {}),**tx,'tx_hash':tx_hash or ''}
+    getter=getattr(provider,'get_execution_status',None)
+    if not callable(getter):
+        return {**state,'status':'submitted','reason':'provider does not implement get_execution_status'}
+    result=getter(request=request,transaction=transaction).to_dict()
+    extra=result.get('extra') or {}
+    if extra.get('status')=='failed':
+        return execution_state.write(config,execution_id,status='failed',error=result.get('reason'),result=result)
+    from .adapter_contract import ACTUAL_SOURCES
+    actual=_float(result.get('amount_out'))
+    if not result.get('ok') or extra.get('confirmed') is not True or extra.get('amount_out_source') not in ACTUAL_SOURCES or actual<=0:
+        return execution_state.write(config,execution_id,status='submitted',reason=result.get('reason'),result=result,
+            transaction={**transaction,**(extra.get('transaction') or {}),'tx_hash':result.get('tx_hash') or tx_hash or ''})
+    below_floor=actual < float(state.get('approved_min_out') or 0)
+    if below_floor:
+        result['ok']=False
+        result['approval_policy_breach']={'approved_min_out':state['approved_min_out'],'reported_amount_out':actual}
+    from .strategy_execution import record_fill
+    record_fill(config,request,result,execution_id)
+    return execution_state.write(config,execution_id,status='confirmed',result=result,booked=True,
+        ok=not below_floor,error='execution_below_approved_min_out' if below_floor else '')
+
+
+def reconcile_pending(config: Config) -> int:
+    from . import execution_state
+    count=0
+    for path in (config.paths.state/'wallet_swaps').glob('*.json'):
+        try:
+            state=json.loads(path.read_text())
+            if state.get('status')=='submitted' or (state.get('status')=='confirmed' and not state.get('booked')):
+                reconcile_execution(config,state['execution_id'])
+                count+=1
+        except Exception:
+            log.exception('wallet transaction reconciliation failed')
+    return count
 
 
 def _approval_payload(row: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -433,7 +625,15 @@ def _claim_resume(config: Config, aid: str) -> tuple[bool, dict[str, Any]]:
     con = connect(config.paths.db)
     try:
         repo = ApprovalRepository(con)
-        if repo.claim_resume(aid):
+        row = repo.get(aid)
+        if row is None or row.get('state')!='approved':
+            return False, {**(row or {}),'payload':_approval_payload(row)}
+        payload = _approval_payload(row)
+        payload['resume_attempts'] = int(payload.get('resume_attempts') or 0)+1
+        payload['resume_claimed_at'] = time.time()
+        # Never reclaim a wallet send lease: the old process may have broadcast.
+        cursor = con.execute("UPDATE approvals SET state='resuming',payload=? WHERE id=? AND state='approved'", (json.dumps(payload),aid))
+        if cursor.rowcount == 1:
             return True, {}
         row = repo.get(aid) or {}
         return False, {**row, "payload": _approval_payload(row)}
@@ -560,7 +760,7 @@ def resume_approved(config: Config, aid: str) -> dict[str, Any]:
     # A returned response consumes the one-shot approval even when a late
     # safety check rejects execution. Retrying silently after an ambiguous
     # provider response is more dangerous than requiring a fresh approval.
-    status = str(response.get("error") or ("executed" if response.get("ok") else "rejected"))
+    status = str(response.get("error") or response.get("status") or ("confirmed" if response.get("ok") else "rejected"))
     persisted = _finish_resume(
         config,
         aid,

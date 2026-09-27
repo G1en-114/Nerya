@@ -268,10 +268,10 @@ RISK_CHECK_SCHEMA.pop("required", None)
 _PROTECTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Optional bracket TP/SL. Triggers the TradePlan pipeline "
-        "(open_position) when ``side='buy'`` — for SHORT entries "
-        "use ``plan_action='open_short'`` alongside. Each child "
-        "spec accepts ``type`` (pct|price|atr|pnl_usd|r_multiple) "
+        "Optional strategy-selected protection. Omit when the strategy does not "
+        "request protection; supply stop_loss only, take_profit only, or both. "
+        "Never add default levels or an unrequested leg. Each child "
+        "spec accepts supported ``type`` (pct|price, or atr for stops) "
         "and ``value``."
     ),
     "properties": {
@@ -280,7 +280,7 @@ _PROTECTION_SCHEMA: dict[str, Any] = {
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["pct", "price", "atr", "pnl_usd"],
+                    "enum": ["pct", "price", "atr"],
                 },
                 "value": {"type": "number"},
             },
@@ -291,7 +291,7 @@ _PROTECTION_SCHEMA: dict[str, Any] = {
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["pct", "price", "r_multiple", "pnl_usd"],
+                    "enum": ["pct", "price"],
                 },
                 "value": {"type": "number"},
             },
@@ -900,18 +900,14 @@ def trade_intent_submit_handler(
 
     Thin adapter — the canonical pipeline lives in
     :func:`nerya.trading.submit.submit_trade_intent` for bare intents,
-    and :class:`nerya.sdk.trading_api.TradingAPI` for plan-shaped
-    intents that ship a bracket protection block.
+    including intents that carry a bracket protection block.
 
     Routing
     -------
     * ``args["protection"]`` present →
-      :meth:`TradingAPI.open_position`/``close_position``/``reduce_position``
-      (depending on ``plan_action``). The TradePlan path arms the
-      bracket at the exchange (live) or the in-process executor
-      (paper/shadow) atomically with the entry order. This is the
-      preferred Agent path for fresh entries — bare market orders
-      without a stop are a known way to leak capital.
+      The shared intent-to-plan converter preserves entry, action,
+      direction and metadata. Native brackets travel with the entry;
+      local protection activates on the first observed fill.
     * Otherwise → legacy ``submit_trade_intent`` (bare order).
 
     Approval-pending and risk-rejected outcomes return successfully
@@ -928,6 +924,8 @@ def trade_intent_submit_handler(
     snapshot_in = _normalize_market_snapshot(spec.pop("market_snapshot", None))
     protection = spec.pop("protection", None)
     plan_action = spec.pop("plan_action", None)
+    if plan_action is not None:
+        spec["meta"] = {**dict(spec.get("meta") or {}), "plan_action": plan_action}
     normalized = _normalize_trade_intent_for_domain(
         spec,
         config=config,
@@ -1014,162 +1012,25 @@ def _submit_with_protection(
     default_strategy: str,
     default_source: str,
 ) -> ToolResult:
-    """Dispatch the protected intent through ``TradingAPI``.
+    """Preserve the complete intent through the shared plan converter."""
+    from ...trading.submit import submit_trade_intent
 
-    Maps the Agent-facing flat ``(side, size, size_unit)`` shape onto
-    the structured ``(side: long|short, sizing: SizingPolicy)`` shape
-    the TradePlan pipeline expects, then delegates to the matching
-    ``TradingAPI`` method:
-
-    * ``plan_action="open_long"`` (default for ``side="buy"``) /
-      ``plan_action="open_short"`` (default for ``side="sell"``) →
-      :meth:`TradingAPI.open_position` — places the entry + arms the
-      bracket atomically.
-    * ``plan_action="close_position"`` →
-      :meth:`TradingAPI.close_position` — releases the bracket and
-      forces ``SizingPolicy(close_all)``. Sizing supplied by the
-      caller is ignored (close_all already determines size).
-    * ``plan_action="reduce_position"`` →
-      :meth:`TradingAPI.reduce_position` — trims by either
-      ``size`` (treated as ``fixed_base``) or by a fraction the
-      caller passes inside ``protection.reduce_pct``.
-
-    All other ``plan_action`` values fall back to ``open_position``
-    so an Agent that supplies a protection block always gets a
-    bracketed entry.
-    """
-
-    from ...sdk.trading_api import TradingAPI
-    from ...skills.kernel import SkillKernel
-
-    side_order = str(spec.get("side") or "").strip().lower()
-    if side_order not in ("buy", "sell"):
-        return _usage_error(
-            call,
-            f"side must be 'buy' or 'sell' when protection is set; got {side_order!r}",
-        )
-    # Derive the *position* side from the order side. ``plan_action``
-    # may override this when the Agent explicitly knows it's closing
-    # an existing position.
-    position_side = "long" if side_order == "buy" else "short"
-
-    size_raw = spec.get("size")
-    size_unit = str(spec.get("size_unit") or "usd").strip().lower()
+    payload = dict(spec)
+    payload["meta"] = {**dict(payload.get("meta") or {}), "protection": protection}
+    if plan_action is not None:
+        payload["meta"]["plan_action"] = plan_action
     try:
-        size_val = float(size_raw)
-    except (TypeError, ValueError):
-        return _usage_error(call, f"size must be numeric; got {size_raw!r}")
-    if size_val <= 0 and plan_action not in ("close_position",):
-        return _usage_error(call, "size must be positive for an open/reduce intent")
-
-    sizing: dict[str, Any]
-    market = str(spec.get("market") or "").strip()
-    if size_unit == "usd":
-        sizing = {"method": "fixed_usd", "fixed_usd": size_val}
-    elif size_unit == "quote":
-        # Quote-unit sizes are USD amounts only on USD-stable quote
-        # assets. Anything else previously fell into fixed_base and
-        # traded the quote count as BASE units (100 USDT requested →
-        # 100 BTC ordered, C9/D2) — reject loudly instead.
-        from nerya.trading.risk import is_usd_stable_quote
-
-        if not is_usd_stable_quote(market):
-            return _usage_error(
-                call,
-                f"size_unit='quote' is only supported on USD-stable quote "
-                f"assets; market {market!r} does not have one — resubmit "
-                "with size_unit='base' or 'usd'",
-            )
-        sizing = {"method": "fixed_usd", "fixed_usd": size_val}
-    elif size_unit == "base":
-        sizing = {"method": "fixed_base", "fixed_base": size_val}
-    else:
-        return _usage_error(
-            call, f"size_unit must be one of base/quote/usd; got {size_unit!r}"
+        envelope = submit_trade_intent(
+            config, spec=payload, market_snapshot=market_snapshot,
+            default_strategy=default_strategy, default_source=default_source,
         )
-
-    account_id = str(spec.get("account_id") or "").strip()
-    if not account_id:
-        return _usage_error(call, "account_id is required")
-    if not market:
-        return _usage_error(call, "market is required")
-
-    strategy_id = str(spec.get("strategy_id") or default_strategy)
-    confidence = float(spec.get("confidence") or 0.0)
-    reasoning_ref = str(spec.get("reasoning") or "")
-    trigger_event_id = spec.get("trigger_event_id")
-    source = str(spec.get("source") or default_source)
-
-    api = TradingAPI(config=config, skills=SkillKernel.boot(config))
-
-    try:
-        action = (plan_action or "").strip() or (
-            "open_long" if position_side == "long" else "open_short"
-        )
-        if action == "close_position":
-            envelope = api.close_position(
-                strategy_id=strategy_id,
-                account_id=account_id,
-                market=market,
-                side=position_side,  # type: ignore[arg-type]
-                confidence=confidence,
-                reasoning_ref=reasoning_ref,
-                source=source,  # type: ignore[arg-type]
-                market_snapshot=market_snapshot,
-            )
-        elif action == "reduce_position":
-            if size_unit == "quote":
-                return _usage_error(
-                    call,
-                    "size_unit='quote' is not supported for reduce_position — "
-                    "resubmit with size_unit='base' or use reduce_pct",
-                )
-            envelope = api.reduce_position(
-                strategy_id=strategy_id,
-                account_id=account_id,
-                market=market,
-                side=position_side,  # type: ignore[arg-type]
-                fixed_base=size_val if size_unit == "base" else None,
-                reduce_pct=(
-                    float(protection.get("reduce_pct"))
-                    if protection.get("reduce_pct")
-                    else None
-                ),
-                confidence=confidence,
-                reasoning_ref=reasoning_ref,
-                source=source,  # type: ignore[arg-type]
-                market_snapshot=market_snapshot,
-            )
-        else:
-            # open_long / open_short / scale_in / fallback → open_position
-            # ``open_short`` flips position_side regardless of the
-            # caller-side ``side``.
-            if action == "open_short":
-                position_side = "short"
-            elif action == "open_long":
-                position_side = "long"
-            envelope = api.open_position(
-                strategy_id=strategy_id,
-                account_id=account_id,
-                market=market,
-                side=position_side,  # type: ignore[arg-type]
-                sizing=sizing,
-                protection=protection,
-                confidence=confidence,
-                reasoning_ref=reasoning_ref,
-                trigger_event_id=trigger_event_id,
-                source=source,  # type: ignore[arg-type]
-                market_snapshot=market_snapshot,
-            )
     except (TypeError, ValueError) as exc:
         return _usage_error(call, f"invalid plan: {type(exc).__name__}: {exc}")
     except Exception as exc:
         return ToolResult.from_error(
             tool_use_id=call.id, name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.EXECUTION_ERROR,
-                message=f"{type(exc).__name__}: {exc}",
-            ),
+            error=ToolError(kind=ToolErrorKind.EXECUTION_ERROR,
+                            message=f"{type(exc).__name__}: {exc}"),
         )
     return _trade_result(call, envelope)
 

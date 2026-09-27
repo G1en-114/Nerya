@@ -14,3 +14,10 @@ test('strategy links preserve candidate and source task identity',()=>{
  const output=html(React.createElement(TaskProvenance,{thread:{id:'task-1',strategy_id:'strategy-1',strategy_proposal_id:'proposal-1',messages:[]}}));
  assert.match(output,/strategy_id=strategy-1/);assert.match(output,/proposal_id=proposal-1/);assert.match(output,/session_id=task-1/);assert.match(output,/Candidate version/);
 });
+
+const { taskEntryTitle } = require('../lib/workbench.ts');
+test('legacy session titles resolve from meta before reaching rename controls',()=>{
+ assert.equal(taskEntryTitle({meta:{title:'Existing research task'}}),'Existing research task');
+ assert.equal(taskEntryTitle({title:'Current title',meta:{title:'Old title'}}),'Current title');
+ assert.equal(taskEntryTitle({title:null,meta:{}}),'');
+});

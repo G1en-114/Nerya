@@ -504,6 +504,33 @@ def test_run_turn_passes_evidence_contract_to_kernel(tmp_path, monkeypatch):
     assert captured["evidence_contract"] == contract
 
 
+def test_goal_mode_executes_with_acceptance_guidance(tmp_path, monkeypatch):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    client = SimpleNamespace(config=cfg, skills=None)
+    captured = {}
+
+    class CapturingKernel:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def run_turn(self, **kwargs):
+            captured["trigger"] = kwargs["trigger"]
+            return _completed_turn(kwargs)
+
+    monkeypatch.setattr(routes_agent, "AgentKernel", CapturingKernel)
+    result = _run_turn_route()(client, {
+        "session_id": "goal-session", "source": "chat", "kind": "user.chat",
+        "work_mode": "goal", "payload": {"text": "Repair the report"},
+    })
+
+    assert result["final_text"] == "done"
+    assert captured["config"].get("agent.native.plan_only") is False
+    goal_text = captured["trigger"]["payload"]["text"]
+    assert goal_text.startswith("Repair the report\nWork mode: goal.")
+    assert "verify the result with evidence" in goal_text
+    assert "permission, approval, and proposal rules" in goal_text
+
+
 def test_run_turn_response_exposes_verifier_and_execution_state(
     tmp_path,
     monkeypatch,

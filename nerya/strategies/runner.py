@@ -384,7 +384,20 @@ class StrategyRunner:
         mode = self._resolve_mode(manifest.mode, mode_override)
 
         rid = run_id or new_run_id()
-        sid = _new_session_id()
+        policy = manifest.agent_session.policy
+        if policy == "per_signal" or not manifest.agent_session.include_prior_messages:
+            sid = _new_session_id()
+        else:
+            from ..agent.session_profile import strategy_agent_session_id
+            payload = trigger_payload or {}
+            key = {}
+            if policy in {"per_strategy_market", "per_strategy_market_timeframe"}:
+                key["market"] = payload.get("market") or (manifest.markets[0] if manifest.markets else "")
+            if policy == "per_strategy_market_timeframe":
+                key["timeframe"] = payload.get("timeframe") or ""
+            if policy == "custom":
+                key = dict(payload.get("session_key") or {})
+            sid = strategy_agent_session_id(strategy_id=strategy_id, policy=policy, session_key=key)
         started_at = now_iso()
         t0 = time.monotonic()
 
@@ -811,7 +824,7 @@ class StrategyRunner:
         )
 
     @staticmethod
-    def _load_entrypoint(package: StrategyPackage) -> Callable[[StrategyContext], Any]:
+    def _load_entrypoint(package: StrategyPackage, *, prefer_agent_builder: bool = False) -> Callable[[StrategyContext], Any]:
         """Import ``main.py`` and return the configured entrypoint callable."""
 
         manifest = package.manifest
@@ -857,7 +870,9 @@ class StrategyRunner:
             # cached ``helpers`` module.
             _pop_strategy_package_modules(package.root, modules_before)
 
-        entry = getattr(module, manifest.entrypoint_func, None)
+        entry = getattr(module, "build_agent_task", None) if prefer_agent_builder else None
+        if not callable(entry):
+            entry = getattr(module, manifest.entrypoint_func, None)
         if entry is None:
             raise AttributeError(
                 f"strategy {manifest.strategy_id!r}: entrypoint "

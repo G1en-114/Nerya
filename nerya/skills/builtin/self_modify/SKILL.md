@@ -1,7 +1,10 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: self_modify
-description: "Use when Nerya should modify its own configuration or behaviour through coding: review/reflection cadence, schedules, runtime feature flags, LLM tier/model routing, prompt wording, agent policies, news feeds, message channels, trigger routes, market defaults, harness parameters, skill allow-list, strategy parameters, new behaviours packaged as skills, or runtime capabilities packaged as workspace plugins. Routes every change to the correct channel (hot schedule/flag APIs, core-config proposals, tuning generators, skill proposals, plugin proposals), attaches an executable validation plan (pytest / static check / backtest / eval_scenario), and explains the auto-apply tier. Protected scopes (risk limits, live trading, kill-switch loosening, accounts, vault, approval policy, the auto-apply lane itself) are never editable: answer with an explicit advisory reject."
+metadata:
+  nerya:
+    catalog_parent: evolve
+description: "System-improvement method for configuration, prompts and cadence: select a hot API, reviewed proposal or protected-scope rejection. Includes validation and rollback."
 version: 0.2.0
 license: MIT
 author: Nerya
@@ -35,13 +38,13 @@ writable):
 - `agents.yml`, `workspace.yml` — agent & workspace defaults, prompt wiring.
 - `policies/planner.yml`, `policies/tier_policy.yml` — decision logic.
 - `news_feeds.yml`, `messages/channels.yml` (secrets as `*_ref` only), `triggers/routes.yml`.
-- `skills/enabled.yml` — enable/disable skills (never edit live; hub ids inherit).
+- Skill enable/disable/delete — use `skill_manage`; do not edit `skills/enabled.yml` manually.
 
 PROPOSAL via dedicated generators:
 - Strategy parameters / strategy subagent prompts: `strategy_tuning_generate`
   (never `write_file` on `strategies/<id>/`); evidence attaches automatically.
-- New behaviour / repeated workflow: `evolve_skill_proposal` stages a
-  `skill_proposal` with a complete SKILL.md under `after/skills/<id>/`.
+- New behaviour / repeated workflow: `skill_manage` with action `save`
+  writes the validated Workspace SKILL.md directly and enables new Skills.
 - New runtime capability as code (native tool, tool-pipeline listener,
   LLM provider, team template): the `plugin_author` skill stages a
   `plugin_proposal` under `after/plugins/<id>/` (never `write_file`

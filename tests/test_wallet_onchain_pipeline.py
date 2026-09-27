@@ -8,7 +8,7 @@ Covers (2026-09 wallet audit):
   wiring (BSC PancakeSwap / Solana Jupiter) with vault-resolved keys
 - swap_approval: degenerate-quote rejection, expiry enforcement, zero
   floor refusal
-- SecretVault: default-passphrase warning + corrupt-vault surfacing
+- SecretVault: local-key bootstrap + corrupt-vault surfacing
 - wallet.registry: config-aware cache + loud vault failures
 
 No test in this file touches the network: every HTTP call goes through
@@ -17,6 +17,7 @@ scripted fake transports injected via ``SelfCustodyWallet(transport=...)``.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any
 
@@ -39,7 +40,7 @@ pytestmark = pytest.mark.smoke
 _ETH_RPC = "http://localhost:1"
 _BSC_RPC = "http://bsc-fake"
 _SOL_RPC = "http://sol-fake"
-_JUP = "https://quote-api.jup.ag/v6"
+_JUP = "https://api.jup.ag/swap/v1"
 
 _USDT_BSC = "0x55d398326f99059fF775485246999027B3197955"
 _WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
@@ -327,7 +328,11 @@ def test_bsc_swap_end_to_end_with_fake_rpc(tmp_path) -> None:
         "eth_getTransactionReceipt": {"status": "0x1",
                                       "blockHash": "0x" + "c" * 64,
                                       "blockNumber": hex(100),
-                                      "gasUsed": hex(150000)},
+                                      "gasUsed": hex(150000),
+                                      "logs":[{"address":_USDT_BSC,"topics":[
+                                          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                                          "0x"+"0"*64,"0x"+acct.address.lower().removeprefix("0x").rjust(64,"0")],
+                                          "data":hex(4_000_000)}]},
     })
     sc = _self_custody(signer_ref="vault://signer-key",
                        rpc_urls={"bsc": _BSC_RPC}, transport=t)
@@ -384,6 +389,8 @@ def test_solana_swap_end_to_end_with_fake_rpc(tmp_path) -> None:
                               "priceImpactPct": "0.01", "slippageBps": 50},
         f"POST {_JUP}/swap": {"swapTransaction": tx_b64},
         "getTokenSupply": {"value": {"decimals": 6, "uiAmount": 1.0}},
+        "getTransaction": {"meta":{"err":None,"preTokenBalances":[],"postTokenBalances":[
+            {"owner":__import__("base58").b58encode(pubkey).decode(),"mint":_USDC_SOL,"uiTokenAmount":{"uiAmountString":"4"}}]}},
         "sendTransaction": "SIG" + "1" * 20,
         "getSignatureStatuses": {"value": [{"confirmationStatus": "finalized",
                                             "slot": 42, "err": None}]},
@@ -517,7 +524,7 @@ def test_execute_happy_path_carries_floor(tmp_path, monkeypatch) -> None:
             captured.update(kw)
             return WalletSwapResult(provider="self_custody", chain="bsc",
                                     ok=True, tx_hash="0xh", amount_in=1.0,
-                                    amount_out=4.0)
+                                    amount_out=4.0,extra={"confirmed":True,"amount_out_source":"receipt"})
 
     monkeypatch.setattr(sa, "_provider", lambda config, request: _P())
     out = execute_frozen_swap(cfg, request=request,
@@ -533,15 +540,39 @@ def test_execute_happy_path_carries_floor(tmp_path, monkeypatch) -> None:
 # SecretVault + registry
 
 
-def test_vault_warns_on_default_passphrase(tmp_path, monkeypatch, caplog) -> None:
+def test_vault_auto_bootstraps_private_local_key(tmp_path, monkeypatch) -> None:
     import nerya.security.secrets as sec
 
-    monkeypatch.setattr(sec, "_default_pp_warned", False)
     monkeypatch.delenv("NERYA_VAULT_PASSPHRASE", raising=False)
-    with caplog.at_level("WARNING", logger="nerya.security.secrets"):
-        v = sec.SecretVault.open(tmp_path / "secrets.enc")
-        assert v.passphrase == sec._DEFAULT_PASSPHRASE
-    assert any("NERYA_VAULT_PASSPHRASE" in r.message for r in caplog.records)
+    vault_path = tmp_path / "vault" / "secrets.enc"
+    vault = sec.SecretVault.open(vault_path)
+    key_path = vault_path.with_name("keyring.ref")
+
+    assert vault.passphrase != sec._DEFAULT_PASSPHRASE
+    assert key_path.is_file()
+    if os.name != "nt":
+        assert key_path.stat().st_mode & 0o077 == 0
+    vault.put(name="local", value="secret", kind="opaque", scope=["test"])
+    assert sec.SecretVault.open(vault_path).resolve("local") == "secret"
+
+
+def test_vault_missing_key_does_not_replace_existing_custom_vault(tmp_path, monkeypatch) -> None:
+    import nerya.security.secrets as sec
+    from nerya.core.errors import SecretAccessDenied
+
+    vault_path = tmp_path / "vault" / "secrets.enc"
+    original = sec.SecretVault.open(vault_path, passphrase="custom-passphrase")
+    original.put(name="keeper", value="keep-me", kind="opaque", scope=["test"])
+    monkeypatch.delenv("NERYA_VAULT_PASSPHRASE", raising=False)
+
+    locked = sec.SecretVault.open(vault_path)
+    assert locked.load_error
+    assert not vault_path.with_name("keyring.ref").exists()
+    with pytest.raises(SecretAccessDenied):
+        locked.put(name="new", value="x", kind="opaque", scope=["test"])
+    with pytest.raises(SecretAccessDenied):
+        locked.delete("keeper")
+    assert sec.SecretVault.open(vault_path, passphrase="custom-passphrase").resolve("keeper") == "keep-me"
 
 
 def test_vault_corrupt_file_sets_load_error(tmp_path, caplog) -> None:

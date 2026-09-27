@@ -136,6 +136,11 @@ class AgentController:
         page.on('requestfailed', lambda req: self.record_event(page, {'kind':'requestfailed', 'method':req.method}))
 
     def on_dialog(self, page, dialog):
+        if self.worker.human_control:
+            # Human prompts use the embedded operator UI, never Agent events.
+            self.dialog_rule = None
+            self.worker.dialogs.show(page, dialog)
+            return
         rule, self.dialog_rule = self.dialog_rule, None
         accepted = bool(self.in_action and not self.worker.interrupted.is_set() and rule and rule.get('type') == dialog.type and rule.get('message') == dialog.message and rule.get('accept') is True)
         self.record_event(page, {'kind':'dialog', 'type':dialog.type, 'message':clean(dialog.message, 500), 'accepted':accepted})
@@ -455,7 +460,7 @@ class AgentController:
             self.guard()
             shot_id = secrets.token_hex(12)
             self.last_shot = (shot_id,page,page.url,self.revision,time.monotonic())
-            return {'image':image,'screenshot_id':shot_id,'viewport':{'width':1280,'height':800}}
+            return {'image':image,'screenshot_id':shot_id,'viewport':dict(w.viewport)}
         if action == 'select_tab':
             w._sync_pages()
             target = w.pages.get(str(body.get('tab_id')))
@@ -514,8 +519,8 @@ class AgentController:
             shot = self.last_shot
             if not shot or body.get('screenshot_id') != shot[0] or page is not shot[1] or page.url != shot[2] or self.revision != shot[3] or time.monotonic()-shot[4]>60:
                 raise BrowserError('fresh_screenshot_required_for_coordinates')
-            x=finite_number(body.get('x'),-1,0,1279)
-            y=finite_number(body.get('y'),-1,0,799)
+            x=finite_number(body.get('x'),-1,0,w.viewport['width']-1)
+            y=finite_number(body.get('y'),-1,0,w.viewport['height']-1)
             if x<0 or y<0:
                 raise BrowserError('coordinates_required')
             element=page.evaluate_handle('({x,y}) => { let e=document.elementFromPoint(x,y); while(e?.shadowRoot?.elementFromPoint(x,y)) { const n=e.shadowRoot.elementFromPoint(x,y); if(n===e) break; e=n; } return e; }', {'x':x,'y':y}).as_element()
@@ -533,8 +538,8 @@ class AgentController:
                 element.dispose()
                 self.last_shot=None
         elif action == 'move':
-            x = finite_number(body.get('x'), -1, 0, 1279)
-            y = finite_number(body.get('y'), -1, 0, 799)
+            x = finite_number(body.get('x'), -1, 0, w.viewport['width']-1)
+            y = finite_number(body.get('y'), -1, 0, w.viewport['height']-1)
             if x < 0 or y < 0:
                 raise BrowserError('coordinates_required')
             page.mouse.move(x, y, steps=8)

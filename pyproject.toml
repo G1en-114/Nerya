@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nerya"
-version = "0.1.0"
+version = "1.0.0b1"
 description = "Skill-first, trading-native, self-evolving autonomous agent runtime"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Nerya" }]
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 dependencies = [
     "pyyaml>=6.0",
     "pydantic>=2.5",
@@ -58,6 +58,7 @@ trading = [
     "pynacl>=1.5",
     "base58>=2.1",
 ]
+prediction = ["py-clob-client-v2>=1.1.0,<2"]
 
 [project.scripts]
 nerya = "nerya.cli.app:main"
@@ -72,6 +73,13 @@ nerya = [
     "agent/route_manifest_presets/*.yml",
     "skills/builtin/**/*.md",
     "skills/builtin/**/*.yml",
+    "skills/builtin/**/*.yaml",
+    "skills/builtin/**/*.json",
+    "skills/builtin/**/*.js",
+    "skills/builtin/**/*.txt",
+    "skills/builtin/**/*.csv",
+    "skills/builtin/**/*.j2",
+    "wallet/providers/templates/*.js",
     "workspace/_prompt_bundles/**/*.md",
     "workspace/_prompt_bundles/**/*.json",
     "workspace/_prompt_bundles/**/*.yml",

@@ -58,6 +58,22 @@ def test_run_turn_handles_registered_slash_command_without_agent_kernel(tmp_path
     assert "schedule" in result["reply_text"]
 
 
+def test_run_turn_context_window_accepts_custom_model_value(tmp_path):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path))
+
+    custom = routes_agent._with_turn_limit_overrides(
+        cfg,
+        {"model_context_window": 200_000},
+    )
+    assert custom.get("agent.native.model_context_window") == 200_000
+
+    one_million = routes_agent._with_turn_limit_overrides(
+        cfg,
+        {"context_window": 1_000_000},
+    )
+    assert one_million.get("agent.native.model_context_window") == 1_000_000
+
+
 def test_agent_tools_route_delegates_to_agent_api():
     expected = {"ok": True, "count": 0, "tools": [], "harness": "native"}
     client = SimpleNamespace(

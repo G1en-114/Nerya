@@ -116,9 +116,7 @@ _CAPABILITIES = WalletCapabilities(
         supported=True, status="partial",
         note=(
             "Real router quotes for bsc (PancakeSwap v2 getAmountsOut) and "
-            "solana (Jupiter /quote). Other chains return a synthetic "
-            "amount_in * (1 - slippage) placeholder, clearly marked in "
-            "quote.extra."
+            "solana (Jupiter /quote). Other chains require an aggregator wallet for real quotes."
         ),
     ),
     swap=WalletCapability(
@@ -168,6 +166,8 @@ class SelfCustodyWallet(WalletProvider):
             ("eth_account", "pip:eth-account"),
             ("web3", "pip:web3"),
             ("solders", "pip:solders"),
+            ("nacl", "pip:pynacl"),
+            ("base58", "pip:base58"),
         ):
             try:
                 __import__(mod)
@@ -179,7 +179,7 @@ class SelfCustodyWallet(WalletProvider):
     def readiness(self) -> WalletReadiness:
         found, missing = self._probe()
         evm_ok = "pip:eth-account" in found
-        sol_ok = "pip:solders" in found
+        sol_ok = "pip:pynacl" in found and "pip:base58" in found
         goat_ok = "pip:goat-sdk" in found
         ready = goat_ok or evm_ok or sol_ok
         reason = ""
@@ -197,7 +197,20 @@ class SelfCustodyWallet(WalletProvider):
         )
 
     def capabilities(self) -> WalletCapabilities:
-        return _CAPABILITIES
+        from dataclasses import replace
+        return replace(_CAPABILITIES,swap_chains=tuple(dict.fromkeys(('bsc','solana',*(self.config.get('dex_routes') or {})))),
+                       minimum_output='enforced',receipt_polling=True)
+
+    def _configured_route(self,chain):
+        route=(self.config.get('dex_routes') or {}).get(chain)
+        if not route:return None
+        from .evm_v2 import EvmV2Wallet
+        if route.get('type','evm_v2')!='evm_v2':raise WalletPolicyDenied('unknown configured DEX route type')
+        adapter=EvmV2Wallet(id=self.id,config={**self.config,**route,'chain':chain},workspace=self.workspace,
+            rpc_urls=self.rpc_urls,transport=self.transport,signer_ref=self.signer_ref)
+        # Preserve MetaMask seed derivation and the selected vault identity.
+        adapter._resolve_signer_key=self._resolve_signer_key
+        return adapter
 
     # ------------------------------------------------------------------
     def get_balance(
@@ -265,6 +278,9 @@ class SelfCustodyWallet(WalletProvider):
         amount_in: float, slippage_bps: int = 50, **kw: Any,
     ) -> WalletQuote:
         chain_l = (chain or "").lower()
+        route=self._configured_route(chain_l)
+        if route:
+            return route.quote(chain=chain_l,token_in=token_in,token_out=token_out,amount_in=amount_in,slippage_bps=slippage_bps,**kw)
         if chain_l == "bsc":
             return self._bsc_quote(
                 token_in=token_in, token_out=token_out,
@@ -275,24 +291,7 @@ class SelfCustodyWallet(WalletProvider):
                 token_in=token_in, token_out=token_out,
                 amount_in=amount_in, slippage_bps=slippage_bps, **kw,
             )
-        # Off-chain placeholder for chains without a wired router. Real
-        # quoting should come via an aggregator skill (1inch / Jupiter)
-        # plugged into the operator's goat-sdk instance.
-        expected = float(amount_in) * (1.0 - slippage_bps / 10_000)
-        return WalletQuote(
-            provider=self.id,
-            chain=chain,
-            token_in=token_in,
-            token_out=token_out,
-            amount_in=float(amount_in),
-            expected_out=expected,
-            min_out=expected * (1.0 - slippage_bps / 10_000),
-            slippage_bps=slippage_bps,
-            extra={"note": f"self_custody quote on chain={chain} is a "
-                           "synthetic placeholder (no router wired); wire "
-                           "goat-sdk or 1inch for real prices.",
-                   "synthetic": True},
-        )
+        raise WalletQuoteError(f'No swap router configured for {chain}; choose an aggregator wallet for this chain')
 
     def swap(
         self, *, chain: str, token_in: str, token_out: str,
@@ -310,6 +309,10 @@ class SelfCustodyWallet(WalletProvider):
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
         chain_l = (chain or "").lower()
+        route=self._configured_route(chain_l)
+        if route:
+            return route.swap(chain=chain_l,token_in=token_in,token_out=token_out,amount_in=amount_in,
+                slippage_bps=slippage_bps,receiver=receiver,live=live,min_out=min_out,**kw)
         if chain_l not in _SWAPPABLE_CHAINS:
             raise WalletPolicyDenied(
                 f"self_custody live swap is wired for {' / '.join(_SWAPPABLE_CHAINS)} "
@@ -434,7 +437,7 @@ class SelfCustodyWallet(WalletProvider):
         except TradingError as exc:
             raise WalletQuoteError(f"bsc router quote failed: {exc}") from exc
         return WalletQuote(
-            provider=self.id, chain="bsc",
+            provider=self.id, chain=conn.chain,
             token_in=token_in, token_out=token_out,
             amount_in=float(amount_in),
             expected_out=float(q["amount_out"]),
@@ -478,7 +481,10 @@ class SelfCustodyWallet(WalletProvider):
         # ERC-20 inputs need a router allowance before the swap can move
         # the funds; approve the exact amount when it's short (or when the
         # allowance cannot be read — missing approval fails at broadcast).
-        is_native_in = addr_in.lower() == conn.wbnb.lower()
+        native_symbol=str(self.config.get('native_symbol') or 'BNB').upper()
+        is_native_in = token_in.upper() in (native_symbol,'NATIVE')
+        is_native_out = token_out.upper() in (native_symbol,'NATIVE')
+        dec_out = conn.get_erc20_decimals(addr_out)
         if not is_native_in:
             try:
                 allowed = conn.get_erc20_allowance(
@@ -489,11 +495,16 @@ class SelfCustodyWallet(WalletProvider):
             except TradingError:
                 allowance_wei = 0
             if allowance_wei < int(quote["amount_in_wei"]):
-                conn.approve(
+                approval = conn.approve(
                     token=addr_in, spender=conn.router,
                     amount=int(quote["amount_in_wei"]),
                     signer_private_key=key,
+                    on_broadcast=kw.get('on_broadcast'),
                 )
+                if not approval.get('confirmed'):
+                    return WalletSwapResult(provider=self.id,chain=conn.chain,ok=False,
+                        tx_hash=str(approval.get('tx_hash') or ''),reason='allowance_confirmation_pending',
+                        extra={'confirmed':False,'phase':'approval'})
 
         out = conn.swap(
             token_in=addr_in, token_out=addr_out,
@@ -502,19 +513,28 @@ class SelfCustodyWallet(WalletProvider):
             recipient=recipient,
             signer_private_key=key,
             amount_out_min_wei=amount_out_min_wei,
+            native_in=is_native_in, native_out=is_native_out,
+            on_broadcast=(lambda tx:kw['on_broadcast']({**tx,'token_out':addr_out,'decimals_out':dec_out,
+                'receiver':recipient,'native_out':is_native_out})) if kw.get('on_broadcast') else None,
         )
         confirmed = bool(out.get("confirmed"))
+        from ..receipts import token_received, native_received
+        actual = token_received(out.get('receipt'),addr_out,recipient,dec_out) if not is_native_out else None
+        if is_native_out and confirmed:
+            actual = native_received(conn,out['tx_hash'],recipient)
         return WalletSwapResult(
-            provider=self.id, chain="bsc",
-            ok=bool(out.get("tx_hash")),
+            provider=self.id, chain=conn.chain,
+            ok=confirmed and actual is not None,
             tx_hash=str(out.get("tx_hash") or ""),
             amount_in=float(amount_in),
-            amount_out=float(quote["amount_out"]),
+            amount_out=float(actual or 0),
             reason="" if confirmed else "broadcast_ok_receipt_pending",
             extra={
                 "recipient": recipient, "router": conn.router,
                 "path": quote["path"], "nonce": out.get("nonce"),
                 "confirmed": confirmed, "real_quote": True,
+                'amount_out_source':('transaction_trace' if is_native_out else 'receipt') if actual is not None else 'unknown',
+                'expected_out':quote['amount_out'],
             },
         )
 
@@ -533,6 +553,8 @@ class SelfCustodyWallet(WalletProvider):
         return SolanaNative(
             chain="solana", rpc_url=rpc, live=live,
             credentials=DEXCredentials(rpc_url=rpc, signer_ref=self.signer_ref),
+            jupiter_url=str(self.config.get('jupiter_url') or 'https://api.jup.ag/swap/v1'),
+            jupiter_api_key=self._resolve_vault_secret(self.config['jupiter_api_key_ref']) if self.config.get('jupiter_api_key_ref') else '',
             **kwargs,
         )
 
@@ -557,10 +579,7 @@ class SelfCustodyWallet(WalletProvider):
         except TradingError as exc:
             raise WalletQuoteError(f"solana jupiter quote failed: {exc}") from exc
         out_amount = int(doc.get("outAmount") or 0)
-        try:
-            dec_out = 9 if mint_out == _SOL_MINT else conn.get_mint_decimals(mint_out)
-        except TradingError:
-            dec_out = 9
+        dec_out = 9 if mint_out == _SOL_MINT else conn.get_mint_decimals(mint_out)
         expected_out = out_amount / (10 ** dec_out)
         if expected_out <= 0:
             raise WalletQuoteError(
@@ -571,13 +590,14 @@ class SelfCustodyWallet(WalletProvider):
             token_in=token_in, token_out=token_out,
             amount_in=float(amount_in),
             expected_out=expected_out,
-            min_out=expected_out * (1.0 - int(slippage_bps) / 10_000),
+            min_out=int(doc.get('otherAmountThreshold') or int(out_amount*(1-int(slippage_bps)/10000))) / (10**dec_out),
             slippage_bps=int(slippage_bps),
             extra={
                 "in_amount_raw": doc.get("inAmount"),
                 "out_amount_raw": doc.get("outAmount"),
                 "price_impact_pct": doc.get("priceImpactPct"),
                 "real_quote": True,
+                'decimals_in':dec_in,'decimals_out':dec_out,
             },
         )
 
@@ -594,10 +614,7 @@ class SelfCustodyWallet(WalletProvider):
         dec_in = 9 if mint_in == _SOL_MINT else conn.get_mint_decimals(mint_in)
         # Resolve the output decimals BEFORE broadcasting: losing the
         # signature to a failed read after the fact would orphan a live tx.
-        try:
-            dec_out = 9 if mint_out == _SOL_MINT else conn.get_mint_decimals(mint_out)
-        except TradingError:
-            dec_out = 9
+        dec_out = 9 if mint_out == _SOL_MINT else conn.get_mint_decimals(mint_out)
         # F11: Decimal conversion — float math truncated against the
         # frozen amount (e.g. 8.1 * 1e6 → 8099999).
         amount_in_raw = int(Decimal(str(amount_in)) * (10 ** Decimal(dec_in)))
@@ -619,6 +636,9 @@ class SelfCustodyWallet(WalletProvider):
                     f"below the approved floor {min_out} — refusing to "
                     "broadcast; request a fresh approval."
                 )
+            threshold = int(quote.get('otherAmountThreshold') or 0)
+            if threshold < to_base_units_ceil(min_out,dec_out):
+                raise WalletPolicyDenied('Jupiter executable minimum is below approved floor; request a tighter quote')
         # F12: Jupiter's ``userPublicKey`` must be the signing wallet —
         # it owns the source ATAs and pays the fees. A distinct
         # ``receiver`` destination is not supported on this path yet
@@ -641,24 +661,22 @@ class SelfCustodyWallet(WalletProvider):
             slippage_bps=int(slippage_bps),
             user_public_key=wallet_pubkey,
             quote=quote,
+            on_broadcast=kw.get('on_broadcast'),
         )
         confirmed = bool(out.get("confirmed"))
-        expected_out = 0.0
-        try:
-            expected_out = int(out["quote"].get("outAmount") or 0) / (10 ** dec_out)
-        except (KeyError, TypeError, ValueError):
-            pass
+        actual_out = out.get('amount_out')
         return WalletSwapResult(
             provider=self.id, chain="solana",
-            ok=bool(out.get("signature")),
+            ok=confirmed and actual_out is not None,
             tx_hash=str(out.get("signature") or ""),
             amount_in=float(amount_in),
-            amount_out=expected_out,
+            amount_out=float(actual_out or 0),
             reason="" if confirmed else "broadcast_ok_confirmation_pending",
             extra={
                 "user": out.get("user"), "confirmed": confirmed,
                 "confirmation_status": out.get("confirmation_status"),
                 "slot": out.get("slot"), "real_quote": True,
+                'amount_out_source':'transaction_meta' if actual_out is not None else 'unknown',
             },
         )
 

@@ -1,0 +1,22 @@
+{
+  "accountConnection": {
+    "service_update_required": "本地服务尚未加载新版账户绑定接口。请重启 Nerya 服务后重试；填写的内容暂时仍保留在当前窗口中。",
+    "title": "绑定交易账户", "editTitle": "账户连接设置", "intro": "选择平台，安全连接。每一步都清楚明了。", "editIntro": "更新连接信息，保留原有交易设置。",
+    "step1": "选择平台", "step2": "连接账户", "step3": "完成绑定", "steps": "账户绑定步骤",
+    "exchange": "交易所", "wallet": "链上钱包", "paper": "模拟体验",
+    "search": "搜索交易所或券商", "searchPlaceholder": "搜索 Binance、OKX、Bybit…", "popular": "常用平台", "allPlatforms": "全部支持的平台", "noMatches": "没有找到匹配的平台，试试其他名称。",
+    "providerLoading": "正在加载可用平台…", "providerFailed": "平台列表暂时无法加载，已填写的内容仍会保留。", "retry": "重新加载", "cancel": "取消", "close": "关闭", "back": "上一步", "next": "继续", "change": "更换",
+    "platform": "平台", "accountName": "账户名称", "namePlaceholder": "例如：我的主账户", "optional": "选填", "readOnly": "只读连接", "safeHint": "验证仅用于读取余额，不会下单、转账或自动开启实盘交易。",
+    "keyHint": "请使用该平台的 API 凭据，而不是登录密码。开启读取余额权限即可，请勿授予提现权限。", "getKeys": "前往创建 API", "docs": "连接说明",
+    "schemaLoading": "正在准备该平台的连接字段…", "schemaFailed": "暂时无法获取连接字段，请重新加载后再填写凭据。", "show": "显示{field}", "hide": "隐藏{field}", "savedCredential": "已安全保存", "keepCredential": "留空即可保留已保存的凭据", "secretPlaceholder": "粘贴{field}", "required": "必填", "optionalFields": "更多连接选项",
+    "advanced": "高级设置", "accountId": "账户 ID", "idHint": "系统自动生成，策略及集成通过此 ID 识别账户。", "currency": "显示币种", "subaccount": "子账户", "preserved": "已有交易模式、权限与风控限制都会保留，除非你在下方主动修改。",
+    "paperTitle": "先用模拟账户体验", "paperDescription": "使用虚拟资金探索 Nerya，无需 API 密钥、钱包或充值。", "paperBalance": "初始虚拟资金（美元）", "paperNotice": "这里使用的仅是模拟资金，不代表已验证真实交易所连接。",
+    "walletTitle": "使用已配置的钱包", "walletDescription": "选择已经接入 Nerya 的钱包，系统会先验证余额读取，再完成账户绑定。", "noWallets": "还没有配置钱包。", "manageWallets": "配置钱包", "refreshWallets": "刷新钱包列表", "walletSetupHint": "在下方完成服务商登录或钱包配置后，刷新此列表。账户绑定后默认为只读。",
+    "connect": "验证并绑定", "reconnect": "验证并保存", "createPaper": "创建模拟账户", "savePaper": "保存账户", "busy": "正在验证连接…", "paperBusy": "正在保存账户…", "busyHint": "正在读取余额并安全保存连接，请保持此窗口打开；此过程不会发出订单。",
+    "successTitle": "账户已成功绑定", "paperSuccess": "模拟账户已准备好", "successDescription": "已验证余额读取权限，连接信息已安全保存。", "paperSuccessDescription": "虚拟账户已保存，现在可以开始体验 Nerya。", "done": "完成", "balance": "已验证账户资产（美元）", "assets": "有余额的资产", "zeroBalance": "连接有效，账户余额为零也可以正常绑定。", "policyKept": "原有交易设置保持不变。", "errorTitle": "尚未完成绑定", "inputError": "请检查标出的必填项。",
+    "session_expired": "当前控制台登录已失效，请重新登录后重试。", "auth_error": "平台拒绝了当前凭据。请检查 Key、Secret、所需的 Passphrase、API 读取权限及 IP 白名单。", "missing_fields": "请补齐必填的连接信息后继续。", "network_error": "暂时无法确认连接结果，请检查网络后重试。使用相同请求重试不会重复创建账户。", "rate_limited": "平台暂时限制了请求频率。输入内容会保留，请在平台限流恢复后重试。", "wallet_not_ready": "该钱包尚未能读取余额，请完成授权，并检查所选地址和网络。", "vault_unavailable": "无法打开本机的凭据保险库。请检查保险库密钥或在安全设置中解锁；原有凭据未被替换。", "connector_unavailable": "当前运行环境暂不可用该平台连接器，请检查服务商组件的安装状态后重试。", "unsupported_provider": "该服务商不支持账户余额验证，请选择受支持的交易所、券商或已配置钱包。", "account_changed": "账户已在其他窗口中被修改。请关闭并重新打开编辑器，以使用最新设置。", "account_exists": "此账户 ID 已存在。请编辑已有账户，或在高级设置中使用其他 ID。", "unknown_account": "此账户已不存在，请关闭编辑器并刷新账户列表。", "invalid_balance": "请输入有效且不小于零的虚拟资金金额。", "invalid_account_id": "账户 ID 最多 80 个字符，只能包含字母、数字、下划线或连字符。", "connection_busy": "当前有另一个账户正在连接，请在其完成后重试。", "invalid_account": "部分连接设置不正确，请检查所选平台及其必填字段。", "provider_change_requires_new_account": "更换平台时请创建新账户，避免已有策略在不知情的情况下切换交易平台。", "connection_failed": "平台未返回有效的余额结果。请检查凭据、网络和平台状态后重试。",
+    "policyTitle": "交易权限与风控限制", "policyWarning": "这些设置影响实际交易，而非连接验证。实盘订单仍需通过运行时风控与审批。", "mode": "交易模式", "modePaper": "模拟交易", "modeShadow": "只读观察", "modeCanary": "小额实盘", "modeLive": "实盘交易", "enableLive": "允许此账户进行实盘交易", "readBalances": "读取余额", "placeOrders": "提交订单", "cancelOrders": "撤销订单", "confirmPolicy": "确定保存此账户交易权限及风控限制的修改吗？连接验证本身不会下单。",
+    "limits": { "max_account_nav_usd": "账户分配上限（美元）", "max_strategy_allocation_pct": "单策略分配上限（%）", "max_order_notional_usd": "单笔订单上限（美元）", "max_daily_loss_usd": "每日亏损上限（美元）", "max_drawdown_pct": "最大回撤（%）", "max_leverage": "最大杠杆", "fee_buffer_bps": "手续费缓冲（基点）", "min_free_balance_pct": "最低可用资金比例（%）" },
+    "fields": { "api_key": "API Key", "api_secret": "API Secret", "api_passphrase": "API Passphrase", "private_key": "签名私钥", "wallet_address": "钱包地址", "uid": "用户 ID", "account_id": "平台账户 ID", "login": "登录 ID", "host": "主机地址", "port": "端口", "client_id": "客户端 ID", "server": "服务器", "password": "密码", "rpc_url": "RPC 地址" }
+  }
+}

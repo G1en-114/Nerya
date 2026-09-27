@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import pytest
-from nerya.api import routes_browsers, routes_browsers_session, route_scopes
+from nerya.api import routes_browsers, route_scopes
 from nerya.skills.builtin.browser.scripts import browser_session
 from nerya.skills.manifest import SkillManifest
 
@@ -24,10 +24,9 @@ def test_no_legacy_install_selection_or_automation_routes():
     paths={path for _,path,_ in routes_browsers.routes()}
     assert '/browsers/agent' in paths and '/browsers/desktop' in paths
     assert not paths.intersection({'/browsers/install','/browsers/uninstall','/browsers/select','/browsers/configure','/browsers/probe'})
-    assert routes_browsers_session.routes()==[]
 
 
-@pytest.mark.parametrize('payload', [{'backend':'research'},{'engine':'camofox'},{'engine':'cloakbrowser'},{'engine':'lightpanda'},{'engine':'obscura'},{'session_id':'bs_old'}])
+@pytest.mark.parametrize('payload', [{'backend':'research'},{'engine':'legacy'},{'session_id':'bs_old'}])
 def test_legacy_arguments_do_not_dispatch(monkeypatch,payload):
     monkeypatch.setattr(browser_session,'_request',lambda *a,**kw:pytest.fail('legacy request escaped'))
     result=browser_session.run(operation='open',**payload)

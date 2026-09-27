@@ -1,14 +1,14 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
 import { clientApi } from "../../lib/clientApi";
 import {
   buildChatModelOptions, loadRunSettings, saveRunSettings, DEFAULT_CHAT_RUN_SETTINGS,
-  type ChatAttachment, type ChatModelOption, type ChatRunSettings,
+  type ChatModelOption, type ChatRunSettings,
 } from "../../lib/chat";
-import { setComposeDraftPayload, takeComposeDraftPayload } from "../../lib/composeDraft";
+import { setWorkspaceComposeDraft, takeWorkspaceComposeDraft } from "../../lib/workspaceComposeDraft";
 import { AgentStart } from "../chat/AgentStart";
 import { ChatInput } from "../chat/ChatInput";
 import { useWorkbench } from "../chat/useWorkbench";
@@ -18,6 +18,7 @@ import { useChatDraft } from "../chat/useChatDraft";
 export function CommandHome() {
   const router = useRouter();
   const t = useTranslations("commandHome");
+  const zh = useLocale().startsWith("zh");
   const draft=useChatDraft("home");
   const { text, setText, attachments, setAttachments } = draft;
   const workbench=useWorkbench();
@@ -28,9 +29,6 @@ export function CommandHome() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    setSettings(loadRunSettings());
-    const draft = takeComposeDraftPayload();
-    if (draft) { setText(draft.text); setAttachments(draft.attachments); }
     // Do not summon the on-screen keyboard as soon as a phone opens home.
     const focus = window.setTimeout(() => {
       if (window.matchMedia("(pointer: fine)").matches) inputRef.current?.focus();
@@ -46,15 +44,25 @@ export function CommandHome() {
       });
     return () => { cancelled = true; window.clearTimeout(focus); };
   }, []);
+  useEffect(() => {
+    if (!draft.ready) return;
+    const handoff = takeWorkspaceComposeDraft();
+    if (handoff) draft.replace(handoff);
+  }, [draft.ready, draft.workspaceId]);
+  useEffect(() => {
+    submitted.current = false; setNavigating(false);
+    setSettings(draft.workspaceId ? loadRunSettings() : DEFAULT_CHAT_RUN_SETTINGS);
+  }, [draft.workspaceId]);
 
   useEffect(()=>{if(draft.settings)setSettings(draft.settings);},[draft.settings]);
   function submit() {
-    if (workbench.connection!=="online" || submitted.current || (!text.trim() && !attachments.length)) return;
+    if (!draft.ready || workbench.connection!=="online" || submitted.current || (!text.trim() && !attachments.length)) return;
+    const receipt = draft.capture();
+    if (!setWorkspaceComposeDraft({ text: text.trim(), attachments, settings, autoSend: true })) return;
     submitted.current = true;
     setNavigating(true);
     saveRunSettings(settings);
-    setComposeDraftPayload({ text: text.trim(), attachments, autoSend: true });
-    setText(""); setAttachments([]);
+    draft.clearIfUnchanged(receipt);
     router.push("/chat");
   }
 
@@ -63,7 +71,8 @@ export function CommandHome() {
     {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[860px] flex-wrap gap-2 px-4 py-2 text-xs">{draft.recovery.slice(0,3).map(row=><button type="button" className="min-h-11 underline" key={row.key} onClick={()=>draft.restore(row)}>{row.draft.text.slice(0,60)||row.draft.attachments[0]?.name} ↩</button>)}<button type="button" className="min-h-11" aria-label="Dismiss recovered drafts" onClick={draft.dismissRecovery}>×</button></div>}
     <AgentStart value={text} onChange={setText} disabled={navigating} composer={
       <ChatInput variant="hero" inputRef={inputRef} value={text} onChange={setText} onSend={submit}
-        sending={navigating} locked={navigating||workbench.connection!=="online"} placeholder={t("placeholder")}
+        sending={navigating} locked={!draft.ready||navigating||workbench.connection!=="online"} draftLocked={navigating} placeholder={t("placeholder")}
+        lockMessage={navigating ? (zh ? "正在打开会话…" : "Opening conversation…") : (zh ? "连接工作区后即可发送；可以先撰写草稿。" : "Send when the workspace connects. You can draft now.")}
         settings={settings} onSettingsChange={next=>{setSettings(next);draft.setSettings(next);}} modelOptions={modelOptions}
         attachments={attachments} onAttachmentsChange={setAttachments} />
     } />

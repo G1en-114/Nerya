@@ -4,8 +4,8 @@ Byreal (https://byreal.io) ships an AI-native CLI, ``@byreal-io/byreal-cli``
 (bin ``byreal-cli``), for its concentrated-liquidity (CLMM) DEX on Solana.
 Nerya treats it as an on-chain wallet provider: read-only commands
 (``overview``, ``pools``, ``tokens``, ``pools klines``) need no wallet, while
-``swap`` and CLMM ``positions`` require a local Solana keypair the operator
-configures interactively via ``byreal-cli setup``.
+swaps use the official router plus an explicitly selected keypair or vault
+signer. CLI discovery and pool data remain available independently.
 
 Nerya never installs the CLI implicitly. When it is absent the provider raises
 :class:`WalletDependencyError` carrying the exact install command — either a
@@ -109,9 +109,7 @@ _CAPABILITIES = WalletCapabilities(
         supported=True,
         status="partial",
         note=(
-            "byreal-cli `swap execute --confirm` signs locally with the operator "
-            "keypair. Nerya still requires runtime.live_trading_enabled before "
-            "broadcasting."
+            "Uses the official router quote and the explicit keypair, then signs, broadcasts and reads Solana transaction metadata after approval."
         ),
     ),
     market_data=WalletCapability(
@@ -141,6 +139,51 @@ class ByrealWallet(WalletProvider):
     rpc_url: str = ""
     keypair_path: str = ""
     config: dict[str, Any] = field(default_factory=dict)
+    transport: Any = None
+
+    def _signer(self):
+        if self.config.get('signer_ref'):
+            from .self_custody import SelfCustodyWallet
+            return SelfCustodyWallet(signer_ref=self.config['signer_ref'],workspace=self.workspace)._resolve_signer_key()
+        path = str(self.keypair_path or self.config.get('keypair_path') or '')
+        if not path:
+            raise WalletPolicyDenied('Byreal execution requires an explicit keypair_path or vault signer_ref')
+        data = json.loads(Path(path).expanduser().read_text())
+        if not isinstance(data,list) or len(data) != 64 or any(not isinstance(x,int) or not 0<=x<=255 for x in data):
+            raise WalletPolicyDenied('invalid configured Solana keypair file')
+        import base58
+        return base58.b58encode(bytes(data)).decode()
+
+    def _solana(self, *, live=False):
+        from ...connectors.solana_native import SolanaNative
+        kwargs = {'transport':self.transport} if self.transport else {}
+        return SolanaNative(live=live,rpc_url=self.rpc_url or self.config.get('rpc_url') or 'https://api.mainnet-beta.solana.com',**kwargs)
+
+    def _api_quote(self, token_in, token_out, amount_in, slippage_bps, owner):
+        from ...connectors.http import UrllibHttp
+        from ..amounts import to_base_units
+        conn = self._solana()
+        sol = 'So11111111111111111111111111111111111111112'
+        mint_in = sol if token_in.upper() in ('SOL','NATIVE') else token_in
+        mint_out = sol if token_out.upper() in ('SOL','NATIVE') else token_out
+        dec_in = 9 if mint_in==sol else conn.get_mint_decimals(mint_in)
+        dec_out = 9 if mint_out==sol else conn.get_mint_decimals(mint_out)
+        body = {'inputMint':mint_in,'outputMint':mint_out,'amount':str(to_base_units(amount_in,dec_in)),
+            'swapMode':'in','slippageBps':str(slippage_bps),'userPublicKey':owner,
+            'broadcastMode':'priority','feeType':'maxCap','feeAmount':'10000000',
+            'cuPrice':str(self.config.get('compute_unit_price') or 100000)}
+        if mint_in==sol: body['createInputAta']=True
+        if mint_out==sol: body['createOutputAta']=True
+        status,doc = (self.transport or UrllibHttp()).request('POST',
+            'https://api2.byreal.io/byreal/api/router/v1/router-service/swap',body=body,timeout=30)
+        quote = (doc or {}).get('result') or {}
+        if status>=400 or not quote.get('outAmount') or int(quote['outAmount'])<=0:
+            error=quote.get('result') if isinstance(quote.get('result'),dict) else doc or {}
+            raise WalletQuoteError('Byreal router returned no executable quote: '+
+                str(error.get('retMsg') or error.get('message') or 'no route/output'))
+        if quote.get('inputMint') != mint_in or quote.get('outputMint') != mint_out or int(quote.get('inAmount') or 0)!=int(body['amount']):
+            raise WalletQuoteError('Byreal quote asset/amount mismatch')
+        return quote,dec_in,dec_out
 
     # ------------------------------------------------------------------
     # CLI resolution
@@ -283,10 +326,18 @@ class ByrealWallet(WalletProvider):
     # Protocol surface
     # ------------------------------------------------------------------
     def readiness(self) -> WalletReadiness:
-        missing = self._missing()
+        explicit_signer = bool(self.keypair_path or self.config.get('keypair_path') or self.config.get('signer_ref'))
+        missing = [] if explicit_signer else self._missing()
         reasons: list[str] = []
         if missing:
             reasons.append("Byreal CLI (byreal-cli) is not installed.")
+        if explicit_signer:
+            for module, dependency in (('nacl.signing','pynacl'),('base58','base58')):
+                try:
+                    __import__(module)
+                except ImportError:
+                    missing.append('pip:'+dependency)
+                    reasons.append('Direct signing requires '+dependency)
         keypair = str(
             self.keypair_path or self.config.get("keypair_path") or ""
         ).strip()
@@ -299,11 +350,13 @@ class ByrealWallet(WalletProvider):
             ready=ready,
             missing=missing,
             install_hint="" if ready else self._install_hint(),
-            reason="" if ready else " ".join(reasons),
+            reason=("Direct wallet RPC/router ready; CLI pool discovery requires byreal-cli separately."
+                    if ready and explicit_signer else "" if ready else " ".join(reasons)),
         )
 
     def capabilities(self) -> WalletCapabilities:
-        return _CAPABILITIES
+        from dataclasses import replace
+        return replace(_CAPABILITIES,swap_chains=('solana',),minimum_output='enforced',receipt_polling=True)
 
     # ------------------------------------------------------------------
     # On-chain data scraping helpers (read-only, no wallet required)
@@ -404,16 +457,35 @@ class ByrealWallet(WalletProvider):
 
         self._require_solana(chain)
         pool = str(token or "").strip()
+        if '@' in pool:
+            pool, selected_mint = pool.split('@',1)
+            kw.setdefault('token_mint',selected_mint)
         if not pool:
             raise WalletPolicyDenied(
                 "Byreal market data requires a pool address (market id solana:<poolAddress>)"
             )
-        bar = _BYREAL_INTERVALS.get(str(interval or "1h").lower(), "1h")
+        bar = _BYREAL_INTERVALS.get(str(interval or "1h").lower())
+        if bar is None:
+            raise WalletPolicyDenied('unsupported Byreal candle interval')
+        import time
+        seconds=int(bar[:-1])*{'m':60,'h':3600,'d':86400}[bar[-1]]
+        end=int(kw.get('end') if kw.get('end') is not None else time.time())
+        start=int(kw.get('start') if kw.get('start') is not None else end-seconds*max(1,min(limit,10000)))
         args = ["pools", "klines", pool, "--interval", bar]
         token_mint = str(kw.get("token_mint") or kw.get("mint") or "").strip()
         if token_mint:
             args += ["--token", token_mint]
-        data = self._run_cli(args, timeout_s=45.0)
+        args += ['--start',str(start),'--end',str(end)]
+        if token_mint and self._cli_command() is None:
+            from ...connectors.http import UrllibHttp
+            status,doc=(self.transport or UrllibHttp()).request('GET',
+                'https://api2.byreal.io/byreal/api/dex/v2/kline/query-ui',
+                params={'poolAddress':pool,'tokenAddress':token_mint,'klineType':bar,'startTime':start,'endTime':end},timeout=30)
+            if status>=400 or str(doc.get('retCode',0))!='0':
+                raise WalletTransportError('Byreal pool candle request failed')
+            data=(doc.get('result') or {}).get('data') or []
+        else:
+            data = self._run_cli(args, timeout_s=45.0)
         rows: Any = data
         if isinstance(data, dict):
             rows = data.get("klines") or data.get("candles") or data.get("list") or []
@@ -421,12 +493,12 @@ class ByrealWallet(WalletProvider):
         for row in rows if isinstance(rows, list) else []:
             try:
                 if isinstance(row, dict):
-                    ts = row.get("timestamp") or row.get("ts") or row.get("time")
-                    o = row.get("open")
-                    h = row.get("high")
-                    lo = row.get("low")
-                    c = row.get("close")
-                    v = row.get("volume") or row.get("vol")
+                    ts = row.get("timestamp") or row.get("ts") or row.get("time") or row.get('t')
+                    o = row.get("open",row.get('o'))
+                    h = row.get("high",row.get('h'))
+                    lo = row.get("low",row.get('l'))
+                    c = row.get("close",row.get('c'))
+                    v = row.get("volume") or row.get("vol") or row.get('v')
                 elif isinstance(row, (list, tuple)) and len(row) >= 6:
                     ts, o, h, lo, c, v = row[:6]
                 else:
@@ -441,10 +513,13 @@ class ByrealWallet(WalletProvider):
                     "low": float(lo),
                     "close": float(c),
                     "volume": float(v or 0.0),
+                    'price_currency':'pool_pair',
                 })
             except (TypeError, ValueError):
                 continue
         out.sort(key=lambda r_: r_["ts"])
+        out=[row for row in out if (kw.get('start') is None or row['ts']>=int(kw['start']))
+             and (kw.get('end') is None or row['ts']<=int(kw['end']))]
         if limit and len(out) > int(limit):
             out = out[-int(limit):]
         return out
@@ -484,6 +559,19 @@ class ByrealWallet(WalletProvider):
         self, *, chain: str, address: str, token: str, **kw: Any,
     ) -> WalletBalance:
         self._require_solana(chain)
+        if self.keypair_path or self.config.get('keypair_path') or self.config.get('signer_ref'):
+            from ...connectors.solana_native import _pubkey_from_signer
+            key=self._signer()
+            try: owner=_pubkey_from_signer(key)
+            finally: key=''
+            if address and address != owner:
+                raise WalletPolicyDenied('balance address differs from configured Byreal signer')
+            conn=self._solana()
+            native=token.lower() in ('','sol','native')
+            decimals=9 if native else conn.get_mint_decimals(token)
+            value=conn.get_balance(owner) if native else conn.get_token_balance(owner,token)
+            return WalletBalance(provider=self.id,chain='solana',address=owner,token=token,balance=value,decimals=decimals,
+                                 symbol='SOL' if native else '')
         data = self._run_cli(["wallet", "balance"], timeout_s=30.0)
         balances = []
         if isinstance(data, dict):
@@ -591,6 +679,18 @@ class ByrealWallet(WalletProvider):
     ) -> WalletQuote:
         self._require_solana(chain)
         dec_in = self._decimals_in(kw)
+        if self.keypair_path or self.config.get('keypair_path') or self.config.get('signer_ref'):
+            from ...connectors.solana_native import _pubkey_from_signer
+            key = self._signer()
+            try:
+                doc, dec_in, dec_out = self._api_quote(token_in,token_out,amount_in,slippage_bps,_pubkey_from_signer(key))
+            finally:
+                key = ''
+            expected = int(doc['outAmount'])/(10**dec_out)
+            return WalletQuote(provider=self.id,chain='solana',token_in=token_in,token_out=token_out,
+                amount_in=float(amount_in),expected_out=expected,
+                min_out=int(doc.get('otherAmountThreshold') or int(doc['outAmount'])*(10000-slippage_bps)//10000)/(10**dec_out),
+                slippage_bps=slippage_bps,extra={'real_quote':True,'decimals_in':dec_in,'decimals_out':dec_out})
         data = self._run_cli(
             [
                 "swap",
@@ -601,7 +701,7 @@ class ByrealWallet(WalletProvider):
                 str(token_out),
                 "--amount",
                 str(float(amount_in)),
-                "--slippage-bps",
+                "--slippage",
                 str(int(slippage_bps)),
                 "--dry-run",
             ],
@@ -609,7 +709,7 @@ class ByrealWallet(WalletProvider):
         )
         doc = data if isinstance(data, dict) else {}
         expected = self._first_positive(
-            doc, ("expectedOut", "estimatedOut", "outAmount", "expected_out"),
+            doc, ("uiOutAmount", "expectedOut", "estimatedOut", "expected_out"),
         )
         if expected <= 0:
             # An unparseable quote must fail loudly instead of freezing an
@@ -649,62 +749,56 @@ class ByrealWallet(WalletProvider):
         receiver: str | None = None, live: bool = False, **kw: Any,
     ) -> WalletSwapResult:
         if not live:
-            return WalletSwapResult(
-                provider=self.id, chain="solana", ok=False,
-                reason="live=False; Byreal swap requires runtime.live_trading_enabled",
-                amount_in=float(amount_in),
-            )
+            return WalletSwapResult(provider=self.id,chain=chain,ok=False,reason="live=False")
         self._require_solana(chain)
-        dec_in = self._decimals_in(kw)
-        # See _decimals_in: no in-repo evidence documents the CLI's
-        # --amount unit, so keep passing the UI float and record the
-        # assumption. If the CLI is later confirmed to take raw base
-        # units, convert here: str(int(round(amount_in * 10 ** dec_in))).
-        data = self._run_cli(
-            [
-                "swap",
-                "execute",
-                "--input-mint",
-                str(token_in),
-                "--output-mint",
-                str(token_out),
-                "--amount",
-                str(float(amount_in)),
-                "--slippage-bps",
-                str(int(slippage_bps)),
-                "--confirm",
-            ],
-            timeout_s=120.0,
-        )
-        doc = data if isinstance(data, dict) else {}
-        tx_hash = str(
-            doc.get("txid") or doc.get("signature") or doc.get("tx_hash") or ""
-        )
-        reason = str(doc.get("reason") or "")
-        extra: dict[str, Any] = {
-            "raw": doc,
-            "amount_units": "ui",
-            "decimals_in": dec_in,
-        }
-        if receiver:
-            # No in-repo evidence that byreal-cli exposes a swap recipient
-            # flag, so we do NOT invent one. Funds land in the CLI keypair
-            # wallet; surface the ignored receiver so the approval record
-            # stays honest.
-            extra["receiver_ignored"] = str(receiver)
-            note = (
-                "receiver not forwarded: byreal-cli recipient flag "
-                "unverified; funds go to the CLI keypair wallet"
-            )
-            reason = f"{reason} {note}".strip() if reason else note
-        return WalletSwapResult(
-            provider=self.id, chain="solana",
-            ok=bool(tx_hash or doc.get("ok")),
-            tx_hash=tx_hash,
-            amount_in=float(amount_in),
-            amount_out=float(
-                doc.get("outAmount") or doc.get("amountOut") or doc.get("amount_out") or 0.0
-            ),
-            reason=reason,
-            extra=extra,
-        )
+        from ...connectors.solana_native import _pubkey_from_signer
+        from ..amounts import to_base_units_ceil
+        key = self._signer()
+        try:
+            owner = _pubkey_from_signer(key)
+            if receiver and receiver != owner:
+                raise WalletPolicyDenied("Byreal receiver must equal the selected signing wallet")
+            # The CLI confirm command re-quotes. Build once through the same
+            # official router and sign/broadcast that exact quoted transaction.
+            quote, _, dec_out = self._api_quote(token_in,token_out,amount_in,slippage_bps,owner)
+            floor = to_base_units_ceil(kw.get('min_out') or 0,dec_out)
+            expected = int(quote['outAmount'])
+            conservative_floor = int(quote.get('otherAmountThreshold') or expected*(10000-slippage_bps)//10000)
+            if conservative_floor < floor:
+                raise WalletPolicyDenied('Byreal quote slippage floor is below the approved minimum')
+            tx = quote.get('transaction')
+            if not tx:
+                raise WalletQuoteError('Byreal quote has no transaction for selected wallet')
+            conn = self._solana(live=True)
+            if str(quote.get('routerType') or 'AMM').upper() == 'RFQ':
+                from ...connectors.solana_native import _sign_solana_v0_tx
+                from ...connectors.http import UrllibHttp
+                signed=_sign_solana_v0_tx(tx,key)
+                if not quote.get('quoteId') or not quote.get('orderId'):
+                    raise WalletQuoteError('Byreal RFQ quote identity unavailable')
+                status,doc=(self.transport or UrllibHttp()).request('POST','https://api2.byreal.io/byreal/api/rfq/v1/swap',
+                    body={'quoteId':quote['quoteId'],'requestId':quote['orderId'],'transaction':signed},timeout=30)
+                data=((doc or {}).get('result') or {}).get('data') or {}
+                signature=data.get('txSignature') or (data.get('signatures') or [''])[0]
+                if not signature:
+                    raise WalletTransportError('Byreal RFQ result has no signature; execution outcome unknown')
+                if kw.get('on_broadcast'):
+                    kw['on_broadcast']({'tx_hash':signature,'chain':'solana','owner':owner,'token_out':quote['outputMint']})
+                try:
+                    conn.wait_for_signature(signature)
+                    actual=conn.transaction_output(signature,owner,quote['outputMint'])
+                except Exception:
+                    actual=None
+                return WalletSwapResult(provider=self.id,chain='solana',ok=actual is not None,tx_hash=signature,
+                    amount_in=float(amount_in),amount_out=float(actual or 0),
+                    extra={'confirmed':actual is not None,'amount_out_source':'transaction_meta' if actual is not None else 'unknown'})
+            out = conn.send_swap_transaction(tx,key,output_mint=quote['outputMint'],user_public_key=owner,
+                quote=quote,on_broadcast=kw.get('on_broadcast'))
+            actual = out.get('amount_out')
+            return WalletSwapResult(provider=self.id,chain='solana',ok=bool(out.get('confirmed')) and actual is not None,
+                tx_hash=str(out.get('signature') or ''),amount_in=float(amount_in),amount_out=float(actual or 0),
+                reason='' if actual is not None else 'confirmation_or_receipt_pending',
+                extra={'confirmed':bool(out.get('confirmed')),'amount_out_source':'transaction_meta' if actual is not None else 'unknown',
+                       'owner':owner,'expected_out':expected/(10**dec_out)})
+        finally:
+            key = ''

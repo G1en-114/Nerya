@@ -206,7 +206,6 @@ def _safe_wipe(
                   "teams", "strategies", "agent_tasks", "triggers",
                   "tmp", "state"):
             (workspace / d).mkdir(parents=True, exist_ok=True)
-        _seed_manual_agent_strategy(workspace, log=log)
     if sync_prompt_bundle:
         _sync_default_prompt_bundle(workspace, dry_run=dry_run, log=log)
     return log
@@ -252,77 +251,6 @@ def _sync_default_prompt_bundle(workspace: Path, *, dry_run: bool, log: list[dic
             "reason": str(exc),
         })
         raise
-
-
-def _seed_manual_agent_strategy(workspace: Path, *, log: list[dict]) -> None:
-    """Recreate the paper-only strategy used by direct chat order intents."""
-
-    root = workspace / "strategies" / "manual_agent"
-    history = workspace / "strategy_history" / "manual_agent"
-    sessions = workspace / "strategy_sessions" / "manual_agent"
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        history.mkdir(parents=True, exist_ok=True)
-        sessions.mkdir(parents=True, exist_ok=True)
-        (root / "prompts").mkdir(exist_ok=True)
-        (root / "strategy.yml").write_text(
-            "\n".join([
-                "id: manual_agent",
-                "title: Manual / agent-initiated paper trades",
-                "status: paper",
-                "account_id: paper_main",
-                "markets:",
-                "- PAPER:BTCUSDT",
-                "- PAPER:ETHUSDT",
-                "- PAPER:SOLUSDT",
-                "paper_trading_enabled: true",
-                "live_trading_enabled: false",
-                "subagents: []",
-                "trigger_kinds:",
-                "- manual.intent",
-                "driver: manual",
-                "notes: Fallback strategy id for ad-hoc chat/order intents. Keep paper-only.",
-                "",
-            ]),
-            encoding="utf-8",
-        )
-        (root / "config.yml").write_text(
-            "\n".join([
-                "min_confidence: 0.0",
-                "position_size_usd: 500.0",
-                "",
-            ]),
-            encoding="utf-8",
-        )
-        (root / "limits.yml").write_text(
-            "\n".join([
-                "allowed_markets:",
-                "- PAPER:BTCUSDT",
-                "- PAPER:ETHUSDT",
-                "- PAPER:SOLUSDT",
-                "max_single_order_usd: 1000.0",
-                "max_total_exposure_usd: 2500.0",
-                "daily_loss_usd: 500.0",
-                "max_drawdown_pct: 0.10",
-                "min_confidence: 0.0",
-                "max_slippage_bps: 50",
-                "max_stale_seconds: 60",
-                "approval_threshold_usd: 1500.0",
-                "",
-            ]),
-            encoding="utf-8",
-        )
-        learnings = root / "learnings.md"
-        if not learnings.exists():
-            learnings.write_text("# Learnings - manual_agent\n\n- (empty)\n", encoding="utf-8")
-        for name in (
-            "triggers", "skill_calls", "subagents", "decisions", "intents",
-            "risk", "orders", "fills", "pnl", "messages", "reviews",
-        ):
-            (history / f"{name}.jsonl").touch(exist_ok=True)
-        log.append({"path": str(root), "action": "seed_manual_agent"})
-    except OSError as exc:
-        log.append({"path": str(root), "action": "seed_manual_agent_failed", "reason": str(exc)})
 
 
 def _full_wipe(workspace: Path, *, dry_run: bool) -> list[dict]:

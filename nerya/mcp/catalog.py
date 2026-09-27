@@ -11,7 +11,6 @@ import re
 import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, get_type_hints
 
 from jsonschema import Draft202012Validator, ValidationError
@@ -52,8 +51,8 @@ def public_result(value: Any, key: str = "") -> Any:
                 return json.dumps(public_result(json.loads(value)), ensure_ascii=False)
             except (ValueError, RecursionError):
                 pass
-        if normalized in {"id", "digest", "sha256"} or normalized.endswith(
-            ("_id", "_hash", "_sha256", "_digest")
+        if normalized in {"id", "digest", "sha256", "revision", "catalog_generation"} or normalized.endswith(
+            ("_id", "_hash", "_sha256", "_digest", "_revision", "_generation")
         ):
             return value
         value = _TEXT_SECRET.sub(r"\1***REDACTED***", value)
@@ -186,40 +185,39 @@ def build_catalog(tools: NeryaTools, *, include_legacy: bool | None = None,
     if include_legacy if include_legacy is not None else cfg.get("mcp.include_legacy", True):
         for entry in tools.registry():
             read_only = entry["name"] not in LEGACY_WRITES
-            if not read_only and cfg.get("mcp.allow_mutating", False) is not True:
-                continue
             catalog.add(ExposedTool(entry["name"], entry["description"],
                                     callable_schema(entry["fn"]), read_only, entry["fn"]))
-    if include_dynamic if include_dynamic is not None else cfg.get("mcp.dynamic_tools.enabled", True):
+    if include_dynamic is not False:
         view = DynamicMCPRegistry.build(tools.client,
                                        policy=dynamic_policy or policy_from_config(cfg))
         for tool in view.tools:
             catalog.add(ExposedTool(tool.name, tool.description, tool.input_schema,
                                     tool.read_only, tool.fn, "dynamic"))
-    if include_native if include_native is not None else cfg.get("mcp.native_tools.enabled", True):
-        from ..tools import ToolRegistry
-        from ..tools.native import build_native_tool_deps, register_native_tools
-        from .. import skills as skills_package
+    if include_native is not False:
+        from ..agent.kernel import AgentKernel
 
-        registry = ToolRegistry()
-        roots = [cfg.paths.skills_installed, Path(skills_package.__file__).parent / "builtin"]
-        deps = build_native_tool_deps(workspace_root=cfg.paths.root,
-                                     skill_roots=[p for p in roots if p.exists()],
-                                     paths=cfg.paths, config=cfg, skills=tools.client.skills)
-        register_native_tools(registry, deps)
+        kernel = AgentKernel(config=cfg, skills=tools.client.skills)
+        registry, _deps = kernel.prepare_tools()
+        from .inbound_sessions import active_call
+        trace = active_call()
+        if trace is not None:
+            # Each inbound session owns this catalog and dependency bundle.
+            # File placement, memory and delegated scripts must use that same ID.
+            _deps.active_session_id = trace.session_id
+            _deps.active_conversation_id = trace.session_id
+            _deps.active_actor_id = trace.source
+            _deps.active_trigger_source = trace.source
         view, executor = build_native_mcp_registry(
             registry=registry, config=cfg,
             policy=native_policy or native_policy_from_config(cfg),
         )
-        # Preserve delegation through the same parent's permission pipeline.
-        deps.executor = executor
+        from .inbound_sessions import InboundTraceExecutor
+        kernel.bind_tool_executor(InboundTraceExecutor(executor))
         for tool in view.tools:
             schema = deepcopy(tool.input_schema)
             schema.setdefault("additionalProperties", False)
             catalog.add(ExposedTool(tool.name, tool.description, schema,
                                     tool.read_only, tool.fn, "native"))
-    allowed = cfg.get("mcp.allow_tools")
-    denied = set(cfg.get("mcp.deny_tools", []) or [])
-    catalog.tools = {name: tool for name, tool in catalog.tools.items()
-                     if (allowed is None or name in allowed) and name not in denied}
+    # Authenticated MCP and Tunnel clients have no second allow/deny layer.
+    # The workspace capability policy and native execution gates are shared.
     return catalog

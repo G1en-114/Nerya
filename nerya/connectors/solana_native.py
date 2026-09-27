@@ -16,7 +16,7 @@ from ..core.errors import TradingError
 from .base import OrderAck, Ticker
 from .dex_base import NativeDEXConnector
 
-JUPITER_BASE_URL = "https://quote-api.jup.ag/v6"
+JUPITER_BASE_URL = "https://api.jup.ag/swap/v1"
 
 
 @dataclass
@@ -24,6 +24,7 @@ class SolanaNative(NativeDEXConnector):
     venue: str = "SOLANA"
     chain: str = "solana"
     jupiter_url: str = JUPITER_BASE_URL
+    jupiter_api_key: str = ""
     default_slippage_bps: int = 50
 
     # ------------------------------------------------------------- reads
@@ -92,6 +93,7 @@ class SolanaNative(NativeDEXConnector):
         status, doc = self.transport.request(
             "GET", f"{self.jupiter_url}/quote",
             params=params, timeout=15.0,
+            headers={"x-api-key":self.jupiter_api_key} if self.jupiter_api_key else {},
         )
         if status >= 400 or not isinstance(doc, dict):
             raise TradingError(f"jupiter /quote failed: {doc}")
@@ -159,6 +161,7 @@ class SolanaNative(NativeDEXConnector):
         priority_fee_lamports: int | None = None,
         confirm: bool = True,
         quote: dict[str, Any] | None = None,
+        on_broadcast: Any = None,
     ) -> dict[str, Any]:
         """Execute a Jupiter swap end-to-end.
 
@@ -185,13 +188,26 @@ class SolanaNative(NativeDEXConnector):
         status, swap_doc = self.transport.request(
             "POST", f"{self.jupiter_url}/swap",
             body=body, timeout=20.0,
+            headers={"x-api-key":self.jupiter_api_key} if self.jupiter_api_key else {},
         )
         if status >= 400 or not isinstance(swap_doc, dict):
             raise TradingError(f"jupiter /swap failed: {swap_doc}")
         b64_tx = swap_doc.get("swapTransaction")
         if not b64_tx:
             raise TradingError(f"jupiter /swap missing swapTransaction: {swap_doc}")
+        return self.send_swap_transaction(b64_tx, signer_private_key, output_mint=output_mint,
+            user_public_key=user_pubkey, quote=quote, confirm=confirm, on_broadcast=on_broadcast)
+
+    def send_swap_transaction(self, b64_tx, signer_private_key, *, output_mint, user_public_key,
+                              quote=None, confirm=True, on_broadcast=None):
+        self._check_live()
         signed_b64 = _sign_solana_v0_tx(b64_tx, signer_private_key)
+        import base64, base58
+        raw = base64.b64decode(signed_b64)
+        _, offset = _read_shortvec_u16(raw,0)
+        expected_sig = base58.b58encode(raw[offset:offset+64]).decode()
+        if on_broadcast:
+            on_broadcast({"tx_hash":expected_sig,"chain":"solana","owner":user_public_key,"token_out":output_mint})
         tx_sig = self._rpc("sendTransaction",
                             [signed_b64, {"encoding": "base64",
                                           "skipPreflight": False,
@@ -200,19 +216,47 @@ class SolanaNative(NativeDEXConnector):
             raise TradingError("solana sendTransaction returned empty signature")
         out: dict[str, Any] = {
             "signature": tx_sig,
-            "input_mint": input_mint,
             "output_mint": output_mint,
-            "amount_in_raw": amount_in_raw,
-            "quote": quote,
-            "user": user_pubkey,
+            "quote": quote or {},
+            "user": user_public_key,
             "confirmed": False,
         }
         if confirm:
-            st = self.wait_for_signature(tx_sig)
-            out["confirmed"] = True
-            out["confirmation_status"] = st.get("confirmationStatus")
-            out["slot"] = st.get("slot")
+            try:
+                st = self.wait_for_signature(tx_sig)
+                out["confirmed"] = True
+                out["confirmation_status"] = st.get("confirmationStatus")
+                out["slot"] = st.get("slot")
+                out["amount_out"] = self.transaction_output(tx_sig, user_public_key, output_mint)
+            except TradingError as exc:
+                out["confirmation_error"] = str(exc)
         return out
+
+    def transaction_output(self, signature, owner, mint):
+        tx = self._rpc("getTransaction",[signature,{"encoding":"jsonParsed","maxSupportedTransactionVersion":0}])
+        meta = (tx or {}).get("meta") or {}
+        if meta.get("err") is not None:
+            raise TradingError("swap transaction failed on-chain")
+        def balance(rows):
+            return sum(float((row.get("uiTokenAmount") or {}).get("uiAmountString") or 0)
+                for row in rows if row.get("owner")==owner and row.get("mint")==mint)
+        if mint != "So11111111111111111111111111111111111111112":
+            if "postTokenBalances" not in meta:
+                raise TradingError("transaction token balance evidence unavailable")
+            return balance(meta["postTokenBalances"])-balance(meta.get("preTokenBalances") or [])
+        keys = ((tx or {}).get("transaction") or {}).get("message",{}).get("accountKeys",[])
+        index = next((i for i,k in enumerate(keys) if (k.get("pubkey") if isinstance(k,dict) else k)==owner),None)
+        if index is None or not meta.get("postBalances"):
+            raise TradingError("transaction native balance evidence unavailable")
+        # Include this owner's token accounts: funding/closing ATAs moves
+        # rent between accounts but is not swap proceeds. WSOL accounts also
+        # hold native value when the router leaves the output wrapped.
+        indices={index}
+        for row in (meta.get('preTokenBalances') or [])+(meta.get('postTokenBalances') or []):
+            if row.get('owner')==owner:
+                indices.add(int(row['accountIndex']))
+        delta=sum(meta['postBalances'][i]-meta['preBalances'][i] for i in indices)
+        return (delta+(int(meta.get('fee') or 0) if index==0 else 0))/1e9
 
     def place_order(self, *args, **kw) -> OrderAck:
         raise NotImplementedError(
@@ -284,7 +328,15 @@ def _first_required_signer(message: bytes) -> str:
     """
     import base58  # type: ignore
 
-    n_required, off = _read_shortvec_u16(message, 0)
+    if not message:
+        raise TradingError('empty Solana transaction message')
+    off = 0
+    if message[0] & 0x80:
+        if message[0] != 0x80:
+            raise TradingError('unsupported Solana message version')
+        off = 1
+    n_required = message[off]
+    off += 1
     if n_required < 1:
         raise TradingError(
             "solana message declares no required signers — refusing to sign"

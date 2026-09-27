@@ -471,7 +471,10 @@ def store_credential_values(
         if value.startswith("vault://"):
             out[name] = value
             continue
-        secret_name = _vault_secret_name(account_id, name)
+        # A rejected save or failed credential rotation must not overwrite the
+        # secret referenced by an existing working account (or a proposal).
+        version = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+        secret_name = f"{_vault_secret_name(account_id, name)}_{version}"
         vault.put(
             name=secret_name,
             value=value,

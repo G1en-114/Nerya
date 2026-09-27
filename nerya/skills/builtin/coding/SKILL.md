@@ -10,6 +10,10 @@ author: Nerya
 
 # Coding
 
+For a separately delegated summarization, translation or drafting call on supplied
+content, load `Skill(skill="llm")` when available. Ordinary reasoning and writing
+stay in the current conversation; they do not require another model call.
+
 Use for concrete code or shell work. This skill stays separate from
 `evolve`: coding changes behavior now; evolve drafts proposal-first
 capability growth.

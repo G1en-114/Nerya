@@ -1,5 +1,8 @@
 ---
 name: finance.financial_analysis
+metadata:
+  nerya:
+    catalog_group: professional
 description: "Financial models and deliverables: three statements, comps, LBO, competitive analysis, spreadsheet creation/cleaning/audit and presentation creation/refresh/review."
 version: 0.2.0
 license: MIT

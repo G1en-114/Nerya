@@ -73,6 +73,8 @@ def _publish_bus(kind: str, **payload: Any) -> None:
 
 
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+_LIVE_LOCK = threading.Lock()
+_LIVE_TASKS: dict[str, tuple] = {}
 
 
 def new_task_id(prefix: str = "task") -> str:
@@ -128,8 +130,12 @@ class TaskStore:
     def __init__(self, paths: WorkspacePaths) -> None:
         self.paths = paths
         self._dir = paths.root / "agent_tasks"
-        self._lock = threading.RLock()
-        self._cancel_events: dict[str, threading.Event] = {}
+        # NativeToolDeps/API readers can be recreated for the next turn.
+        # Reuse process ownership across those instances, scoped by workspace.
+        with _LIVE_LOCK:
+            self._lock, self._cancel_events, self._processes = _LIVE_TASKS.setdefault(
+                str(paths.root.resolve()), (threading.RLock(), {}, {}),
+            )
 
     def _path(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.json"
@@ -204,10 +210,44 @@ class TaskStore:
                 return None
         if not isinstance(raw, dict):
             return None
-        return TaskRecord(**{
+        record = TaskRecord(**{
             k: raw.get(k) for k in TaskRecord.__dataclass_fields__.keys()
             if k in raw
         })
+        process = self._processes.get(task_id)
+        if process is not None and not record.is_terminal():
+            record.output = self._process_output(process.snapshot())
+        return record
+
+    @staticmethod
+    def _process_output(result) -> dict[str, Any]:
+        return {key: getattr(result, key) for key in (
+            "pid", "stdout", "stderr", "returncode", "elapsed_ms",
+            "cancelled", "timed_out", "process_exited",
+            "process_group_stopped", "truncated",
+        )} | {"exit_code": result.returncode}
+
+    def attach_process(self, task_id: str, process) -> None:
+        """Adopt an already launched managed child, without replaying it."""
+        with self._lock:
+            self._processes[task_id] = process
+            self.update_state(task_id, "running")
+
+        def complete():
+            try:
+                result = process.wait()
+                error_kind = ("cancelled" if result.cancelled else
+                              "timeout" if result.timed_out else
+                              "execution_error" if result.returncode else None)
+                self.finish(task_id, output=self._process_output(result),
+                            error=error_kind, error_kind=error_kind, wall_ms=result.elapsed_ms)
+            except Exception as exc:
+                self.finish(task_id, error=str(exc), error_kind="execution_error")
+            finally:
+                with self._lock:
+                    self._processes.pop(task_id, None)
+
+        run_in_thread(complete, name=f"shell-task-{task_id}", daemon=False)
 
     def list(
         self,
@@ -351,10 +391,13 @@ class TaskStore:
             return False
         with self._lock:
             ev = self._cancel_events.get(task_id)
+            process = self._processes.get(task_id)
+        if process is not None:
+            process.stop()
         if ev is None:
-            # No live worker (e.g. process restarted) — record cancellation
-            # so the dashboard reflects intent.
-            self.finish(task_id, error="cancelled by operator", error_kind="cancelled")
+            # A missing owner is not proof the external operation stopped.
+            self.append_progress(task_id, note="stop requested; worker unavailable",
+                                 payload={"stop_confirmed": False})
             return False
         ev.set()
         return True

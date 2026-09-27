@@ -3,8 +3,7 @@
 import { NextIntlClientProvider } from "next-intl";
 import { useEffect } from "react";
 import { useUiSettings } from "../lib/settings";
-import en from "../messages/en.json";
-import zh from "../messages/zh.json";
+import { en, zh } from "../messages";
 
 const messages = { en, zh } as const;
 

@@ -1,11 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { NeryaLogo } from "../../components/NeryaLogo";
 import { ErrorBanner, Pill } from "../../components/Page";
 import { clientApi, type AuthStatus } from "../../lib/clientApi";
-import { getStoredAuthToken, isLocalDashboardHost, setStoredAuthToken } from "../../lib/auth";
+import { authHeaders, getStoredAuthToken, handleAuthFailure, safeLoginNext, setStoredAuthToken } from "../../lib/auth";
 
 export default function LoginPage() {
   const t = useTranslations("login");
@@ -17,23 +17,28 @@ export default function LoginPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const next = params.get("next");
-    if (next && next.startsWith("/")) setNextPath(next);
+    setNextPath(safeLoginNext(params.get("next")));
     void clientApi.authStatus().then(setStatus).catch((e) => {
       setError(e instanceof Error ? e.message : String(e));
     });
   }, []);
 
-  const localHost = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    return isLocalDashboardHost(window.location.hostname);
-  }, []);
+  const localHost = status?.local_access === true;
 
   useEffect(() => {
-    if (!localHost && getStoredAuthToken()) {
-      window.location.replace(nextPath);
-    }
-  }, [localHost, nextPath]);
+    if (!status) return;
+    if (localHost) { window.location.replace(nextPath); return; }
+    if (!getStoredAuthToken()) return;
+    // Do not bounce back into the dashboard merely because a stale token exists.
+    const controller = new AbortController();
+    void fetch("/api/proxy/workspace", { headers: authHeaders(), cache: "no-store", signal: controller.signal })
+      .then(async response => {
+        if (controller.signal.aborted) return;
+        if (response.ok) window.location.replace(nextPath);
+        else handleAuthFailure(response.status, await response.text());
+      }).catch(() => { /* Keep the login form usable during a network failure. */ });
+    return () => controller.abort();
+  }, [localHost, nextPath, status]);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();

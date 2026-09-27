@@ -39,7 +39,7 @@ def main():
     env = {key: os.environ[key] for key in ("SystemRoot", "WINDIR", "TMP", "TEMP") if key in os.environ}
     env.update(PATH="/usr/bin:/bin" if os.name != "nt" else os.environ.get("SystemRoot", "C:\\Windows") + "\\System32",
                PYTHONPATH=os.pathsep.join(str(resources / p) for p in manifest["python_paths"]),
-               PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+               PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
     events = queue.Queue()
     def read_output(stream):
         for line in stream:
@@ -83,7 +83,10 @@ def main():
             conn.close()
     with tempfile.TemporaryDirectory(prefix="nerya-desktop-smoke-") as directory:
         data = Path(directory)
-        env.update(HOME=str(data), USERPROFILE=str(data), XDG_CONFIG_HOME=str(data / "config"))
+        env.update(HOME=str(data), USERPROFILE=str(data), XDG_CONFIG_HOME=str(data / "config"),
+                   APPDATA=str(data / "roaming"), LOCALAPPDATA=str(data / "local"))
+        for name in ("config", "roaming", "local"):
+            (data / name).mkdir()
         initial_port = args.access_port
         if initial_port == 0:
             with socket.socket() as probe:
@@ -101,7 +104,7 @@ def main():
             process = subprocess.Popen([str(python), "-u", str(resources / "runtime_host.py"),
                                         "--resources", str(resources), "--data-dir", str(data / "data")],
                                        env=env, cwd=data, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=log, text=True, bufsize=1)
+                                       stderr=log, text=True, encoding="utf-8", bufsize=1)
             threading.Thread(target=read_output, args=(process.stdout,), daemon=True).start()
             try:
                 state = wait_event(lambda event: event.get("state", {}).get("phase") == "ready")["state"]

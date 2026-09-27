@@ -33,6 +33,7 @@ folds them only after policy filtering and only when ``Skill`` is available.
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -51,6 +52,8 @@ from ..types import (
 )
 from .skill import (
     SkillIndex, script_inspect_handler, skill_index_handler, skill_view_handler,
+    skill_access_error,
+    skill_asset_access_error,
 )
 
 
@@ -137,6 +140,10 @@ def skill_tool_handler(
 ) -> ToolResult:
     args = call.arguments or {}
     action = args.get("action") or ("read" if args.get("file") else "load")
+    # 模型常同时显式给出 load 和参考文件。此前忽略 file，反复返回主
+    # SKILL.md，导致无法读到所需接口并重复探索。仍走同一只读权限检查。
+    if action == "load" and args.get("file"):
+        action = "read"
     if action not in ("list", "load", "read", "inspect"):
         return schema_validation_result(call, "Skill supports list, load, read or inspect; never execution.")
     if action == "list":
@@ -148,10 +155,14 @@ def skill_tool_handler(
             call, 'Skill tool requires a non-empty "skill" argument.',
         )
 
+    denied = skill_access_error(call, skill_name)
+    if denied is not None:
+        return denied
+
     if action in ("read", "inspect"):
         if args.get("refresh") or skill_index.get(skill_name) is None:
             skill_index.reload()
-        mapped = dict(args, skill_id=skill_name)
+        mapped = dict(args, skill_id=skill_name, refresh=False)
         if action == "read":
             if not isinstance(args.get("file"), str) or not args["file"].strip():
                 return schema_validation_result(call, "Skill read requires a relative file path.")
@@ -173,8 +184,11 @@ def skill_tool_handler(
         )
 
     skill_md_path = Path(record.path)
+    denied = skill_asset_access_error(call, record, skill_md_path, skill_index)
+    if denied is not None:
+        return denied
     try:
-        text = skill_md_path.read_text(encoding="utf-8")
+        text = skill_md_path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -208,6 +222,11 @@ def skill_tool_handler(
                 {
                     "skill": skill_name,
                     "skill_id": record.skill_id,
+                    "source": record.source,
+                    "revision": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "catalog_revision": record.revision,
+                    "catalog_generation": skill_index.catalog_generation,
+                    "body_policy": "latest_on_read",
                     "path": str(skill_md_path),
                     "base_dir": base_dir,
                 }

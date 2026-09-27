@@ -1,5 +1,8 @@
 ---
 name: finance.operations
+metadata:
+  nerya:
+    catalog_group: professional
 description: "KYC review support: extract identity/document fields, apply provided rules and report missing, inconsistent or escalated evidence."
 version: 0.2.0
 license: MIT

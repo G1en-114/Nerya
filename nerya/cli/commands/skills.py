@@ -37,10 +37,8 @@ def cmd_skill_enable(args) -> int:
 def cmd_skill_install(args) -> int:
     """Install an external skill from a local dir, git URL, or tarball.
 
-    The skill is staged under ``workspace/skills/pending/`` and a
-    ``skill_install_request`` proposal is emitted. Nothing is armed
-    into the live registry until ``nerya skill promote <skill_id>``
-    runs after operator approval.
+    The source is quarantined and statically validated, then installed and
+    enabled immediately. No proposal or second promotion step is required.
     """
     from ...skills.installer import install_skill
     client = _client(args.workspace, getattr(args, "profile", None))

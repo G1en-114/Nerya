@@ -1,5 +1,8 @@
 ---
 name: finance.fund_admin
+metadata:
+  nerya:
+    catalog_group: professional
 description: "Fund close and controls: NAV tie-out, general-ledger reconciliation, break tracing, accruals, roll-forwards and variance commentary."
 version: 0.2.0
 license: MIT

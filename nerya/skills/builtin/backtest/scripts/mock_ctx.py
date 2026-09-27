@@ -4,19 +4,26 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from .config import BacktestConfig, MockSurfaceCfg
+from .order_evidence import track_submission
 from .....strategies.prompt_io import StrategyPromptIO
+from .....strategies.config_view import StrategyConfig
+from .....strategies.candle_view import candle_snapshots, StateMapping
 
 
 class BacktestUnsupportedSurfaceError(RuntimeError):
     """Raised when a live-only surface is used during backtest."""
 
     def __init__(self, surface: str, *, detail: str | None = None) -> None:
+        self.surface = surface
         if detail:
             super().__init__(f"ctx.{surface} is unsupported in OHLCV backtests: {detail}")
         else:
@@ -54,17 +61,17 @@ class MockMarket:
             limit=count or limit,
             symbol=symbol,
         )
-        # Timeframe keys and lookups are normalised to lowercase so a
-        # strategy asking for ``"15M"`` against ``"15m"``-keyed bars (or
-        # vice versa) finds its data instead of silently falling back to
-        # the primary bars.
+        # Uppercase M denotes months, not minutes. Fixed-period replay must
+        # not turn a monthly request into minute candles.
+        if str(timeframe).strip().endswith("M"):
+            raise BacktestUnsupportedSurfaceError("market.candles", detail="calendar-month candles are not minute candles; use a supported explicit timeframe")
         wanted = str(timeframe or "").strip().lower()
         by_tf = {
             str(key or "").strip().lower(): rows
             for key, rows in (self.timeframe_bars_by_market.get(market, {}) or {}).items()
         }
         rows = by_tf.get(wanted)
-        if rows is None and self._is_foreign_timeframe(wanted):
+        if rows is None and wanted != str(self.primary_timeframe).strip().lower():
             # Silent substitution would make a "15m" indicator compute on
             # the primary bars — validated/promoted behaviour would then
             # diverge from live, which computes on real 15m bars. Fail loudly.
@@ -78,7 +85,9 @@ class MockMarket:
             )
         if rows is None:
             rows = self.bars_by_market.get(market, [])
-        return list(rows)[-int(limit):]
+        # A strategy may edit its local rows, never the engine's future input
+        # or another market callback's shared historical prefix.
+        return candle_snapshots(rows[-int(limit):], timeframe)
 
     def _is_foreign_timeframe(self, timeframe: str) -> bool:
         """True when ``timeframe`` is neither the primary nor provided."""
@@ -131,7 +140,15 @@ class MockMarket:
     def ticker(self, market: str, *, account: str | None = None) -> dict[str, Any]:
         del account
         close = self.mark_price(market)
-        return {"bid": close * 0.9999, "ask": close * 1.0001, "mid": close}
+        rows = self.bars_by_market.get(market, [])
+        from .data_cache import _tf_seconds
+        stamp = rows[-1].get("ts") if rows else None
+        timestamp = (int(stamp) + _tf_seconds(self.primary_timeframe)) * 1000 if stamp is not None else None
+        return {"market": market, "bid": None, "ask": None, "mid": close,
+                "last": close, "price": close, "ts_ms": timestamp,
+                "source": "historical_bar_close", "spread_bps": None,
+                "_envelope": {"mode": "historical", "source": "historical_bar_close",
+                              "book_available": False}}
 
     def get_ticker(self, market: str, *, account: str | None = None) -> dict[str, Any]:
         """Compatibility alias for generated strategy code."""
@@ -261,25 +278,11 @@ class MockMarket:
         lookback: int = 100,
         account: str | None = None,
     ) -> dict[str, Any]:
-        rows = self.candles(market, timeframe=timeframe, limit=lookback, account=account)
-        if not rows:
-            return {"market": market, "timeframe": timeframe, "rows": 0}
-        closes = [float(r.get("close", 0.0)) for r in rows]
-        highs = [float(r.get("high", 0.0)) for r in rows]
-        lows = [float(r.get("low", 0.0)) for r in rows]
-        volumes = [float(r.get("volume", 0.0)) for r in rows]
-        return {
-            "market": market,
-            "timeframe": timeframe,
-            "rows": len(rows),
-            "first": rows[0],
-            "last": rows[-1],
-            "close_min": min(closes),
-            "close_max": max(closes),
-            "high_max": max(highs),
-            "low_min": min(lows),
-            "volume_sum": sum(volumes),
-        }
+        # This pure formatter only calls self.candles(). Reuse the actual SDK
+        # so RSI/ATR/ADX/MACD and empty-history semantics cannot drift again.
+        from .....strategies.context import StrategyMarket
+        return StrategyMarket.features(self, market, timeframe=timeframe,
+                                       lookback=lookback, account=account)
 
 
 @dataclass
@@ -291,12 +294,31 @@ class MockTrading:
     # terminal envelope.
     state: Any = None
     mark_price: float = 0.0
+    audit: Any = None
+    clock: Any = None
+    policy: Any = None
+    market_data: Any = None
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
+    @track_submission
     def submit_intent(self, **payload: Any) -> dict[str, Any]:
         if len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
             payload = dict(next(iter(payload.values())))
+        self._check_entry(payload)
+        size = payload.get("size", payload.get("notional_usd", payload.get("amount")))
+        if isinstance(size, bool) or size is None or not math.isfinite(float(size)) or float(size) <= 0:
+            raise ValueError("submit_intent requires a finite positive size; use close_position for a full exit")
+        side = str(payload.get("side") or "").lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("submit_intent side must be buy or sell")
+        unit = str(payload.get("size_unit") or "usd").lower()
+        if unit not in {"usd", "base"}:
+            raise BacktestUnsupportedSurfaceError("trading.submit_intent", detail=f"historical size unit {unit!r} requires explicit base or USD conversion")
+        if not str(payload.get("market") or "").strip():
+            raise ValueError("submit_intent requires market")
         intent_id = f"bt_{uuid.uuid4().hex[:12]}"
         record = {
+            "sdk_method": "submit_intent",
             "intent_id": intent_id,
             "strategy_id": self.strategy_id,
             "market": payload.get("market"),
@@ -307,6 +329,7 @@ class MockTrading:
             "reason": payload.get("reason") or payload.get("reasoning") or payload.get("reasoning_ref") or "",
             "confidence": payload.get("confidence"),
             "plan_action": payload.get("plan_action")
+            or (payload.get("metadata") or {}).get("plan_action", "")
             or (payload.get("meta") or {}).get("plan_action", ""),
             "raw": dict(payload),
         }
@@ -314,48 +337,34 @@ class MockTrading:
         return self._paper_envelope(record)
 
     # ------------------------------------------------------------------
-    # Paper-equivalent terminal envelope
+    # Queued replay receipt; settlement owns terminal fills
     # ------------------------------------------------------------------
 
     def _paper_envelope(self, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
-        """Return the terminal envelope for a backtest order.
+        """A queued intent is not a fill; settlement owns the execution receipt.
 
-        Since the C5/E5 fix the compat adapters treat **only** a
-        ``filled`` status as executed (a ``submitted`` ack never
-        registers a position), and the live paper pipeline answers
-        ``submit_intent`` with a terminal ``filled`` envelope carrying
-        the executor's ``order`` summary. The mock must answer with the
-        same shape or imported Freqtrade/VNpy strategies would never
-        track a position in replay (every trade would degenerate into
-        an engine forced_close). The ``order`` summary mirrors
-        ``submit.py``'s paper path: ``order_id`` / ``filled_size`` /
-        ``avg_price`` estimated from the current bar close and the
-        engine's position mirror.
-
-        The envelope is an optimistic paper-shaped ack: the engine's
-        :func:`settle` stays authoritative for accounting (cash,
-        max-open-trades and shorting gates can still reject the order
-        when it is booked at the next bar's open).
+        Strategies must read ctx.portfolio on the next tick for actual holdings.
+        Estimates stay explicitly separate and must not register a position.
         """
-
-        price = float(self.mark_price or 0.0)
+        price = float(self.market_data.mark_price(str(record.get("market") or ""))
+                      if self.market_data is not None else self.mark_price or 0.0)
         qty = self._estimate_filled_size(record, price)
-        order_id = f"bto_{uuid.uuid4().hex[:12]}"
         envelope: dict[str, Any] = {
             "ok": True,
-            "status": "filled",
+            "status": "submitted",
+            "execution_phase": "queued",
             "intent_id": record.get("intent_id"),
             "intent": dict(record),
-            "order_id": order_id,
+            "order_id": None,
             "order": {
-                "order_id": order_id,
+                "order_id": None,
                 "intent_id": record.get("intent_id"),
-                "status": "filled",
-                "filled_size": qty,
-                "avg_price": price,
-                "notional_usd": qty * price,
+                "status": "submitted",
+                "filled_size": 0.0,
+                "avg_price": None,
             },
-            "risk_decision": {"ok": True, "mode": "backtest"},
+            "execution_estimate": {"size": qty, "price": price, "notional_usd": qty * price},
+            "risk_decision": {"ok": True, "mode": "backtest", "settlement_pending": True},
         }
         envelope.update(extra)
         return envelope
@@ -368,10 +377,15 @@ class MockTrading:
         book_signed = self._book_qty(market)
         book_qty = abs(book_signed)
         side = str(record.get("side") or "buy").lower()
+        if record.get("sdk_method") == "submit_intent":
+            amount = float(record["size"])
+            return amount if record.get("size_unit") == "base" else amount / price if price > 0 else 0.0
         if action in {"close_position", "close", "exit"} or record.get("close_all"):
             return book_qty
         if action in {"reduce_position", "reduce"}:
-            pct = max(0.0, min(1.0, float(record.get("reduce_pct") or 1.0)))
+            if record.get("fixed_base") is not None:
+                return min(book_qty, float(record["fixed_base"]))
+            pct = max(0.0, min(1.0, float(record.get("reduce_pct", 0.0))))
             return book_qty * pct
         if not action and book_qty > 0.0 and (side == "sell") == (book_signed > 0.0):
             # Legacy bare submit_intent exit: the side opposes the held
@@ -402,6 +416,7 @@ class MockTrading:
         except (TypeError, ValueError):
             return 0.0
 
+    @track_submission
     def open_position(
         self,
         *,
@@ -430,8 +445,14 @@ class MockTrading:
         # Map control-plane "long" / "short" onto the executor's
         # buy/sell (long entries are buys, short entries are sells).
         cp_side = str(side or "long").lower()
+        if cp_side not in {"long", "short", "buy", "sell"}:
+            raise ValueError("open_position side must be long or short")
         legacy_side = "buy" if cp_side in ("long", "buy") else "sell"
-        sizing_d = dict(sizing) if isinstance(sizing, dict) else {}
+        sizing_d = sizing.asdict() if hasattr(sizing, "asdict") else dict(sizing or {})
+        from .....trading.order_intents import SizingPolicy
+        # Use the public SDK validator before float conversion. Otherwise a
+        # dictionary containing True/NaN could pass only in historical replay.
+        sizing_d = SizingPolicy(**sizing_d).asdict()
         method = str(sizing_d.get("method") or "fixed_usd").lower()
         if method == "fixed_usd":
             size = float(sizing_d.get("fixed_usd") or 0.0)
@@ -450,12 +471,18 @@ class MockTrading:
             size = float(pct_val or 0.0)
             size_unit = "pct_nav"
         else:
-            # Unsupported open sizing (risk_to_stop, close_all, ...): prefer an
-            # explicit fixed_usd if present, otherwise leave the engine's
-            # cash-fraction fallback to size it (never silently zero).
-            fixed = sizing_d.get("fixed_usd")
-            size = float(fixed) if fixed else 0.0
-            size_unit = "usd"
+            raise BacktestUnsupportedSurfaceError("trading.open_position", detail=f"sizing method {method!r} requires a matching historical execution model; it is not converted to an all-cash order")
+        if not math.isfinite(size) or size <= 0 or (size_unit == "pct_nav" and size > 1):
+            raise ValueError("open_position requires positive sizing; pct_nav must be in (0, 1]")
+        cap = sizing_d.get("max_notional_usd")
+        if cap is not None and (not math.isfinite(float(cap)) or float(cap) <= 0):
+            raise ValueError("max_notional_usd must be finite and positive")
+        self._check_entry(entry)
+        from .historical_protection import normalize_protection
+        try:
+            protection_d = normalize_protection(protection, side="long" if legacy_side == "buy" else "short")
+        except ValueError as exc:
+            raise BacktestUnsupportedSurfaceError("trading.open_position.protection", detail=str(exc)) from exc
         record = {
             "intent_id": intent_id,
             "strategy_id": self.strategy_id,
@@ -467,24 +494,25 @@ class MockTrading:
             "reason": reasoning_ref or "open_position",
             "confidence": float(confidence or 0.0),
             "plan_action": "open_position",
-            "protection": dict(protection) if isinstance(protection, dict) else None,
+            "protection": protection_d or None,
+            "max_notional_usd": sizing_d.get("max_notional_usd"),
             "raw": {
                 "method": "open_position",
                 "side": cp_side,
                 "sizing": sizing_d or None,
-                "entry": dict(entry) if isinstance(entry, dict) else entry,
-                "protection": dict(protection) if isinstance(protection, dict) else protection,
+                "entry": entry.asdict() if hasattr(entry, "asdict") else entry,
+                "protection": protection_d or None,
                 **extra,
             },
         }
         self.pending_orders.append(record)
-        bracket_id = f"bkt_{uuid.uuid4().hex[:10]}" if record["protection"] else None
         return self._paper_envelope(
             record,
-            bracket_id=bracket_id,
+            bracket_id=None,
             protection=record["protection"],
         )
 
+    @track_submission
     def close_position(
         self,
         *,
@@ -505,6 +533,7 @@ class MockTrading:
         remaining position size via the portfolio book.
         """
 
+        self._check_entry(entry)
         intent_id = f"bt_{uuid.uuid4().hex[:12]}"
         position_side = str(side or "long").lower()
         legacy_side = "sell" if position_side == "long" else "buy"
@@ -532,22 +561,36 @@ class MockTrading:
         self.pending_orders.append(record)
         return self._paper_envelope(record)
 
+    @track_submission
     def reduce_position(
         self,
         *,
         market: str,
         side: str,
-        reduce_pct: float = 1.0,
+        reduce_pct: float | None = None,
+        fixed_base: float | None = None,
+        entry: Any = None,
         confidence: float = 0.0,
         reasoning_ref: str = "",
         **extra: Any,
     ) -> dict[str, Any]:
         """Backtest-mode equivalent of ``TradingAPI.reduce_position``."""
 
+        from .....trading.order_intents import SizingPolicy
+
+        if reduce_pct is None and fixed_base is None:
+            raise ValueError("reduce_position requires reduce_pct or fixed_base")
+        if reduce_pct is not None:
+            sizing = SizingPolicy(method="reduce_pct", reduce_pct=float(reduce_pct))
+        else:
+            sizing = SizingPolicy(method="fixed_base", fixed_base=float(fixed_base))
+        value = sizing.reduce_pct if reduce_pct is not None else sizing.fixed_base
+        if not math.isfinite(value):
+            raise ValueError("reduce_position sizing must be finite")
+        self._check_entry(entry)
         intent_id = f"bt_{uuid.uuid4().hex[:12]}"
         position_side = str(side or "long").lower()
         legacy_side = "sell" if position_side == "long" else "buy"
-        pct = max(0.0, min(1.0, float(reduce_pct or 1.0)))
         record = {
             "intent_id": intent_id,
             "strategy_id": self.strategy_id,
@@ -559,15 +602,43 @@ class MockTrading:
             "reason": reasoning_ref or "reduce_position",
             "confidence": float(confidence or 0.0),
             "plan_action": "reduce_position",
-            "reduce_pct": pct,
-            "raw": {"method": "reduce_position", "side": position_side, "reduce_pct": pct, **extra},
+            "reduce_pct": sizing.reduce_pct,
+            "fixed_base": sizing.fixed_base,
+            "raw": {"method": "reduce_position", "side": position_side, "sizing": sizing.asdict(), **extra},
         }
         self.pending_orders.append(record)
         return self._paper_envelope(record)
 
+    @staticmethod
+    def _check_entry(entry: Any) -> None:
+        raw = entry.asdict() if hasattr(entry, "asdict") else dict(entry or {})
+        if raw.get("order_type", "market") != "market":
+            raise BacktestUnsupportedSurfaceError("trading.entry", detail="only market entries are simulated; limit/stop orders require a historical order execution model")
+
+    def attach_protection(self, **kwargs: Any) -> dict[str, Any]:
+        raise BacktestUnsupportedSurfaceError("trading.attach_protection", detail="live executors are not invoked during historical replay")
+
+    def cancel_executor(self, *, executor_id: str) -> dict[str, Any]:
+        raise BacktestUnsupportedSurfaceError("trading.cancel_executor", detail="there is no live executor in isolated historical replay")
+
+    def risk_preview(self, **kwargs: Any) -> dict[str, Any]:
+        raise BacktestUnsupportedSurfaceError("trading.risk_preview", detail="current live account risk is not historical risk evidence; replay settlement applies the configured historical limits")
+
+    def portfolio_snapshot(self, *, account: str | None = None) -> dict[str, Any]:
+        raise BacktestUnsupportedSurfaceError("trading.portfolio_snapshot", detail="broker accounts/reservations require historical account snapshots; ctx.portfolio.summary(), positions() and position() expose the isolated replay book")
+
+    def signal(self, *, market: str, signal_kind: str, confidence: float, reasoning_ref: str = "", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        record = {"kind": "agent.signal", "strategy_id": self.strategy_id, "market": market,
+            "signal_kind": str(signal_kind), "confidence": float(confidence),
+            "reasoning_ref": str(reasoning_ref or ""), "payload": dict(payload or {}),
+            "ts": self.clock.now_iso() if self.clock else ""}
+        if self.audit:
+            self.audit.log("signal", record)
+        return {"status": "recorded", **record}
+
 
 @dataclass
-class MockState:
+class MockState(StateMapping):
     data: dict[str, Any] = field(default_factory=dict)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -627,12 +698,15 @@ class MockClock:
     def now(self) -> datetime:
         return datetime.fromtimestamp(self.ts, tz=timezone.utc)
 
+    def freeze(self, *, iso: str, ms: int | None = None) -> None:
+        raise BacktestUnsupportedSurfaceError("clock.freeze", detail="the historical engine owns the replay clock; strategy code must not move it")
+
 
 @dataclass
 class MockPolicy:
     max_single_order_usd: float = 0.0
     max_daily_notional_usd: float = 0.0
-    max_open_positions: int = 1
+    max_open_positions: int = 0
     min_confidence: float = 0.0
     allow_direct_order: bool = True
     require_subagent_before_order: bool = False
@@ -651,7 +725,7 @@ class MockPolicy:
         return cls(
             max_single_order_usd=float(raw.get("max_single_order_usd", 0.0) or 0.0),
             max_daily_notional_usd=float(raw.get("max_daily_notional_usd", 0.0) or 0.0),
-            max_open_positions=int(raw.get("max_open_positions", 1) or 1),
+            max_open_positions=int(raw.get("max_open_positions", 0) or 0),
             min_confidence=float(raw.get("min_confidence", 0.0) or 0.0),
             allow_direct_order=bool(raw.get("allow_direct_order", True)),
             require_subagent_before_order=bool(raw.get("require_subagent_before_order", False)),
@@ -671,14 +745,19 @@ class MockPolicy:
 @dataclass
 class MockPortfolio:
     state: MockState
+    market_data: MockMarket | None = None
 
-    def positions(self, market: str | None = None) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
+    def positions(self, market: str | None = None) -> list[Any]:
+        # Reuse the actual SDK read model, with a lazy import to avoid the
+        # context -> backtest bridge -> engine import cycle.
+        from .....strategies.context import StrategyPosition, _market_key
+
+        out: list[StrategyPosition] = []
         for key, value in self.state.data.items():
             if not key.startswith("position:") or not isinstance(value, dict):
                 continue
             pos_market = key.split(":", 1)[1]
-            if market and pos_market != market:
+            if market and _market_key(pos_market) != _market_key(market):
                 continue
             qty = float(value.get("qty", 0.0) or 0.0)
             if abs(qty) <= 1e-12:
@@ -687,16 +766,15 @@ class MockPortfolio:
             # Signed size mirrors the live merged-position contract
             # (negative = short) so generated strategies that read the
             # signed size compute side-aware PnL/exits correctly.
-            out.append({
-                "market": pos_market,
-                "size": qty,
-                "quantity": qty,
-                "qty": qty,
-                "avg_price": entry,
-                "entry_price": entry,
-                "side": "long" if qty > 0 else "short",
-            })
+            mark = self.market_data.mark_price(pos_market) if self.market_data else entry
+            out.append(StrategyPosition(market=pos_market, size=qty, avg_price=entry,
+                market_value_usd=abs(qty) * mark,
+                unrealized_pnl_usd=(mark - entry) * qty))
         return out
+
+    def position(self, market: str) -> Any:
+        rows = self.positions(market)
+        return rows[0] if rows else None
 
     def open_positions(self, market: str | None = None) -> list[dict[str, Any]]:
         return self.positions(market=market)
@@ -772,14 +850,19 @@ class MockPnL:
 @dataclass
 class MockAudit:
     sink: Callable[[dict[str, Any]], None] | None = None
+    _events: list[dict[str, Any]] = field(default_factory=list)
 
     def log(self, kind: str, payload: dict[str, Any] | None = None, *, level: str = "info") -> None:
         record = {"kind": f"strategy.{kind}", "level": level, "payload": dict(payload or {})}
+        self._events.append(record)
         if self.sink:
             self.sink(record)
 
     def record(self, kind: str, payload: dict[str, Any] | None = None, *, level: str = "info") -> None:
         self.log(kind, payload, level=level)
+
+    def events(self) -> list[dict[str, Any]]:
+        return list(self._events)
 
 
 class _GatedSurface:
@@ -796,12 +879,29 @@ class _GatedSurface:
 
 
 class MockNews(_GatedSurface):
+    def register(self, source_id: str, fetcher: Any) -> None:
+        raise BacktestUnsupportedSurfaceError("news.register", detail="live fetchers are not registered during replay; configure durable historical observations")
+
     def fetch(self, **_: Any) -> list[dict[str, Any]]:
         value = self._value()
         return list(value or [])
 
 
 class MockLLM(_GatedSurface):
+    _calls_made: int = 0
+
+    def _value(self) -> Any:
+        value = super()._value()
+        self._calls_made += 1
+        return value
+
+    @property
+    def calls_made(self) -> int:
+        return self._calls_made
+
+    def compress(self, **_: Any) -> dict[str, Any]:
+        return dict(self._value() or {})
+
     def classify(self, **_: Any) -> dict[str, Any]:
         value = self._value()
         return dict(value or {})
@@ -835,14 +935,9 @@ class MockMessages(_GatedSurface):
 
 
 @dataclass
-class SimpleConfigView:
-    strategy_id: str
-    title: str = ""
+class SimpleConfigView(StrategyConfig):
+    """Compatibility name; all manifest access uses the runtime SDK model."""
     mode: str = "backtest"
-    markets: tuple[str, ...] = ()
-    accounts: tuple[str, ...] = ()
-    news_sources: tuple[str, ...] = ()
-    extras: dict[str, Any] = field(default_factory=dict)
 
 
 class BacktestPromptIO:
@@ -876,8 +971,17 @@ class MockCtx:
     policy_obj: MockPolicy | None = None
     config: SimpleConfigView | None = None
     result: Any = field(default_factory=lambda: _result_builder())
+    run_id: str = ""
+    session_id: str | None = None
+    strategy_root: Path | None = None
+    backtest_replay: Any = None
+    stream: Any = None
 
     def __post_init__(self) -> None:
+        from .....strategies.context import StrategyDedupe, StrategyRunDeadline, StrategyTriggerContext
+
+        self.run_id = self.run_id or f"backtest:{self.strategy_id}:{self.current_bar.get('ts', '')}:{self.market_name}"
+        self.run_deadline = StrategyRunDeadline()
         self.market = MockMarket(
             self.market_name,
             self.bars_by_market,
@@ -889,18 +993,28 @@ class MockCtx:
             self.strategy_id,
             state=self.state,
             mark_price=float(self.current_bar.get("close", 0.0) or 0.0),
+            policy=self.policy_obj or MockPolicy(),
+            market_data=self.market,
         )
         self.audit = MockAudit(self.audit_sink)
-        self.clock = MockClock(int(self.current_bar.get("ts", 0)))
-        self.dedupe = MockDedupe()
-        self.portfolio = MockPortfolio(self.state)
+        from .data_cache import _tf_seconds
+        # OHLCV timestamps are opening times; the full bar is knowable at close.
+        self.clock = MockClock(int(self.current_bar.get("ts", 0)) + _tf_seconds(self.config_obj.tf))
+        self.trading.audit = self.audit
+        self.trading.clock = self.clock
+        self.dedupe = StrategyDedupe(self.state)
+        self.portfolio = MockPortfolio(self.state, self.market)
         self.pnl = MockPnL(self.state)
         self.news = MockNews("news", self.config_obj.mock_surfaces["news"])
         self.llm = MockLLM("llm", self.config_obj.mock_surfaces["llm"])
         self.subagents = MockSubAgents("subagents", self.config_obj.mock_surfaces["subagents"])
         self.messages = MockMessages("messages", self.config_obj.mock_surfaces["messages"])
         self.policy = self.policy_obj or MockPolicy()
-        self.trigger = {"source": "backtest"}
+        self.trigger = StrategyTriggerContext(source="backtest", kind="market.candle_closed",
+            strategy_id=self.strategy_id, event_id=self.run_id,
+            occurred_at=self.clock.now_iso(), payload={"market": self.market_name,
+                "timeframe": self.config_obj.tf, "candle": dict(self.current_bar),
+                "closed_at": self.clock.now_iso(), "historical": True})
         self.prompt = BacktestPromptIO()
         if self.config is None:
             self.config = SimpleConfigView(
@@ -911,7 +1025,7 @@ class MockCtx:
         from nerya.strategies.input_context import StrategyInputContext
         self.inputs = StrategyInputContext(sources=getattr(self.config, "extras", {}).get("data_sources", []),
             market=self.market, news=self.news, markets=tuple(self.config.markets),
-            run_id=f"backtest:{self.current_bar.get('ts', '')}")
+            run_id=self.run_id, clock=self.clock)
 
     @property
     def runmode(self) -> str:

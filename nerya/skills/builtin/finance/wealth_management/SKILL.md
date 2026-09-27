@@ -1,5 +1,8 @@
 ---
 name: finance.wealth_management
+metadata:
+  nerya:
+    catalog_group: professional
 description: "Client advisory preparation: financial plans, investment proposals, reviews, reports, portfolio rebalancing and tax-loss-harvesting analysis."
 version: 0.2.0
 license: MIT

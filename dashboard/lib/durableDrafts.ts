@@ -1,4 +1,5 @@
-import type { ChatDraft } from "./chatDraft";
+import { hasChatDraft, type ChatDraft } from "./chatDraft";
+import { getWorkspaceIdentity } from "./workspaceIdentity";
 
 export type SavedDraft={key:string;workspace:string;windowId:string;scope:string;updatedAt:number;draft:ChatDraft};
 let database:Promise<IDBDatabase>|undefined;
@@ -28,8 +29,9 @@ export function safeDraft(draft:ChatDraft):ChatDraft{
     reason:file.artifact_uri?file.reason:"reselect_required"}))};
 }
 export async function savedDrafts(workspace:string,scope:string):Promise<SavedDraft[]>{
+  if (!workspace || workspace !== getWorkspaceIdentity()) return [];
   const store=(await db()).transaction("drafts").objectStore("drafts");
-  return new Promise((resolve,reject)=>{const request=store.getAll();request.onsuccess=()=>resolve((request.result as SavedDraft[]).filter(r=>r.workspace===workspace&&r.scope===scope&&(r.draft.text||r.draft.attachments.length)).sort((a,b)=>b.updatedAt-a.updatedAt));request.onerror=()=>reject(request.error);});
+  return new Promise((resolve,reject)=>{const request=store.getAll();request.onsuccess=()=>resolve(workspace !== getWorkspaceIdentity() ? [] : (request.result as SavedDraft[]).filter(r=>r.workspace===workspace&&r.scope===scope&&hasChatDraft(r.draft)).sort((a,b)=>b.updatedAt-a.updatedAt));request.onerror=()=>reject(request.error);});
 }
 async function flush(){
   const writes=[...pending.values()];pending.clear();
@@ -37,12 +39,13 @@ async function flush(){
   try {
     const database=await db();
     await new Promise<void>((resolve,reject)=>{const tx=database.transaction("drafts","readwrite"),store=tx.objectStore("drafts");
-      for(const row of writes){if(!row.draft.text&&!row.draft.attachments.length)store.delete(row.key);else store.put(row);}
+      for(const row of writes){if(!hasChatDraft(row.draft))store.delete(row.key);else store.put(row);}
       tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
     });
   } catch {window.dispatchEvent(new Event("nerya:draft-storage-unavailable"));}
 }
 export function saveDurableDraft(workspace:string,scope:string,draft:ChatDraft){
+  if (!workspace || workspace !== getWorkspaceIdentity()) return;
   const id=draftWindowId(),key=JSON.stringify([workspace,id,scope]);
   pending.set(key,{key,workspace,windowId:id,scope,updatedAt:Date.now(),draft:safeDraft(draft)});
   if(timer)clearTimeout(timer);timer=setTimeout(()=>void flush(),120);

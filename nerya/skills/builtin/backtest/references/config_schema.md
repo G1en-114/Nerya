@@ -42,3 +42,13 @@ mock_surfaces:
   news: {mode: stub, payload: []}
   llm: {mode: error}
 ```
+# Local data and isolated execution
+
+Native replay accepts `start_utc` / `end_utc` (UTC, end exclusive),
+`data_mode: download|local`, `coverage_policy: strict|allow_partial`,
+`allow_timeframe_fallback: false`, `download_timeout_seconds: 300`,
+`max_run_seconds: 600`, and `max_bars: 2000000`. `local` is network-free.
+Strict coverage and known SDK/configuration checks run before strategy execution.
+Unknown settings are rejected. See `references/history-data.md` for download,
+warmup, resumption, immutable inputs and failure receipts. These native-engine
+settings do not configure a package's custom freeform research script.

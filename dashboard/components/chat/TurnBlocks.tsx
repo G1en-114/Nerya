@@ -13,6 +13,7 @@ import type {
   TurnPayload,
 } from "../../lib/chat";
 import { liveEventsToBlocks } from "../../lib/chat";
+import { normalizeTranscriptBlocks } from "../../lib/transcriptProjection";
 import type { ApprovalCard } from "../../lib/clientApi";
 import {
   ApprovalRequestCard,
@@ -27,6 +28,7 @@ import {
   WrenchIcon,
 } from "../icons";
 import { JsonView } from "../JsonView";
+import { RoleAvatar } from "../RoleAvatar";
 import {
   StrategyProposalApprovalCard,
   type StrategyProposalView,
@@ -165,7 +167,8 @@ function pushActiveProposal(
 ): void {
   if (!candidate || !isHoistableStrategyProposal(candidate)) return;
   const id = String(candidate.id || "");
-  if (!id || seen.has(id)) return;
+  if (!id) return;
+  if (seen.has(id)) { const index = out.findIndex((item) => item.id === id); if (index >= 0) out[index] = { ...out[index], ...candidate }; return; }
   seen.add(id);
   out.push(candidate);
 }
@@ -178,6 +181,7 @@ function activeProposalsFromEnvelopes(
   for (const env of envelopes) {
     if (blockKind(env) !== "tool_result") continue;
     const block = unwrapBlock(env);
+    if (block.ok === false || block.error) continue;
     pushActiveProposal(
       out,
       seen,
@@ -300,9 +304,7 @@ export function StrategyProposalsHoist({
   if (!proposals.length) return null;
   return (
     <div className="space-y-2" data-strategy-proposal-hoist="true">
-      <div className="flex items-center gap-2 text-[11px] text-warn font-medium">
-        <span>{t("pendingHeading", { count: proposals.length })}</span>
-      </div>
+
       {proposals.map((proposal) => (
         <StrategyProposalApprovalCard
           key={String(proposal.id)}
@@ -871,75 +873,20 @@ function dropDuplicateReplyTextBlocks(
 
 const STREAM_BASE_DELAY_MS = 22;
 
-function commonPrefixLength(a: string, b: string): number {
-  const limit = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < limit && a[i] === b[i]) i += 1;
-  return i;
-}
-
-function streamChunkSize(remaining: number): number {
-  if (remaining > 1200) return 36;
-  if (remaining > 600) return 24;
-  if (remaining > 240) return 14;
-  if (remaining > 96) return 8;
-  if (remaining > 32) return 5;
-  return 2;
-}
-
-function streamDelayMs(remaining: number, baseDelayMs: number): number {
-  if (remaining > 600) return Math.max(10, baseDelayMs - 10);
-  if (remaining > 240) return Math.max(14, baseDelayMs - 6);
-  return baseDelayMs;
-}
-
 export function useTypewriterText(
   text: string,
   active: boolean,
-  delayMs = STREAM_BASE_DELAY_MS,
+  _delayMs = STREAM_BASE_DELAY_MS,
 ): { text: string; streaming: boolean } {
-  const chars = useMemo(() => Array.from(text), [text]);
-  const [count, setCount] = useState(active ? 0 : chars.length);
-  const prevTextRef = useRef(text);
-
-  useEffect(() => {
-    if (!active) {
-      prevTextRef.current = text;
-      setCount(chars.length);
-      return;
-    }
-    const previous = prevTextRef.current;
-    prevTextRef.current = text;
-    setCount((current) => {
-      if (text.startsWith(previous)) return Math.min(current, chars.length);
-      if (previous.startsWith(text)) return Math.min(current, chars.length);
-      return Math.min(current, commonPrefixLength(previous, text));
-    });
-  }, [active, chars.length, text]);
-
-  useEffect(() => {
-    if (!active || count >= chars.length) return;
-    const remaining = chars.length - count;
-    const timer = window.setTimeout(() => {
-      setCount((current) =>
-        Math.min(current + streamChunkSize(chars.length - current), chars.length),
-      );
-    }, streamDelayMs(remaining, delayMs));
-    return () => window.clearTimeout(timer);
-  }, [active, chars.length, count, delayMs]);
-
-  if (!active) return { text, streaming: false };
-  return {
-    text: chars.slice(0, count).join(""),
-    streaming: count < chars.length,
-  };
+  // 服务端本身已流式发送。再次按字符回放会积压、重播历史，甚至拆开组合字符。
+  return { text, streaming: active };
 }
 
 export function TypewriterCursor({ show }: { show: boolean }) {
   if (!show) return null;
   return (
     <span
-      className="ml-0.5 inline-block h-3 w-[1px] translate-y-[2px] bg-fluid-300 animate-pulse"
+      className="ml-0.5 inline-block h-3 w-[1px] translate-y-[2px] bg-fluid-300 motion-safe:animate-pulse"
       aria-hidden
     />
   );
@@ -973,7 +920,7 @@ export function StreamedMarkdown({
   const streamed = useTypewriterText(text, active);
   return (
     <>
-      <Markdown>{streamed.text || " "}</Markdown>
+      <Markdown streaming={active}>{streamed.text || " "}</Markdown>
       <TypewriterCursor show={streamed.streaming} />
     </>
   );
@@ -2472,7 +2419,7 @@ function NativeToolResultBlock({
   suppressProposalIds?: Set<string>;
   stream?: boolean;
 }) {
-  // High-traffic tool results get a dedicated readable card.
+  // All callers share the same card router; only initial expansion differs.
   if (isTodoWrite(block)) {
     return <TodoChecklistCard todos={todosFromBlock(block)} />;
   }
@@ -2480,10 +2427,10 @@ function NativeToolResultBlock({
     return <SkillLoadCard block={block} variant="result" />;
   }
   if (isFileOp(block)) {
-    return <FileOpCard block={block} variant="result" />;
+    return <FileOpCard block={block} variant="result" defaultOpen={defaultOpen} />;
   }
   if (isShellTool(block)) {
-    return <ShellCard block={block} variant="result" />;
+    return <ShellCard block={block} variant="result" defaultOpen={defaultOpen} />;
   }
   if (isWebTool(block)) {
     return <WebCard block={block} variant="result" />;
@@ -2502,7 +2449,7 @@ function NativeToolResultBlock({
     return <CustomizationProposalCard view={customization} compact />;
   }
   const skill = (block.skill_id as string | undefined) || "native";
-  const rawProposal = strategyProposalFromToolResult(block.result ?? block, action);
+  const rawProposal = ok ? strategyProposalFromToolResult(block.result ?? block, action) : null;
   const strategyProposal =
     rawProposal &&
     isHoistableStrategyProposal(rawProposal) &&
@@ -3134,34 +3081,6 @@ export function collectLiveAgentSegments(blocks: NativeBlockEnvelope[]): {
   return { segments };
 }
 
-function agentInitials(name: string): string {
-  const parts = name
-    .replace(/[_\-./]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (!parts.length) return "AG";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
-
-function AgentAvatar({
-  name,
-  accent,
-}: {
-  name: string;
-  accent: AgentAccent;
-}) {
-  return (
-    <span
-      className={`shrink-0 pt-1 font-mono text-[11px] font-semibold leading-none tracking-tight ${accent.text}`}
-      aria-hidden
-    >
-      {agentInitials(name)}
-    </span>
-  );
-}
-
 function memberStatusKey(status: TeamMemberInfo["status"]): string {
   switch (status) {
     case "completed":
@@ -3409,7 +3328,7 @@ function AgentMemberBubble({
       data-agent-status={member.status}
     >
       <div className="relative w-8 shrink-0 text-right">
-        <AgentAvatar name={member.name} accent={accent} />
+        <RoleAvatar role={member.name} size={28} alt="" />
         {isRunning ? (
           <span
             className={`absolute right-0 top-4 h-1.5 w-1.5 rounded-full ${accent.dot} animate-pulse`}
@@ -3701,7 +3620,7 @@ function AgentTranscriptRow({
       <div className="max-w-[92%] min-w-[200px] w-full">
         <div className="flex gap-2.5">
           <div className="relative w-8 shrink-0 text-right">
-            <AgentAvatar name={item.member.name} accent={accent} />
+            <RoleAvatar role={item.member.name} size={28} alt="" />
             {current ? (
               <span
                 className={`absolute right-0 top-4 h-1.5 w-1.5 rounded-full ${accent.dot} animate-pulse`}
@@ -3837,7 +3756,9 @@ export function NativeBlocksTrack({
   suppressTopProposalHoist = false,
   suppressAgentResultCallIds,
   hoistTeamTraces = false,
+  presentation = 'default',
 }: {
+  presentation?: 'default' | 'expanded';
   envelopes: NativeBlockEnvelope[];
   live?: boolean;
   label?: string;
@@ -3862,7 +3783,7 @@ export function NativeBlocksTrack({
   hoistTeamTraces?: boolean;
 }) {
   if (!envelopes.length) return null;
-  const displayEnvelopes = mergeToolUsePayloadsIntoResults(envelopes);
+  const displayEnvelopes = mergeToolUsePayloadsIntoResults(normalizeTranscriptBlocks(envelopes));
   // Hoist any active strategy proposals to a prominent card at the top
   // of the track and suppress their buried duplicates inside the
   // collapsed tool_result cards below.
@@ -3889,7 +3810,7 @@ export function NativeBlocksTrack({
     if (openCalls.size > 0) {
       pendingIdx = Math.max(...Array.from(openCalls.values()));
     } else {
-      pendingIdx = envelopes.length - 1;
+      pendingIdx = displayEnvelopes.length - 1;
     }
   }
   const teamRunIds = new Set<string>();
@@ -3967,7 +3888,7 @@ export function NativeBlocksTrack({
         <NativeToolUseBlock
           key={i}
           block={block}
-          defaultOpen={auto}
+          defaultOpen={presentation === 'expanded' || auto}
           pending={!hasResult && live}
         />
       );
@@ -3977,7 +3898,7 @@ export function NativeBlocksTrack({
         <NativeToolResultBlock
           key={i}
           block={block}
-          defaultOpen={auto}
+          defaultOpen={presentation === 'expanded' || auto}
           suppressProposalIds={suppressProposalIds}
           stream={live}
         />
@@ -4101,7 +4022,7 @@ export function NativeBlocksTrack({
     }
     // Backend batch bookkeeping — never had a renderer, only noise.
     if (kind === "tool_batch_summary") return;
-    if (!live && isRoutine(env)) {
+    if (presentation !== 'expanded' && !live && isRoutine(env)) {
       run.push({ env, i });
       return;
     }
@@ -4116,7 +4037,7 @@ export function NativeBlocksTrack({
       {suppressTopProposalHoist ? null : (
         <StrategyProposalsHoist proposals={hoistedProposals} />
       )}
-      <TraceSummary envelopes={displayEnvelopes} live={live} />
+      {presentation !== 'expanded' && <TraceSummary envelopes={displayEnvelopes} live={live} />}
       {label || live ? (
         <div className="flex items-center gap-2 text-[10.5px] text-ink-500 font-medium">
           {label ? <span>{label}</span> : null}

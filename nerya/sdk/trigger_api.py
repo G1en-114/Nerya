@@ -312,12 +312,26 @@ class TriggerAPI:
         """Return computed status for one or all schedules."""
         state = _read_state(_state_path(self.config))
         entries = load_schedules(self.config.paths)
+        from ..core import jsonl
+        latest_receipts = {}
+        latest_runs = {}
+        for receipt in jsonl.read_all(self.config.paths.journal("scheduled_session")):
+            schedule_id = receipt.get("schedule_id")
+            if not schedule_id:
+                continue
+            run = (float(receipt.get("ts_epoch") or 0), str(receipt.get("turn_id") or ""))
+            if schedule_id not in latest_runs or run >= latest_runs[schedule_id]:
+                latest_runs[schedule_id] = run
+                latest_receipts[schedule_id] = {key: receipt.get(key) for key in (
+                    "receipt_id", "turn_id", "session_id", "execution_status", "delivery_status",
+                    "ttl_exceeded", "late_outcome", "cancellation_requested", "stopped_reason", "ts")}
         rows = []
         for entry in entries:
             if id is not None and entry.id != id:
                 continue
             row = self._entry_to_dict(entry)
             row["last_fired_ts"] = state.get(entry.id)
+            row["latest_execution"] = latest_receipts.get(entry.id)
             rows.append(row)
         return {"ok": True, "schedules": rows}
 

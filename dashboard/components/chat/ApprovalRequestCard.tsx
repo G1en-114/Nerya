@@ -303,7 +303,7 @@ export function ApprovalRequestCard({
 }: {
   event: Record<string, unknown>;
   card?: ApprovalCard;
-  onAction?: (callbackData: string) => void;
+  onAction?: (callbackData: string) => void | Promise<void>;
   busy?: boolean;
 }) {
   const t = useTranslations("approvals");
@@ -426,7 +426,7 @@ export function ApprovalRequestCard({
       });
       if (!confirmed) return;
     }
-    onAction?.(callbackData);
+    await onAction?.(callbackData);
   }
   return (
     <div className={`rounded-lg border px-3 py-2.5 space-y-2 ${statusTone}`}>

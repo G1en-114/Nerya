@@ -1550,7 +1550,8 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
 
 ROLE_LIST_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {},
+    "properties": {"include_profiles": {"type": "boolean", "default": False,
+        "description": "Include specialist/compatibility profiles. Exact role_get remains available."}},
 }
 
 ROLE_GET_SCHEMA: dict[str, Any] = {
@@ -1780,20 +1781,6 @@ def team_run_handler(
         ),
     }
     _publish_team_event("team.start", **common_event)
-    for role_name in role_names:
-        _publish_team_event(
-            "team.member.start",
-            subagent=role_name,
-            role=role_name,
-            status="running",
-            team_task_id=f"role-{role_name}",
-            team_task_owner=role_name,
-            team_task_subject=task,
-            payload=redact_display_dict(role_payloads[role_name]),
-            assignment_prompt=role_assignment_prompts[role_name],
-            **common_event,
-        )
-
     cancel_token = _call_meta(call, "cancel_token") or _call_meta(call, "cancellation_token")
     request = TeamRunRequest(
         task=task,
@@ -1892,32 +1879,6 @@ def team_run_handler(
             "permission_pending": nested_pending,
         }
         (results if ok else failures).append(entry)
-        _publish_team_event(
-            "team.member.end",
-            subagent=role_name,
-            role=role_name,
-            status=(
-                "completed"
-                if ok
-                else "blocked" if nested_pending is not None else "error"
-            ),
-            ok=ok,
-            caveat=caveat_kind,
-            error=entry.get("error"),
-            error_kind=entry.get("error_kind"),
-            tokens=entry.get("tokens"),
-            usd=entry.get("usd"),
-            wall_ms=entry.get("wall_ms"),
-            provider=entry.get("provider"),
-            model=entry.get("model"),
-            team_task_id=f"role-{role_name}",
-            team_task_owner=role_name,
-            team_task_subject=task,
-            output=redact_display_dict(entry.get("output") or {}),
-            metrics=redact_display_dict(entry.get("metrics") or {}),
-            recovery=redact_display_dict(nested_pending) if nested_pending else None,
-            **common_event,
-        )
     for task_row in result.tasks:
         role_name = str(task_row.get("owner") or "")
         if not role_name or role_name in seen_roles:
@@ -1931,17 +1892,6 @@ def team_run_handler(
                 "output": {},
             }
             failures.append(failure)
-            _publish_team_event(
-                "team.member.end",
-                subagent=role_name,
-                role=role_name,
-                status="error",
-                ok=False,
-                error=failure["error"],
-                error_kind=failure["error_kind"],
-                **common_event,
-            )
-
     # The orchestrator records the raw dispatcher envelope. Apply the native
     # evidence contract to the durable task row as well so dashboard/API
     # consumers do not see a degraded member as successfully completed.
@@ -2125,12 +2075,15 @@ def role_list_handler(
         name=call.name,
         data={
             "guidance": (
-                "Role catalog only. Choose roles from their names, prompts, "
+                "Seven primary role families plus custom roles. The profiles "
+                "field names optional exact roles with independent contracts; "
+                "use role_get to inspect them or include_profiles to list all. "
+                "Choose roles from their names, prompts, "
                 "allowed skills, and the operator's actual request. Do not "
                 "treat similarly named workspace roles as implicit routes; "
                 "fetch role_get when a role's scope is unclear."
             ),
-            "roles": list_roles(config.paths),
+            "roles": list_roles(config.paths, include_profiles=bool((call.arguments or {}).get("include_profiles", False))),
         },
     )
 

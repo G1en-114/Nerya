@@ -86,6 +86,8 @@ def configured_routes(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         "prices",
         "reasoning_effort",
         "reasoning_summary",
+        "context_window",
+        "context_length",
         "provider_native_web_search",
         "allowed_tasks",
         "allowed_classes",

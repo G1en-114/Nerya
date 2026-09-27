@@ -20,6 +20,7 @@ new optional fields, never silently rename or drop existing ones.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from typing import Any, Literal
 
 from ..core.errors import IntentValidationError
@@ -73,6 +74,17 @@ class SizingPolicy:
 
     def __post_init__(self) -> None:
         m = self.method
+        if m not in {"fixed_usd", "fixed_base", "pct_nav", "risk_to_stop", "volatility_target", "target_weight", "reduce_pct", "close_all"}:
+            raise IntentValidationError(f"unsupported sizing method: {m!r}")
+        for name in ("fixed_usd", "fixed_base", "pct_nav", "risk_pct_nav", "stop_distance_pct",
+                     "target_volatility_pct", "target_weight", "reduce_pct", "max_notional_usd"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+                raise IntentValidationError(f"{name} must be a finite number")
+        if self.max_notional_usd is not None and self.max_notional_usd <= 0:
+            raise IntentValidationError("max_notional_usd must be positive")
+        if m == "volatility_target" and (self.target_volatility_pct is None or self.target_volatility_pct <= 0):
+            raise IntentValidationError("volatility_target requires positive target_volatility_pct")
         if m == "fixed_usd" and (self.fixed_usd is None or self.fixed_usd <= 0):
             raise IntentValidationError("fixed_usd sizing requires positive fixed_usd")
         if m == "fixed_base" and (self.fixed_base is None or self.fixed_base <= 0):
@@ -119,6 +131,10 @@ class StopLossSpec:
     value: float = 0.0
 
     def __post_init__(self) -> None:
+        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)) or not math.isfinite(self.value):
+            raise IntentValidationError("stop_loss value must be finite")
+        if self.type not in ("pct", "price", "atr", "pnl_usd"):
+            raise IntentValidationError(f"unsupported stop_loss type: {self.type}")
         if self.type == "pct" and not 0 < self.value < 1:
             raise IntentValidationError("stop_loss pct must be in (0,1)")
         if self.type in ("price", "atr", "pnl_usd") and self.value <= 0:
@@ -131,6 +147,10 @@ class TakeProfitSpec:
     value: float = 0.0
 
     def __post_init__(self) -> None:
+        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)) or not math.isfinite(self.value):
+            raise IntentValidationError("take_profit value must be finite")
+        if self.type not in ("pct", "price", "r_multiple", "pnl_usd"):
+            raise IntentValidationError(f"unsupported take_profit type: {self.type}")
         if self.type == "pct" and self.value <= 0:
             raise IntentValidationError("take_profit pct must be > 0")
         if self.type in ("price", "r_multiple", "pnl_usd") and self.value <= 0:
@@ -143,6 +163,9 @@ class TrailingStopSpec:
     trail_pct: float = 0.0
 
     def __post_init__(self) -> None:
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+               for value in (self.activation_pct, self.trail_pct)):
+            raise IntentValidationError("trailing stop values must be finite")
         if self.activation_pct < 0 or self.trail_pct <= 0:
             raise IntentValidationError(
                 "trailing stop requires activation_pct>=0 and trail_pct>0"
@@ -155,6 +178,9 @@ class PartialExitSpec:
     close_pct: float
 
     def __post_init__(self) -> None:
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+               for value in (self.trigger_pct, self.close_pct)):
+            raise IntentValidationError("partial exit values must be finite")
         if not 0 < self.trigger_pct:
             raise IntentValidationError("partial exit trigger_pct must be > 0")
         if not 0 < self.close_pct <= 1:
@@ -187,6 +213,7 @@ class ProtectionRule:
     status: ProtectionStatus = "pending"
     trigger_source: Literal["mark", "last", "bid_ask", "candle_close"] = "mark"
     exchange_order_ids: dict[str, str] = field(default_factory=dict)
+    native: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     triggered_at: str | None = None
@@ -224,6 +251,7 @@ class ProtectionRule:
             "trigger_source": self.trigger_source,
             "time_limit_sec": self.time_limit_sec,
             "exchange_order_ids": dict(self.exchange_order_ids),
+            "native": dict(self.native),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "triggered_at": self.triggered_at,

@@ -1,6 +1,7 @@
 "use client";
+import { SkillsIcon } from "../../icons";
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useState } from "react";
 import type { NativeBlock } from "../../../lib/chat";
 import { CopyButton, Tag, ToolRowCard } from "./atoms";
@@ -56,6 +57,7 @@ export function SkillLoadCard({
   pending?: boolean;
 }) {
   const t = useTranslations("skillLoadCard");
+  const zh = useLocale().startsWith("zh");
   const [expanded, setExpanded] = useState(false);
   const { name, args, baseDir, body, raw } = skillBodyFromBlock(block);
   const ok = block.ok !== false && !block.error;
@@ -65,13 +67,11 @@ export function SkillLoadCard({
   return (
     <ToolRowCard
       icon={
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2l2.5 4.9L20 8l-4 3.8.9 5.4L12 14.8 7.1 17.2 8 11.8 4 8l5.5-1.1L12 2z" />
-        </svg>
+        <SkillsIcon size={16} />
       }
       title={
         <span className="inline-flex min-w-0 items-center gap-1.5">
-          <span>{isResult ? t("loaded") : t("loading")}</span>
+          <span>{isResult && !ok ? (zh ? "Skill 加载失败" : "Skill failed to load") : isResult ? t("loaded") : t("loading")}</span>
           {pending ? (
             <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
               <span className="typing-dot" />

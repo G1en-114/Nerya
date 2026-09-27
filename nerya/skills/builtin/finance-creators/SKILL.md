@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: finance-creators
+metadata:
+  nerya:
+    catalog_parent: research
 description: "Hub for the distilled finance-creator lenses. Use only when the user explicitly asks for Serenity / @aleabitoreddit, Unusual Whales / @unusual_whales, or The Kobeissi Letter / @KobeissiLetter as a lens or comparison. Load one creator sub-skill (finance-creators.serenity / .unusual_whales / .kobeissi) instead of all three — each lens lives in its own sub-skill to keep context small."
 version: 0.2.0
 license: MIT

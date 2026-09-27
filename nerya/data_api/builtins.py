@@ -1282,6 +1282,11 @@ def _compact_wallet_capabilities(caps: Any) -> dict[str, Any] | None:
         "methods": methods,
         "execution_profile": caps.get("execution_profile"),
         "chains": caps.get("chains") or [],
+        "swap_chains":caps.get('swap_chains') or [],
+        "order_types":caps.get('order_types') or [],
+        "protection_types":caps.get('protection_types') or [],
+        "minimum_output":caps.get('minimum_output') or 'unknown',
+        "receipt_polling":bool(caps.get('receipt_polling')),
     }
 
 
@@ -1911,6 +1916,7 @@ def _wallet_binding_functions(
             "note": _short_text(swap_cap.get("note"), 160),
             "read_only": False,
             "call_path": "strategy ctx.trading.submit_intent or native trade_intent_submit",
+            "execution_contract": "wallet-bound chain/dex account; explicit chain:token mint, market swap, per-trade approval",
             "guardrails": [
                 "requires runtime.live_trading_enabled for live execution",
                 "requires RiskGate and ApprovalGate",
@@ -2197,6 +2203,7 @@ def _wallet_quote(context: DataApiContext, args: dict[str, Any]) -> Any:
         token_out=token_out,
         amount_in=amount_in,
         slippage_bps=slippage_bps,
+        **{k:args[k] for k in ('decimals_in','decimals_out') if k in args},
     )
 
 
@@ -2269,8 +2276,14 @@ def _resolve_wallet_provider(context: DataApiContext, args: dict[str, Any]) -> t
     provider_hint = str(args.get("provider") or "").strip().lower()
     bindings = list_configured_providers(context.config_data)
     selected: dict[str, Any] | None = None
+    if not wallet_id and len([b for b in bindings if not provider_hint or b['provider']==provider_hint])>1:
+        raise DataApiError('multiple wallets match; specify wallet_id',kind='schema_validation',retryable=False)
     if wallet_id:
         selected = next((row for row in bindings if row.get("wallet_id") == wallet_id), None)
+        if selected is None:
+            raise DataApiError("unknown wallet_id", kind="not_found", detail={"wallet_id":wallet_id}, retryable=False)
+        if provider_hint and selected.get("provider") != provider_hint:
+            raise DataApiError("wallet_id/provider mismatch", kind="schema_validation", retryable=False)
     if selected is None and provider_hint:
         selected = next((row for row in bindings if row.get("provider") == provider_hint), None)
     if selected is None and bindings and not provider_hint:

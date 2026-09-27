@@ -253,11 +253,11 @@ FIX_HINT_CATALOGUE: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
-        "canary_requires_protection_rule",
+        "strategy_requires_protection_rule",
         {
-            "title": "Canary intents must carry a protection rule",
-            "detail": "Attach a TP/SL/trailing protection to the TradePlan "
-            "(or pass meta.protection_present=true for legacy intents).",
+            "title": "This strategy requires an explicit protection rule",
+            "detail": "Supply the protection required by this strategy, or update "
+            "its require_protection policy. TP/SL is optional by default.",
             "action": "open_strategy",
             "href_template": "/strategies/{strategy_id}",
         },

@@ -1,5 +1,8 @@
 ---
 name: quant-strategy-loop
+metadata:
+  nerya:
+    catalog_parent: strategy_author
 description: "Use to train or calibrate, review, and safely iterate a Nerya quantitative strategy in bounded cycles after its first valid baseline; requires user-confirmed iteration goals and guards against overfitting, look-ahead leakage, survivorship bias, data snooping, and premature live promotion."
 ---
 
@@ -32,6 +35,10 @@ REVIEW: Replay with realistic fees, spread, slippage, latency, and next-tradable
 event execution. Reject leakage, unstable parameters, one-regime wins, inadequate
 sample size, or a train-to-out-of-sample collapse. Compare to the unchanged
 baseline and a naive benchmark.
+Load `Skill(skill="strategy_author", file="references/explanations.md")` for each
+review/proposal: record why each rule changes, its before/after behavior and
+affected scope, and update the candidate's `@nerya` comments with the code.
+Keep expected effects separate from observed validation outcomes.
 
 PROPOSE: Use `strategy_tuning_generate` with the confirmed goals,
 `require_backtest=true`, and `require_shadow_run=true`. Run

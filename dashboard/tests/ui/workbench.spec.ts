@@ -23,12 +23,31 @@ test("finished command, collapsed queue and work mode",async({page})=>{
  const fixture=await parityFixture(page,{complete:true});
  await page.goto("/chat/parity-session");
  await expect(page.getByTestId("runtime-notice")).toHaveCount(0);
- await page.getByTestId("work-mode").selectOption("plan");
+ await page.getByTestId("composer-add").click();await page.getByRole("menuitemradio",{name:"Plan first",exact:true}).click();
  await page.locator("textarea").first().fill("Plan a research task");
  await page.getByTestId("native-command-send").click();
  await expect(page.getByTestId("task-header-status")).toContainText("Turn finished");
  expect(fixture.requests[0].request.work_mode).toBe("plan");
  expect(fixture.errors).toEqual([]);
+});
+
+test("goal mode in plus menu survives reload and reaches the request",async({page},info)=>{
+ const fixture=await parityFixture(page,{complete:true,language:"zh"});
+ await page.setViewportSize({width:320,height:900});await page.goto("/chat/parity-session");
+ const add=page.getByTestId("composer-add");
+ await add.click();await expect(page.getByRole("menuitemradio",{name:"Goal 模式"})).toBeInViewport();
+ await page.screenshot({path:info.outputPath("plus-menu-320.png")});
+ await page.getByRole("menuitemradio",{name:"Goal 模式"}).click();
+ await expect(add).toHaveAttribute("data-work-mode","goal");
+ await page.reload();await expect(add).toHaveAttribute("data-work-mode","goal");
+ expect(await page.getByTestId("composer-dock").evaluate(element=>getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+ const fits=await page.evaluate(()=>{const root=document.querySelector('[data-chat-composer]')!.getBoundingClientRect();const button=document.querySelector('[data-testid="composer-add"]')!.getBoundingClientRect();return button.right<=root.right&&document.documentElement.scrollWidth<=innerWidth;});
+ expect(fits).toBe(true);
+ await page.screenshot({path:info.outputPath("goal-mode-320.png")});
+ await page.locator("[data-chat-composer] textarea").fill("核对报告结果");
+ await page.getByTestId("native-command-send").click();
+ await expect.poll(()=>fixture.requests.length).toBe(1);
+ expect(fixture.requests[0].request.work_mode).toBe("goal");
 });
 
 test("durable user question shows choice and retains failed answer",async({page})=>{
@@ -92,7 +111,7 @@ test("1000-message timeline bounds mounted content and finds historical turns",a
  const fixture=await parityFixture(page,{historyCount:1000});
  await page.setViewportSize({width:1440,height:1000});
  await page.goto("/chat/parity-session");
- await expect(page.getByTestId("conversation-find")).toBeVisible();
+ await expect(page.getByTestId("conversation-find")).toHaveCount(0);await page.getByRole("button",{name:"Find in conversation",exact:true}).click();await expect(page.getByTestId("conversation-find")).toBeVisible();
  await expect.poll(()=>page.locator('[data-turn-role="assistant"]').count()).toBeLessThan(35);
  await page.getByRole("searchbox",{name:"Find in conversation"}).fill("historical result 101.");
  await page.getByRole("button",{name:"Next match"}).click();
@@ -107,7 +126,7 @@ test("1000-message timeline bounds mounted content and finds historical turns",a
 for(const width of [1440,1280,768,390,320])test("responsive workbench "+width,async({page},info)=>{
  const fixture=await parityFixture(page,{complete:true,language:width===320?"zh":"en",theme:width===390?"light":"dark"});
  await page.setViewportSize({width,height:900});await page.goto("/chat/parity-session");
-  await expect(page.getByTestId("work-mode")).toBeVisible();
+  await expect(page.getByTestId("composer-add")).toBeVisible();
   await expect(page.getByText("Loading conversation…",{exact:true})).toHaveCount(0);
  await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  await page.screenshot({path:info.outputPath("workbench-"+width+".png")});

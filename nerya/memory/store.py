@@ -19,6 +19,10 @@ _WORD_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:-]*")
 _CJK_RE = re.compile(r"[\u3400-\u9fff]+")
 
 
+class MemoryConflictError(ValueError):
+    """A fact changed after it was read; recall before retrying."""
+
+
 class MemoryScopeError(ValueError):
     """Raised when a caller asks for a memory partition it does not own."""
 
@@ -49,6 +53,8 @@ class MemoryRecord:
     expires_at: float | None
     target_files: tuple[str, ...] = field(default_factory=tuple)
     score: float = 0.0
+    workflow_id: str = ""
+    superseded_by: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +147,8 @@ class MemoryStore:
         max_entries: int = 0,
         dedupe: str = "none",
         target_files: Iterable[str] | None = None,
+        workflow_id: str = "",
+        expected_memory_id: str | None = None,
     ) -> StoreWriteResult:
         now = time.time()
         memory_id = uuid.uuid4().hex
@@ -160,6 +168,22 @@ class MemoryStore:
         try:
             con.execute("BEGIN IMMEDIATE")
             self._expire(con, now, actor_id=actor_id)
+            if stable_key:
+                current = con.execute(
+                    "SELECT * FROM memory_records WHERE actor_id=? AND scope=? "
+                    "AND scope_id=? AND stable_key=? AND status='active'",
+                    (actor_id, scope, scope_id, stable_key),
+                ).fetchone()
+                if current is not None and current["category"] != category:
+                    raise MemoryConflictError("a stable fact key cannot change category")
+                current_id = str(current["memory_id"]) if current else ""
+                if expected_memory_id is not None and current_id != expected_memory_id:
+                    raise MemoryConflictError("memory changed; recall the current version before updating")
+                if current is not None and current["content_hash"] == digest:
+                    con.commit()
+                    return StoreWriteResult(self._record(current), False, "unchanged")
+            elif expected_memory_id is not None:
+                raise ValueError("expected_memory_id requires a stable key")
             if dedupe == "by_hash" or (dedupe == "by_key" and not stable_key):
                 row = con.execute(
                     """
@@ -201,11 +225,11 @@ class MemoryStore:
                 """
                 INSERT INTO memory_records (
                     memory_id, actor_id, writer_id, scope, scope_id,
-                    strategy_id, session_id, category, stable_key, title,
+                    strategy_id, session_id, workflow_id, category, stable_key, title,
                     content, content_hash, tags_json, source_ref, source_turn_id,
                     evidence_refs_json, confidence, importance, retention_days,
                     created_at, updated_at, expires_at, target_files_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -215,6 +239,7 @@ class MemoryStore:
                     scope_id,
                     strategy_id,
                     session_id,
+                    workflow_id,
                     category,
                     stable_key,
                     title,
@@ -267,8 +292,10 @@ class MemoryStore:
         query: str,
         strategy_id: str = "",
         session_id: str = "",
+        workflow_id: str = "",
         scope: str = "visible",
         limit: int = 10,
+        recent: bool = False,
     ) -> StoreRecallResult:
         con = connect(self.db_path)
         try:
@@ -283,11 +310,14 @@ class MemoryStore:
                   AND (
                     scope = 'global'
                     OR (scope = 'strategy' AND scope_id = ? AND ? <> '')
-                    OR (scope = 'session' AND scope_id = ? AND ? <> '')
+                    OR (scope = 'workflow' AND strategy_id = ? AND workflow_id = ? AND ? <> '')
+                    OR (scope = 'session' AND session_id = ? AND ? <> ''
+                        AND strategy_id = ? AND workflow_id = ?)
                   )
                 ORDER BY updated_at DESC
                 """,
-                (actor_id, strategy_id, strategy_id, session_id, session_id),
+                (actor_id, strategy_id, strategy_id, strategy_id, workflow_id, workflow_id,
+                 session_id, session_id, strategy_id, workflow_id),
             ).fetchall()
             con.commit()
         except BaseException:
@@ -314,7 +344,7 @@ class MemoryStore:
                 overlap * 10.0 + record.importance * 2.0 + record.confidence + recency
             )
             ranked.append(MemoryRecord(**{**record.__dict__, "score": score}))
-        ranked.sort(key=lambda item: (-item.score, -item.updated_at, item.memory_id))
+        ranked.sort(key=lambda item: (-item.updated_at, item.memory_id) if recent else (-item.score, -item.updated_at, item.memory_id))
         return StoreRecallResult(
             records=tuple(ranked[: max(0, int(limit))]),
             expired_count=expired,
@@ -344,6 +374,23 @@ class MemoryStore:
             return self._record(row) if row is not None else None
         finally:
             con.close()
+
+    def key_notebook_entry(self, *, actor_id: str, memory_id: str) -> MemoryRecord:
+        """Adopt a historical keyless notebook record during explicit curation."""
+        with connect(self.db_path) as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM memory_records WHERE actor_id=? AND memory_id=? "
+                              "AND status='active' AND scope='global' "
+                              "AND category IN ('notebook_agent','notebook_operator')",
+                              (actor_id, memory_id)).fetchone()
+            if row is None:
+                raise MemoryConflictError("notebook changed before curation")
+            if not row["stable_key"]:
+                key = "notebook.legacy." + memory_id
+                con.execute("UPDATE memory_records SET stable_key=?, content_hash=? WHERE memory_id=?",
+                            (key, _content_hash(row["category"], row["content"], key), memory_id))
+            return self._record(con.execute("SELECT * FROM memory_records WHERE memory_id=?",
+                                           (memory_id,)).fetchone())
 
     def forget(
         self,
@@ -555,6 +602,8 @@ class MemoryStore:
             scope_id=str(row["scope_id"]),
             strategy_id=str(row["strategy_id"]),
             session_id=str(row["session_id"]),
+            workflow_id=str(row["workflow_id"]),
+            superseded_by=str(row["superseded_by"] or ""),
             category=str(row["category"]),
             stable_key=str(row["stable_key"]),
             title=str(row["title"]),

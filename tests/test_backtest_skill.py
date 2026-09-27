@@ -20,6 +20,8 @@ from nerya.skills.builtin.backtest.scripts.portfolio import PortfolioState
 from nerya.skills.builtin.backtest.scripts.backtest_run import (
     _apply_coverage_gate,
     _discover_strategy_timeframes,
+    _operator_summary,
+    _operator_summary_text,
     run_strategy_backtest,
 )
 from nerya.skills.builtin.backtest.scripts.data_cache import NoHistoricalDataError
@@ -28,6 +30,28 @@ from nerya.strategies.backtest_bridge import backtest_replay
 
 
 pytestmark = pytest.mark.smoke
+
+
+@pytest.fixture(autouse=True)
+def _no_unmocked_network(monkeypatch):
+    import socket
+    def blocked(*args, **kwargs):
+        raise AssertionError("backtest regressions must mock their network sources")
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket, "create_connection", blocked)
+
+
+def test_operator_summary_never_reverses_benchmark_comparison():
+    summary = _operator_summary({
+        "performance_evidence": True,
+        "total_return_pct": -1.19,
+        "benchmark_buy_hold_return_pct": -14.34,
+        "alpha_vs_benchmark_pct": 13.15,
+    })
+    assert summary["benchmark_comparison"] == (
+        "Outperformed buy-and-hold benchmark by 13.1500 percentage points."
+    )
+    assert "Outperformed buy-and-hold benchmark" in _operator_summary_text(summary)
 
 
 def _strategy(ctx):
@@ -43,13 +67,10 @@ def _strategy(ctx):
             reasoning="fixture_entry",
         )
     if len(candles) == 20 and ctx.state.get(f"position:{market}"):
-        return ctx.trading.submit_intent(
+        return ctx.trading.close_position(
             market=market,
-            side="sell",
-            size=0,
-            size_unit="usd",
-            order_type="market",
-            reasoning="fixture_exit",
+            side="long",
+            reasoning_ref="fixture_exit",
         )
     return ctx.result.hold(reason="wait")
 
@@ -138,13 +159,10 @@ def test_backtest_engine_exposes_requested_timeframes_and_policy():
                 order_type="market",
                 reasoning="enter from multi timeframe",
             )
-        return ctx.trading.submit_intent(
+        return ctx.trading.close_position(
             market=market,
-            side="sell",
-            size=0,
-            size_unit="base",
-            order_type="market",
-            reasoning="exit from portfolio mirror",
+            side="long",
+            reasoning_ref="exit from portfolio mirror",
         )
 
     cfg = load_config(
@@ -153,7 +171,9 @@ def test_backtest_engine_exposes_requested_timeframes_and_policy():
         overrides={"tf": "5m", "timeframes": ["1h"], "warmup_bars": 0, "window_days": 30},
     )
     fast = [_bar(1_700_000_000 + i * 300, 100 + i) for i in range(6)]
-    trend = [_bar(1_700_000_000 + i * 3600, 100 + i * 2) for i in range(2)]
+    # Include a genuinely closed prior hourly candle. The candle opening at
+    # the first 5m tick must not leak its completed hour into that tick.
+    trend = [_bar(1_700_000_000 + i * 3600, 100 + i * 2) for i in range(-1, 2)]
     result = run_backtest(
         None,
         cfg,
@@ -430,30 +450,32 @@ def test_backtest_falls_back_to_available_short_real_timeframe(
         if interval == "1h":
             return []
         if interval == "5m":
-            start = int(time.time()) - (299 * 300)
-            return [_bar(start + (i * 300), 1.0 + i * 0.001) for i in range(300)]
+            start = (int(time.time()) // 300 - 300) * 300
+            return [_bar(start + (i * 300), 10.0 + i * 0.001) for i in range(300)]
         return []
 
     monkeypatch.setattr(data_cache, "fetch_candles", fake_fetch_candles)
-
+    from nerya.core import yaml_io
+    yaml_io.dump(tmp_path / "fallback.yml", {"window_days": 7, "allow_timeframe_fallback": True, "coverage_policy": "allow_partial"})
     out = run_strategy_backtest(
         proposal_id=generated.proposal.id,
         workspace=tmp_path,
         allow_mock=False,
+        config_path="fallback.yml",
     )
 
     assert out["ok"] is True
-    assert out["coverage_ok"] is True
-    assert out["recommended_coverage_ok"] is True
+    assert out["coverage_ok"] is False
+    assert out["recommended_coverage_ok"] is False
     assert out["primary_timeframe"] == "5m"
     assert out["requested_primary_timeframe"] == "1h"
     assert out["attempted_timeframes"] == ["1h", "5m"]
     assert out["timeframe_fallback"] is True
-    assert seen_intervals == ["1h", "5m"]
+    assert set(seen_intervals) == {"1h", "5m"}
     assert seen_counts[0] < 300
     assert seen_starts
     assert out["requested_window_days"] == 7.0
-    assert "Short-lived meme/on-chain window policy applied" in out["coverage_message"]
+    assert "NOT a complete" in out["coverage_message"]
     assert "Requested primary timeframe 1h" in out["coverage_message"]
 
 
@@ -499,19 +521,22 @@ def test_backtest_falls_back_when_primary_timeframe_cannot_pass_warmup(
     ):
         del market, count, allow_mock, config_like
         seen_intervals.append(interval)
-        start = int(time.time()) - (200 * 300)
+        start = (int(time.time()) // 300 - 200) * 300
         if interval == "1h":
-            return [_bar(start + (i * 3600), 1.0 + i * 0.01) for i in range(12)]
+            start = start // 3600 * 3600
+            return [_bar(start + (i * 3600), 10.0 + i * 0.01) for i in range(12)]
         if interval == "5m":
-            return [_bar(start + (i * 300), 1.0 + i * 0.001) for i in range(180)]
+            return [_bar(start + (i * 300), 10.0 + i * 0.001) for i in range(180)]
         return []
 
     monkeypatch.setattr(data_cache, "fetch_candles", fake_fetch_candles)
-
+    from nerya.core import yaml_io
+    yaml_io.dump(tmp_path / "fallback.yml", {"window_days": 7, "allow_timeframe_fallback": True, "coverage_policy": "allow_partial"})
     out = run_strategy_backtest(
         proposal_id=generated.proposal.id,
         workspace=tmp_path,
         allow_mock=False,
+        config_path="fallback.yml",
     )
 
     assert out["ok"] is True
@@ -519,7 +544,7 @@ def test_backtest_falls_back_when_primary_timeframe_cannot_pass_warmup(
     assert out["requested_primary_timeframe"] == "1h"
     assert out["attempted_timeframes"] == ["1h", "5m"]
     assert out["timeframe_fallback"] is True
-    assert seen_intervals == ["1h", "5m"]
+    assert set(seen_intervals) == {"1h", "5m"}
 
 
 def test_backtest_candle_cache_passes_workspace_config_to_wallet_sources(
@@ -542,8 +567,8 @@ def test_backtest_candle_cache_passes_workspace_config_to_wallet_sources(
             }
         )
         return [
-            {"ts": 1_700_000_000, "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},
-            {"ts": 1_700_003_600, "open": 2, "high": 3, "low": 2, "close": 3, "volume": 11},
+            {"ts": 1_700_006_400, "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},
+            {"ts": 1_700_010_000, "open": 2, "high": 3, "low": 2, "close": 3, "volume": 11},
         ]
 
     monkeypatch.setattr(data_cache, "fetch_candles", fake_fetch_candles)
@@ -551,8 +576,8 @@ def test_backtest_candle_cache_passes_workspace_config_to_wallet_sources(
     rows = data_cache.get_candles(
         "BYREAL_ONCHAIN:solana:token",
         "1h",
-        1_699_999_999,
-        1_700_004_000,
+        1_700_006_400,
+        1_700_013_599,
         tmp_path / "cache",
         allow_mock=False,
         config_like=cfg,
@@ -683,6 +708,104 @@ def test_strategy_backtest_handler_returns_display_metrics_to_model(monkeypatch,
     assert data["metrics"]["total_return_pct"] == "0.0274%"
     assert data["metrics_are_display_strings"] is True
     assert data["raw_metrics_file"].endswith("metrics.json")
+    assert "warmup" in data["bar_accounting"]["note"]
+
+
+def test_strategy_backtest_handler_preserves_candidate_backtest_defaults_unless_explicitly_overridden(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from nerya.skills.builtin.backtest.scripts import backtest_run
+    from nerya.tools.native.strategy_runtime import strategy_backtest_handler
+    from nerya.tools.types import ToolCall
+
+    paths = WorkspacePaths(root=tmp_path)
+    proposal = create_proposal(
+        paths,
+        kind="strategy_package_proposal",
+        summary="authoritative backtest defaults",
+        extra_files={
+            "after/strategies/s1/strategy.yml": (
+                "version: 1\n"
+                "strategy_id: s1\n"
+                "title: fixture\n"
+                "mode: paper\n"
+                "entrypoint: main.py:run\n"
+                "markets: [BINANCE:BTCUSDT]\n"
+                "accounts: [fixture]\n"
+                "policy:\n  allow_direct_order: true\n  max_open_positions: 10\n"
+                "backtest:\n"
+                "  window_days: 365\n"
+                "  tf: 4h\n"
+                "  timeframes: [4h]\n"
+                "  warmup_bars: 200\n"
+                "  max_open_trades: 10\n"
+                "  allow_short: false\n"
+                "  data_mode: local\n"
+                "  coverage_policy: strict\n"
+                "  slip_bps_by_venue: {BINANCE: 5}\n"
+            ),
+            "after/strategies/s1/main.py": "def run(ctx):\n    return ctx.result.hold(reason='fixture')\n",
+        },
+    )
+
+    seen: list[dict] = []
+
+    def fake_backtest(**kwargs):
+        seen.append(kwargs)
+        return {
+            "ok": True,
+            "strategy_id": "s1",
+            "proposal_id": proposal.id,
+            "backtest_ts": "20260927_010203",
+            "metrics_path": str(tmp_path / "metrics.json"),
+            "metrics": {"total_return_pct": 0.0},
+            "metrics_display": {"total_return_pct": "0.0000%"},
+            "operator_summary_text": "fixture",
+        }
+
+    monkeypatch.setattr(backtest_run, "run_strategy_backtest", fake_backtest)
+    hallucinated = {
+        "window_days": 30,
+        "start_utc": "2026-08-01",
+        "end_utc": "2026-09-01",
+        "tf": "1h",
+        "timeframes": ["1h"],
+        "warmup_bars": 12,
+        "max_open_trades": 1,
+        "allow_short": True,
+        "coverage_policy": "allow_partial",
+        "data_mode": "download",
+        "slip_bps_by_venue": {"BINANCE": 1},
+        "max_run_seconds": 123,
+    }
+    result = strategy_backtest_handler(
+        ToolCall(name="strategy_backtest", arguments={
+            "proposal_id": proposal.id,
+            "settings": hallucinated,
+            "data_mode": "download",
+        }),
+        config=Config(paths=paths),
+    )
+    assert seen[0]["settings"] == {"max_run_seconds": 123}
+    assert seen[0]["data_mode"] is None
+    data = result.content[0].data
+    assert data["candidate_backtest_defaults_applied"] is True
+    assert set(data["ignored_candidate_backtest_overrides"]) >= {
+        "window_days", "start_utc", "end_utc", "tf", "timeframes",
+        "warmup_bars", "max_open_trades", "allow_short", "coverage_policy",
+        "data_mode", "slip_bps_by_venue", "data_mode(top_level)",
+    }
+
+    strategy_backtest_handler(
+        ToolCall(name="strategy_backtest", arguments={
+            "proposal_id": proposal.id,
+            "settings": hallucinated,
+            "override_candidate_backtest_defaults": True,
+        }),
+        config=Config(paths=paths),
+    )
+    assert seen[1]["settings"] == hallucinated
 
 
 def test_strategy_backtest_handler_surfaces_custom_replay_report(
@@ -1555,11 +1678,13 @@ def test_binance_vision_cache_fallback_reads_daily_zip(monkeypatch, tmp_path: Pa
         "BINANCE:BTCUSDT",
         "5m",
         1_777_593_600,
-        1_777_594_200,
+        1_777_594_199,
         tmp_path,
     )
     assert [row["close"] for row in rows] == [100.5, 101.5]
-    assert (tmp_path / "candles" / "BINANCE" / "BTCUSDT" / "5m" / "1777593600_1777594200.parquet").exists()
+    from nerya.data.history_store import HistoryStore
+    assert HistoryStore(tmp_path).inventory()[0]["rows"] == 2
+    assert not list(tmp_path.rglob("*.parquet"))
 
 
 def test_binance_vision_uses_bounded_request_timeout_and_source_fallback(
@@ -1577,8 +1702,8 @@ def test_binance_vision_uses_bounded_request_timeout_and_source_fallback(
     def fake_fetch_candles(market, *, count, interval, allow_mock, config_like=None, **_kwargs):
         del market, count, interval, allow_mock, config_like
         return [
-            {"ts": 1_700_000_000, "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},
-            {"ts": 1_700_003_600, "open": 2, "high": 3, "low": 2, "close": 3, "volume": 11},
+            {"ts": 1_700_006_400, "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},
+            {"ts": 1_700_010_000, "open": 2, "high": 3, "low": 2, "close": 3, "volume": 11},
         ]
 
     monkeypatch.setenv("NERYA_BACKTEST_BINANCE_VISION_REQUEST_TIMEOUT_SECONDS", "0.1")
@@ -1589,8 +1714,8 @@ def test_binance_vision_uses_bounded_request_timeout_and_source_fallback(
     rows = get_candles(
         "BINANCE:BTCUSDT",
         "1h",
-        1_700_000_000,
-        1_700_004_000,
+        1_700_006_400,
+        1_700_013_599,
         tmp_path,
         allow_mock=False,
     )

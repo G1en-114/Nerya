@@ -1,4 +1,5 @@
 "use client";
+import { copy as i18nCopy } from "../lib/i18n";
 
 import { useRef, type ReactNode } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
@@ -15,7 +16,7 @@ export function ActionMenu({ label, items, disabled }: { label: string; items: (
   const actions = items.filter((item): item is MenuAction => Boolean(item));
   return <Menu.Root>
     <Menu.Trigger asChild><button type="button" className="btn btn-ghost" aria-label={label} disabled={disabled || !actions.length}>
-      {zh ? "操作" : "Actions"}<ChevronDownIcon size={13} />
+      {i18nCopy(zh, "copy.components_ActionMenu.001")}<ChevronDownIcon size={13} />
     </button></Menu.Trigger>
     <Menu.Portal><Menu.Content className="ui-select-menu" align="end" sideOffset={6} collisionPadding={8}
       onCloseAutoFocus={() => {

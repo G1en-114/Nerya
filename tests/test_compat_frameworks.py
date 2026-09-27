@@ -146,12 +146,11 @@ class FakeState:
 
 
 def _fake_ctx(candles: list[dict], *, limit: int = 990):
-    # The REAL MockTrading: backtest replay answers submit_intent with a
-    # terminal paper-equivalent "filled" envelope (the only status the
-    # adapters treat as executed), so these unit tests exercise the same
-    # contract the engine provides — no fake bridge in between.
+    # Queued replay receipts are not terminal fills. Tests explicitly settle
+    # orders before presenting the authoritative position to the next tick.
     state = FakeState()
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
+        runmode="backtest",
         market=SimpleNamespace(
             candles=lambda market, *a, timeframe="1m", limit=limit, **kw: list(candles)[-limit:]
         ),
@@ -166,6 +165,22 @@ def _fake_ctx(candles: list[dict], *, limit: int = 990):
         result=ResultBuilder(),
         config=SimpleNamespace(mode="paper", markets=("PAPER:BTCUSDT",)),
     )
+    ctx.portfolio = SimpleNamespace(position=lambda market: ctx.state.get(f"position:{market}"))
+    return ctx
+
+
+def _settle_entry(ctx, candles):
+    from nerya.skills.builtin.backtest.scripts.engine import settle
+    from nerya.skills.builtin.backtest.scripts.portfolio import PortfolioState
+    from nerya.skills.builtin.backtest.scripts.config import load_config
+    market = "PAPER:BTCUSDT"
+    next_bar = {**candles[-1], "ts": candles[-1]["ts"] + 3600, "open": candles[-1]["close"]}
+    portfolio = PortfolioState(10000)
+    fills, rejects = settle(ctx.trading.pending_orders, {market: candles[-1]}, {market: next_bar}, portfolio,
+        load_config(markets=[market], overrides={"fee_bps_by_venue": {"PAPER": 0}, "slip_bps_by_venue": {"PAPER": 0}}))
+    assert fills and not rejects
+    position = portfolio.position(market)
+    ctx.state.set(f"position:{market}", {"size": position.qty, "avg_price": position.avg_price})
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +320,9 @@ def test_freqtrade_adapter_entry_then_roi_exit(tmp_path: Path) -> None:
     assert intent["side"] == "buy"
     assert intent["plan_action"] == "open_position"
     assert intent["size_unit"] == "usd"
-    assert result.status is StrategyResultStatus.FILLED
+    assert result.status is StrategyResultStatus.SUBMITTED
+    assert not ctx.portfolio.position("PAPER:BTCUSDT")
+    _settle_entry(ctx, candles)
 
     # Tick again on the same candles — must NOT duplicate the entry.
     ctx2 = _fake_ctx(candles)
@@ -322,7 +339,7 @@ def test_freqtrade_adapter_entry_then_roi_exit(tmp_path: Path) -> None:
     exit_intent = ctx3.trading.pending_orders[0]
     assert exit_intent["side"] == "sell"
     assert exit_intent["plan_action"] == "close_position"
-    assert result3.status is StrategyResultStatus.FILLED
+    assert result3.status is StrategyResultStatus.SUBMITTED
 
 
 def test_freqtrade_adapter_stoploss_exit(tmp_path: Path) -> None:
@@ -338,6 +355,7 @@ def test_freqtrade_adapter_stoploss_exit(tmp_path: Path) -> None:
     assert ctx.trading.pending_orders
 
     # Crash below the -10% stoploss.
+    _settle_entry(ctx, candles)
     crash = _candles(closes + [closes[-1] * 0.80])
     ctx2 = _fake_ctx(crash)
     ctx2.state = ctx.state
@@ -376,7 +394,7 @@ def _load_vnpy_strategy(tmp_path: Path):
     )
 
 
-def test_vnpy_adapter_init_then_short_and_recover(tmp_path: Path) -> None:
+def test_vnpy_adapter_rejects_unsupported_replay_limits_without_phantom_positions(tmp_path: Path) -> None:
     from nerya.strategies.compat.vnpy_adapter import run_vnpy_tick
 
     strategy = _load_vnpy_strategy(tmp_path)
@@ -392,15 +410,15 @@ def test_vnpy_adapter_init_then_short_and_recover(tmp_path: Path) -> None:
     # Warmup happened before trading=True → no orders during init.
     assert ctx.trading.pending_orders == []
 
-    # New rising bar keeps the long position alive via a fresh buy.
+    # VNpy requests a limit order. The OHLCV engine must not silently turn
+    # it into a filled market order, even when the adapter catches the error.
     candles2 = _candles(closes + [closes[-1] + 1.0], step_s=60)
     ctx2 = _fake_ctx(candles2)
     ctx2.state = ctx.state
     run_vnpy_tick(ctx2, strategy, market="PAPER:BTCUSDT", settings=settings)
-    assert ctx2.trading.pending_orders, "expected a long entry on the new bar"
-    assert ctx2.trading.pending_orders[0]["side"] == "buy"
-    assert ctx2.trading.pending_orders[0]["plan_action"] == "open_position"
-    assert ctx2.trading.pending_orders[0]["size_unit"] == "base"
+    assert not ctx2.trading.pending_orders
+    assert ctx2.trading.attempts and all(row["phase"] == "error" for row in ctx2.trading.attempts)
+    assert all(row["error_kind"] == "BacktestUnsupportedSurfaceError" for row in ctx2.trading.attempts)
 
     # Rolling over → dead cross over two new bars in one tick: first
     # the long is closed, then a short is opened.
@@ -409,13 +427,10 @@ def test_vnpy_adapter_init_then_short_and_recover(tmp_path: Path) -> None:
     ctx3 = _fake_ctx(candles3)
     ctx3.state = ctx.state
     run_vnpy_tick(ctx3, strategy, market="PAPER:BTCUSDT", settings=settings)
-    actions = [(i["side"], i["plan_action"]) for i in ctx3.trading.pending_orders]
-    assert actions == [
-        ("sell", "close_position"), # dead cross closes the long
-        ("sell", "open_position"),  # then opens the short
-    ]
+    assert not ctx3.trading.pending_orders
+    assert ctx3.trading.attempts
     state3 = ctx3.state.get("_compat_vnpy")
-    assert state3["pos"] == -1
+    assert state3["pos"] == 0
 
 
 def test_vnpy_adapter_no_new_bars_hold(tmp_path: Path) -> None:
@@ -496,8 +511,8 @@ def test_import_freqtrade_and_backtest(tmp_path: Path) -> None:
     assert metrics["total_trades"] > 0, metrics
     assert metrics["final_equity_usd"] > 0
 
-    # R3S1: the mock's terminal "filled" envelopes must let the imported
-    # strategy register its position and manage its own exits. A replay
+    # Actual engine settlement, not optimistic filled envelopes, must let
+    # the imported strategy track positions and manage its own exits. A replay
     # whose only exit is an engine forced_close means the adapter never
     # tracked a position (the pre-fix failure mode).
     managed_exits = [

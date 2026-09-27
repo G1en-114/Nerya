@@ -50,15 +50,13 @@ _CAPABILITIES = WalletCapabilities(
     ),
     quote=WalletCapability(
         supported=True, status="real",
-        note="GET /api/v5/dex/aggregator/quote.",
+        note="GET /api/v6/dex/aggregator/quote with resolved token decimals.",
     ),
     swap=WalletCapability(
         supported=True, status="partial",
         note=(
-            "Returns an unsigned transaction from /api/v5/dex/aggregator/swap. "
-            "An operator must broadcast the raw tx via "
-            "connectors.evm_native.send_raw_transaction; Nerya does not sign "
-            "or broadcast automatically."
+            "Builds exact-input swaps with the v6 aggregator. With signer_ref and chain RPC, "
+            "signs, broadcasts and reads transaction receipts after operator approval."
         ),
     ),
     market_data=WalletCapability(
@@ -68,15 +66,14 @@ _CAPABILITIES = WalletCapabilities(
     execution_profile="partial",
     chains=("ethereum", "bsc", "polygon", "arbitrum", "base", "solana"),
     notes=(
-        "Full quote path is production-grade. Swap is quote+unsigned-tx only "
-        "until an operator-approved signer pipeline is wired in."
+        "Read readiness is separate from signer/RPC readiness. Without a signer, swap remains unsigned."
     ),
 )
 
 
-_BASE_URL = "https://www.okx.com"
-_QUOTE_PATH = "/api/v5/dex/aggregator/quote"
-_SWAP_PATH = "/api/v5/dex/aggregator/swap"
+_BASE_URL = "https://web3.okx.com"
+_QUOTE_PATH = "/api/v6/dex/aggregator/quote"
+_SWAP_PATH = "/api/v6/dex/aggregator/swap"
 _BALANCE_PATH = "/api/v5/wallet/asset/total-value-by-address"
 _TOKEN_BALANCES_PATH = "/api/v5/wallet/asset/token-balances"
 _MARKET_CANDLES_PATH = "/api/v6/dex/market/candles"
@@ -208,7 +205,8 @@ class OkxOsWallet(WalletProvider):
         )
 
     def capabilities(self) -> WalletCapabilities:
-        return _CAPABILITIES
+        from dataclasses import replace
+        return replace(_CAPABILITIES,swap_chains=_CAPABILITIES.chains,minimum_output='enforced',receipt_polling=True)
 
     # ------------------------------------------------------------------
     def _signed_get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -234,6 +232,8 @@ class OkxOsWallet(WalletProvider):
             raise WalletTransportError(
                 f"OKX OS {path} returned {status}: {doc}"
             )
+        if isinstance(doc,dict) and str(doc.get('code','0')) != '0':
+            raise WalletQuoteError(f"OKX API error {doc.get('code')}: {doc.get('msg','request rejected')}")
         return doc if isinstance(doc, dict) else {"raw": doc}
 
     def _cli_token_klines(
@@ -490,28 +490,36 @@ class OkxOsWallet(WalletProvider):
             balance=balance, symbol=symbol, decimals=decimals,
         )
 
-    @staticmethod
-    def _decimals_kw(kw: dict[str, Any], name: str) -> tuple[int, bool]:
-        """Parse a ``decimals_in`` / ``decimals_out`` kwarg.
+    def _decimals(self, chain, token, kw, name):
+        from ...connectors.evm_native import EVMNative, EVM_CHAIN_IDS
+        from ...connectors.solana_native import SolanaNative
+        if name in kw and kw[name] is not None:
+            value = int(kw[name])
+            if not 0 <= value <= 36:
+                raise WalletQuoteError("token decimals must be in [0,36]")
+            return value
+        if token.lower() in ('native','eth','bnb','sol','0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'):
+            return 9 if chain.lower() in ('sol','solana') else 18
+        if token == 'So11111111111111111111111111111111111111112':
+            return 9
+        rpc = (self.config.get('rpc_urls') or {}).get(chain)
+        if not rpc:
+            raise WalletQuoteError(f'{name} unavailable; configure an RPC or supply verified token decimals')
+        if chain in ('sol','solana'):
+            return SolanaNative(rpc_url=rpc).get_mint_decimals(token)
+        return EVMNative(chain=chain,chain_id=EVM_CHAIN_IDS[chain],rpc_url=rpc).get_erc20_decimals(token)
 
-        Returns ``(value, assumed)``. When the caller omits the kwarg the
-        EVM default of 18 is applied and ``assumed`` is True so callers
-        can surface the assumption via ``extra["decimals_assumed"]``.
-        Explicit ``0`` is honoured (the previous ``or 18`` silently
-        turned 0-decimal tokens into 18-decimal ones).
-        """
-        raw = kw.get(name)
-        if raw is None:
-            return 18, True
-        try:
-            val = int(raw)
-        except (TypeError, ValueError) as exc:
-            raise WalletError(
-                f"OKX OS: {name} must be an integer, got {raw!r}"
-            ) from exc
-        if val < 0:
-            raise WalletError(f"OKX OS: {name} must be >= 0, got {val}")
-        return val, False
+    @staticmethod
+    def _token_address(chain, token):
+        if token.lower() in ('native','sol','eth','bnb'):
+            return ('So11111111111111111111111111111111111111112' if chain in ('sol','solana')
+                    else '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')
+        return token
+
+    def _signer_wallet(self):
+        from .self_custody import SelfCustodyWallet
+        return SelfCustodyWallet(workspace=self.workspace,signer_ref=str(self.config.get('signer_ref') or ''),
+                                 rpc_urls=self.config.get('rpc_urls') or {},config=self.config)
 
     def quote(
         self, *, chain: str, token_in: str, token_out: str,
@@ -520,14 +528,13 @@ class OkxOsWallet(WalletProvider):
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
-        dec_in, dec_in_assumed = self._decimals_kw(kw, "decimals_in")
-        dec_out, dec_out_assumed = self._decimals_kw(kw, "decimals_out")
+        dec_in = self._decimals(chain,token_in,kw,"decimals_in")
+        dec_out = self._decimals(chain,token_out,kw,"decimals_out")
         doc = self._signed_get(_QUOTE_PATH, {
-            "chainId": self._chain_index(chain),
-            "fromTokenAddress": token_in,
-            "toTokenAddress": token_out,
+            "chainIndex": str(self._chain_index(chain)),
+            "fromTokenAddress": self._token_address(chain,token_in),
+            "toTokenAddress": self._token_address(chain,token_out),
             "amount": str(to_base_units(amount_in, dec_in)),
-            "slippage": str(slippage_bps / 10_000),
         })
         data = (doc.get("data") or [{}])[0]
         try:
@@ -541,17 +548,13 @@ class OkxOsWallet(WalletProvider):
                 f"OKX OS quote returned no positive output amount for "
                 f"{token_in} -> {token_out}: {str(data)[:256]}"
             )
-        extra: dict[str, Any] = {"raw": data}
-        if dec_in_assumed or dec_out_assumed:
-            # No on-chain decimals lookup here by design; tell downstream
-            # that 18 was assumed rather than fetched.
-            extra["decimals_assumed"] = 18
+        extra = {"real_quote":True,"decimals_in":dec_in,"decimals_out":dec_out}
         return WalletQuote(
             provider=self.id, chain=chain,
             token_in=token_in, token_out=token_out,
             amount_in=float(amount_in),
             expected_out=expected,
-            min_out=expected * (1.0 - slippage_bps / 10_000),
+            min_out=(int(data['toTokenAmount'])*(10000-slippage_bps)//10000)/(10**dec_out),
             slippage_bps=slippage_bps,
             extra=extra,
         )
@@ -570,54 +573,102 @@ class OkxOsWallet(WalletProvider):
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
-        if not receiver:
+        if not receiver and not self.config.get('signer_ref'):
             raise WalletPolicyDenied("OKX OS swap requires a receiver address")
-        dec_in, _ = self._decimals_kw(kw, "decimals_in")
-        dec_out, dec_out_assumed = self._decimals_kw(kw, "decimals_out")
+        dec_in = self._decimals(chain,token_in,kw,"decimals_in")
+        dec_out = self._decimals(chain,token_out,kw,"decimals_out")
+        signer = self._signer_wallet() if self.config.get('signer_ref') else None
+        if signer:
+            # Caller precision may be useful for read-only quotes, but signing
+            # must verify it against the selected chain.
+            for token, supplied in ((token_in,dec_in),(token_out,dec_out)):
+                actual_decimals=self._decimals(chain,token,{},'decimals')
+                if actual_decimals != supplied:
+                    raise WalletPolicyDenied('token decimals changed; request a verified quote')
+        key = signer._resolve_signer_key() if signer else ''
+        if key:
+            if chain in ('solana','sol'):
+                from ...connectors.solana_native import _pubkey_from_signer
+                owner = _pubkey_from_signer(key)
+            else:
+                from eth_account import Account
+                owner = Account.from_key(key).address
+            if receiver and (receiver != owner if chain in ('solana','sol') else receiver.lower()!=owner.lower()):
+                raise WalletPolicyDenied('receiver must match the selected signing wallet')
+            receiver = owner
         doc = self._signed_get(_SWAP_PATH, {
-            "chainId": self._chain_index(chain),
-            "fromTokenAddress": token_in,
-            "toTokenAddress": token_out,
-            "amount": str(to_base_units(amount_in, dec_in)),
-            "slippage": str(slippage_bps / 10_000),
-            "userWalletAddress": receiver,
+            "chainIndex": str(self._chain_index(chain)), "fromTokenAddress":self._token_address(chain,token_in),
+            "toTokenAddress":self._token_address(chain,token_out),"amount":str(to_base_units(amount_in,dec_in)),
+            "slippagePercent":str(slippage_bps/100),"userWalletAddress":receiver,
+            "swapMode":"exactIn","autoSlippage":"false",
         })
         data = (doc.get("data") or [{}])[0]
         tx = data.get("tx") or {}
-        # Only a real broadcast produces a tx hash. The aggregator's `tx`
-        # object (data/to/gasPrice) is unsigned calldata, not a receipt —
-        # never report ok=True for it.
-        tx_hash = str(data.get("tx_hash") or tx.get("hash") or "")
-        amount_out = float(data.get("toTokenAmount") or 0) / 10 ** dec_out
-        extra: dict[str, Any] = {
-            "unsigned_tx": tx,
-            "raw": data,
-            "note": "quote/swap assembled but not broadcast — requires a signer",
-        }
-        if dec_out_assumed:
-            extra["decimals_assumed"] = 18
-        min_out_requested = kw.get("min_out")
-        if min_out_requested is not None:
-            try:
-                extra["min_out_requested"] = float(min_out_requested)
-            except (TypeError, ValueError):
-                pass
-        # The OKX aggregator swap endpoint expresses only `slippage`; it
-        # has no minOut parameter. Record the approved floor and compute
-        # the honest expected floor from the returned quote instead of
-        # pretending the API enforced it.
-        extra["amount_out_min"] = amount_out * (1.0 - slippage_bps / 10_000)
-        return WalletSwapResult(
-            provider=self.id, chain=chain,
-            ok=bool(tx_hash),
-            tx_hash=tx_hash,
-            amount_in=float(amount_in),
-            amount_out=amount_out,
-            reason=(
-                "" if tx_hash
-                else "unsigned tx only — OKX OS returned no broadcast hash; "
-                     "an approved signer must broadcast via "
-                     "connectors.evm_native.send_raw_transaction"
-            ),
-            extra=extra,
-        )
+        router = data.get('routerResult') or data
+        expected = float(router.get('toTokenAmount') or 0)/(10**dec_out)
+        if not signer:
+            return WalletSwapResult(provider=self.id,chain=chain,ok=False,amount_in=float(amount_in),
+                reason='unsigned tx only; configure signer_ref and rpc_urls to execute',
+                extra={'unsigned_tx':tx,'confirmed':False,'expected_out':expected})
+        from ..amounts import to_base_units_ceil
+        approved = to_base_units_ceil(kw.get('min_out') or 0,dec_out)
+        minimum = int(tx.get('minReceiveAmount') or router.get('minReceiveAmount') or
+                      (int(router.get('toTokenAmount') or 0)*(10000-slippage_bps)//10000))
+        if minimum <= 0 or minimum < approved:
+            raise WalletPolicyDenied('OKX executable minimum is missing or below the approved floor')
+        try:
+            if chain in ('sol','solana'):
+                from ...connectors.solana_native import SolanaNative
+                conn = signer._solana_connector(live=True)
+                import base58,base64
+                # OKX's Solana swap contract returns tx.data in base58.
+                encoded = base64.b64encode(base58.b58decode(tx.get('data') or '')).decode()
+                out = conn.send_swap_transaction(encoded,key,output_mint=self._token_address(chain,token_out),user_public_key=receiver,
+                    on_broadcast=kw.get('on_broadcast'))
+                actual = out.get('amount_out')
+                return WalletSwapResult(provider=self.id,chain=chain,ok=bool(out.get('confirmed')) and actual is not None,
+                    tx_hash=out.get('signature') or '',amount_in=float(amount_in),amount_out=float(actual or 0),
+                    extra={'confirmed':bool(out.get('confirmed')),'amount_out_source':'transaction_meta' if actual is not None else 'unknown'})
+            from ...connectors.evm_native import EVMNative,EVM_CHAIN_IDS
+            from ..receipts import token_received, native_received
+            rpc = (self.config.get('rpc_urls') or {}).get(chain)
+            if not rpc:
+                raise WalletPolicyDenied('OKX signing requires an explicit chain RPC')
+            conn = EVMNative(chain=chain,chain_id=EVM_CHAIN_IDS[chain],rpc_url=rpc,live=True)
+            sender = tx.get('from')
+            if sender and sender.lower()!=receiver.lower():
+                raise WalletPolicyDenied('OKX transaction sender mismatch')
+            native_in = token_in.lower() in ('native','eth','bnb','0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')
+            native_out = token_out.lower() in ('native','eth','bnb','0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')
+            value = int(str(tx.get('value') or '0'),0) if str(tx.get('value') or '0').startswith('0x') else int(tx.get('value') or 0)
+            if value > (to_base_units(amount_in,dec_in) if native_in else 0):
+                raise WalletPolicyDenied('OKX transaction value exceeds approved input')
+            if not native_in:
+                approval = self._signed_get('/api/v6/dex/aggregator/approve-transaction',{
+                    'chainIndex':str(self._chain_index(chain)),'tokenContractAddress':token_in,
+                    'approveAmount':str(to_base_units(amount_in,dec_in))})
+                item=(approval.get('data') or [{}])[0]
+                spender=item.get('dexContractAddress') or item.get('spenderAddress')
+                if not spender or len(spender)!=42:
+                    raise WalletPolicyDenied('OKX approval spender unavailable')
+                from ...connectors.bsc_native import BSCNative
+                helper=BSCNative(chain=chain,chain_id=EVM_CHAIN_IDS[chain],rpc_url=rpc,live=True)
+                allowed=helper.get_erc20_allowance(token_in,receiver,spender,decimals=dec_in)
+                if to_base_units(allowed,dec_in)<to_base_units(amount_in,dec_in):
+                    out=helper.approve(token=token_in,spender=spender,amount=to_base_units(amount_in,dec_in),
+                        signer_private_key=key,on_broadcast=kw.get('on_broadcast'))
+                    if not out.get('confirmed'):
+                        return WalletSwapResult(provider=self.id,chain=chain,ok=False,tx_hash=out.get('tx_hash',''),
+                            reason='allowance_confirmation_pending',extra={'confirmed':False,'phase':'approval'})
+            out=conn.send_raw_transaction(to=str(tx.get('to') or ''),data=str(tx.get('data') or ''),value=value,
+                signer_private_key=key,gas_limit=int(tx.get('gas') or 300000),
+                gas_price_gwei=float(tx['gasPrice'])/1e9 if tx.get('gasPrice') else None,
+                on_broadcast=(lambda tx:kw['on_broadcast']({**tx,'token_out':token_out,'decimals_out':dec_out,'receiver':receiver,'native_out':native_out})) if kw.get('on_broadcast') else None)
+            actual=(native_received(conn,out['tx_hash'],receiver) if native_out and out.get('confirmed')
+                    else None if native_out else token_received(out.get('receipt'),token_out,receiver,dec_out))
+            return WalletSwapResult(provider=self.id,chain=chain,ok=bool(out.get('confirmed')) and actual is not None,
+                tx_hash=out.get('tx_hash',''),amount_in=float(amount_in),amount_out=float(actual or 0),
+                extra={'confirmed':bool(out.get('confirmed')),'amount_out_source':('transaction_trace' if native_out else 'receipt') if actual is not None else 'unknown',
+                       'expected_out':expected})
+        finally:
+            key=''

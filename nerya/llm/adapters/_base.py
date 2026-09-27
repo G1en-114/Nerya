@@ -19,17 +19,113 @@ import contextvars
 import json
 import re
 import time
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from ...core import devmode
 from ...core.errors import LLMError
-from ..attempt_budget import claim_current_extra_attempt
+from ...harness.cancellation import raise_if_cancelled, is_cancelled
+from ..attempt_budget import claim_current_extra_attempt, current_attempt_budget
 from ..rate_limits import global_store, parse_rate_limit_headers
-from ..retry import is_retryable_status, jittered_backoff
+from ..retry import provider_retryable, retry_delay
 
 
 WireTraceCallback = Callable[[dict[str, Any]], None]
+_IO_CONTROL = contextvars.ContextVar("nerya_llm_io_control", default=(None, None))
+
+
+@contextlib.contextmanager
+def io_control(cancel_token=None, deadline=None):
+    token = _IO_CONTROL.set((cancel_token, deadline))
+    try:
+        raise_if_cancelled(cancel_token, deadline)
+        yield
+        raise_if_cancelled(cancel_token, deadline)
+    finally:
+        _IO_CONTROL.reset(token)
+
+
+@contextlib.contextmanager
+def _managed_urlopen(req, timeout):
+    """IO stays on the caller thread; cancellation shuts down its socket."""
+    import http.client
+    import socket
+    import urllib.error
+    import urllib.request
+
+    cancel, deadline = _IO_CONTROL.get()
+    raise_if_cancelled(cancel, deadline)
+    if cancel is None and deadline is None:
+        try:
+            response = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            yield response
+        return
+    sockets = []
+    done = threading.Event()
+
+    class HTTPConnection(http.client.HTTPConnection):
+        def connect(self):
+            super().connect()
+            sockets.append(self.sock)
+            raise_if_cancelled(cancel, deadline)
+
+    class HTTPSConnection(http.client.HTTPSConnection):
+        def connect(self):
+            self.sock = self._create_connection((self.host, self.port), self.timeout, self.source_address)
+            sockets.append(self.sock)
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            server_hostname = self.host
+            if self._tunnel_host:
+                self._tunnel()
+                server_hostname = self._tunnel_host
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname,
+                                                  do_handshake_on_connect=False)
+            sockets.append(self.sock)
+            raise_if_cancelled(cancel, deadline)
+            self.sock.do_handshake()
+
+    class HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, request):
+            return self.do_open(HTTPConnection, request)
+
+    class HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, request):
+            return self.do_open(HTTPSConnection, request, context=self._context)
+
+    def close_on_cancel():
+        while not done.wait(0.05):
+            if is_cancelled(cancel) or (deadline is not None and time.time() >= deadline):
+                for sock in list(sockets):
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                # DNS/connect may still be finishing. Keep watching until
+                # the caller unwinds; never claim a detached thread stopped.
+
+    watcher = threading.Thread(target=close_on_cancel, name="llm-io-cancel", daemon=False)
+    watcher.start()
+    try:
+        try:
+            response = urllib.request.build_opener(HTTPHandler(), HTTPSHandler()).open(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            raise_if_cancelled(cancel, deadline)
+            yield response
+            raise_if_cancelled(cancel, deadline)
+    except Exception:
+        raise_if_cancelled(cancel, deadline)
+        raise
+    finally:
+        done.set()
+        watcher.join()
+
+
 _WIRE_TRACE_CALLBACK: contextvars.ContextVar[WireTraceCallback | None] = (
     contextvars.ContextVar("nerya_llm_wire_trace_callback", default=None)
 )
@@ -133,6 +229,47 @@ _DEFAULT_HEADERS: dict[str, str] = {
 class UrllibTransport:
     """Standard-library HTTP client that emits / reads JSON. No third-party deps."""
 
+    def stream_json(self, url, *, headers, body, timeout, on_event):
+        """Read SSE data frames. A JSON response is explicitly non-streaming."""
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                     headers={**_DEFAULT_HEADERS, **headers, "Accept": "text/event-stream"})
+        try:
+            with _managed_urlopen(req, timeout) as response:
+                response_headers = {k.lower(): v for k, v in response.headers.items()}
+                if response.status >= 400 or "text/event-stream" not in response_headers.get("content-type", ""):
+                    raw = response.read().decode("utf-8", errors="replace")
+                    try:
+                        doc = json.loads(raw) if raw else {}
+                    except ValueError:
+                        doc = {"raw": raw}
+                    return response.status, doc, response_headers
+                data_lines = []
+                while True:
+                    raise_if_cancelled(*_IO_CONTROL.get())
+                    line = response.readline(1024 * 1024)
+                    if not line:
+                        raise LLMError("provider stream ended before [DONE]")
+                    line = line.decode("utf-8").rstrip("\r\n")
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                    elif not line and data_lines:
+                        data = "\n".join(data_lines)
+                        data_lines.clear()
+                        if data == "[DONE]":
+                            return response.status, {"stream_complete": True}, response_headers
+                        on_event(json.loads(data))
+        except urllib.error.HTTPError as exc:
+            with exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                try:
+                    doc = json.loads(raw)
+                except ValueError:
+                    doc = {"raw": raw}
+                return exc.code, doc, dict(exc.headers or {})
+
     def post_json(
         self,
         url: str,
@@ -188,7 +325,7 @@ class UrllibTransport:
         error_msg: str | None = None
         try:
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with _managed_urlopen(req, timeout) as resp:
                     raw = resp.read().decode("utf-8", errors="replace")
                     try:
                         doc = json.loads(raw) if raw else {}
@@ -228,8 +365,8 @@ class UrllibTransport:
 
 # =============================================================== retry + rate-limit helpers
 _DEFAULT_MAX_ATTEMPTS = 5
-_DEFAULT_BASE_DELAY = 0.5
-_DEFAULT_MAX_DELAY = 30.0
+_DEFAULT_BASE_DELAY = 2.0
+_DEFAULT_MAX_DELAY = 60.0
 
 
 def _rate_limit_key(api_key: str) -> str:
@@ -276,7 +413,14 @@ def _sleep_with_deadline(delay: float, deadline: float | None) -> None:
             )
         sleep_for = min(sleep_for, remaining)
     if sleep_for > 0:
-        time.sleep(sleep_for)
+        cancel, io_deadline = _IO_CONTROL.get()
+        if cancel is None and io_deadline is None:
+            time.sleep(sleep_for)
+        else:
+            until = time.monotonic() + sleep_for
+            while time.monotonic() < until:
+                raise_if_cancelled(cancel, io_deadline)
+                time.sleep(min(0.05, max(0.0, until - time.monotonic())))
 
 
 def _is_transient_provider_400(status: int, doc: dict[str, Any]) -> bool:
@@ -324,18 +468,23 @@ def _post_with_retry(
     back to plain ``post_json`` and skip header parsing. That keeps every
     existing ``FakeTransport`` in the test suite working unmodified.
     """
+    # The Agent owns observable/cancellable retries and its shared budget.
+    # Never multiply that loop by hidden transport attempts or reset backoff.
+    caller_owns_retries = current_attempt_budget() is not None
+    max_attempts = 1 if caller_owns_retries else max(1, int(max_attempts))
     supports_headers = hasattr(transport, "post_json_with_headers")
     store = global_store()
     key_fp = _rate_limit_key(api_key)
 
     wait_s = store.should_defer(provider_name, key_fp)
-    if wait_s > 0:
+    if wait_s > 0 and not caller_owns_retries:
         _sleep_with_deadline(min(wait_s, 5.0), deadline)
 
     last_status = 0
     last_doc: dict[str, Any] = {}
     last_headers: dict[str, str] = {}
     for attempt in range(1, max_attempts + 1):
+        raise_if_cancelled(*_IO_CONTROL.get())
         attempt_timeout = _timeout_for_deadline(
             timeout,
             deadline,
@@ -382,7 +531,7 @@ def _post_with_retry(
             if not claim_current_extra_attempt("transport_retry"):
                 raise
             _sleep_with_deadline(
-                jittered_backoff(
+                retry_delay(
                     attempt,
                     base_delay=base_delay,
                     max_delay=_DEFAULT_MAX_DELAY,
@@ -412,7 +561,7 @@ def _post_with_retry(
 
         if (
             not (
-                is_retryable_status(status)
+                provider_retryable(status, doc, resp_headers)
                 or _is_transient_provider_400(status, doc)
             )
             or attempt >= max_attempts
@@ -421,15 +570,13 @@ def _post_with_retry(
 
         if not claim_current_extra_attempt("transport_retry"):
             break
-        delay = jittered_backoff(attempt, base_delay=base_delay,
-                                   max_delay=_DEFAULT_MAX_DELAY)
-        retry_after = resp_headers.get("retry-after") if resp_headers else None
-        if retry_after:
-            try:
-                delay = max(delay, float(retry_after))
-            except (TypeError, ValueError):
-                pass
-        _sleep_with_deadline(min(delay, _DEFAULT_MAX_DELAY), deadline)
+        delay = retry_delay(attempt, base_delay=base_delay,
+                            max_delay=_DEFAULT_MAX_DELAY, headers=resp_headers)
+        remaining = _deadline_remaining(deadline)
+        if remaining is not None and delay >= remaining:
+            # Return the real upstream error, not a fabricated timeout/500.
+            break
+        _sleep_with_deadline(delay, deadline)
 
     return last_status, last_doc, last_headers
 

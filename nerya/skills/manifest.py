@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import hashlib
 import re as _re
 
 from ..core import yaml_io
@@ -140,6 +141,8 @@ class SkillManifest:
     tags: list[str] = field(default_factory=list)
     instructions: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    entry_file: str = "SKILL.md"
+    revision: str = ""
 
     def is_proposal_only(self) -> bool:
         """True when the manifest is a proposal-only scaffold."""
@@ -173,17 +176,20 @@ class SkillManifest:
         if not md_path.exists():
             raise SkillManifestError(f"missing SKILL.md: {md_path}")
         try:
-            text = md_path.read_text(encoding="utf-8")
+            text = md_path.read_bytes().decode("utf-8")
         except OSError as exc:
             raise SkillManifestError(f"cannot read {md_path}: {exc}") from exc
 
         doc, body = _split_frontmatter(text, source=md_path)
-        return cls._build(
+        manifest = cls._build(
             doc,
             body=body,
             source_path=md_path,
             actions={},
         )
+        manifest.entry_file = md_path.name
+        manifest.revision = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return manifest
 
     @classmethod
     def _build(

@@ -279,6 +279,8 @@ def _ensure_account_tradable(paths: WorkspacePaths, account_id: str) -> None:
         return
     if not bool(getattr(profile, "is_real_money", False)):
         return
+    if profile.kind in ("chain","dex") and profile.wallet_id:
+        return  # wallet swap gateway validates binding and provider at submission
     venue = str(getattr(profile, "venue", "") or "")
     try:
         from ..connectors.provider_spec import get_registry

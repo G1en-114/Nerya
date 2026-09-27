@@ -320,6 +320,9 @@ export interface BacktestPanel {
   id: string;
   type: string;
   title: string;
+  market?: string;
+  interval?: string;
+  gbs_count?: number;
   series: Array<{ kind: string; name?: string; data: Array<Record<string, unknown>> }>;
   annotations?: Array<Record<string, unknown>>;
   guides?: Array<Record<string, unknown>>;
@@ -1168,6 +1171,9 @@ export type KillSwitchView = {
 
 export type AccountProfileView = {
   id: string;
+  label?: string;
+  revision?: string;
+  provider_config?: Record<string, unknown>;
   mode: "paper" | "shadow" | "canary" | "live" | string;
   venue: string;
   kind: string;
@@ -2007,10 +2013,10 @@ export const clientApi = {
       content,
       reason: reason || "dashboard_write_file",
     }),
-  strategyBacktests: (strategyId: string) =>
+  strategyBacktests: (strategyId: string, proposalId?: string | null) =>
     post<{ ok: boolean; strategy_id: string; backtests: BacktestRunSummary[] }>(
       "/strategy/backtests",
-      { strategy_id: strategyId },
+      { strategy_id: strategyId, ...(proposalId ? { proposal_id: proposalId } : {}) },
     ),
   strategyBacktestChart: (strategyId: string, ts: string, proposalId?: string | null) =>
     post<BacktestChartEnvelope>("/strategy/backtests/chart", {
@@ -2083,7 +2089,10 @@ export const clientApi = {
     }>("/teams/role/get", { name }),
   agentsSave: (body: {
     name: string;
+    enabled?: boolean;
     prompt: string;
+    provider?: string;
+    model?: string;
     allowed_skills?: string[];
     tier?: "light" | "medium" | "high";
   }) =>
@@ -2268,6 +2277,23 @@ export const clientApi = {
   // ---- Account roster CRUD ----
   accountsList: () =>
     get<{ accounts: AccountSummary[]; ts: number }>("/accounts/list"),
+  accountsConnect: (body: {
+    id: string;
+    request_id: string;
+    operation: "create" | "update";
+    expected_revision?: string;
+    label?: string;
+    venue: string;
+    kind: string;
+    mode: string;
+    wallet_id?: string;
+    base_currency?: string;
+    subaccount?: string;
+    initial_balance_usd?: number;
+    credentials?: Record<string, string>;
+    provider_config?: Record<string, unknown>;
+    policy?: { mode: string; live_trading_enabled: boolean; permissions: Record<string, boolean>; limits: Record<string, number> };
+  }) => callApi<{ ok: boolean; verified?: boolean; replayed?: boolean; account?: AccountSummary; error?: string; fields?: string[] }>("/accounts/connect", { method: "POST", body }),
   accountsGet: (account_id: string) =>
     post<{ ok: boolean; account?: AccountSummary; error?: string }>(
       "/accounts/get",
@@ -4024,11 +4050,18 @@ export const clientApi = {
     ),
   sessionTranscript: (
     session_id: string,
-    opts?: { full?: boolean; max_pairs?: number; per_msg_cap?: number;anchor_message_id?:string },
+    opts?: { full?: boolean; max_pairs?: number; per_msg_cap?: number; anchor_message_id?: string;
+      /** External history uses complete calls/operator messages; default 60, max 200. */
+      limit?: number; before?: string; after?: string; anchor_call_id?: string; refresh_call_ids?: string[] },
   ) => {
     const qs = new URLSearchParams();
     qs.set("session_id", session_id);
     if(opts?.anchor_message_id)qs.set("anchor_message_id",opts.anchor_message_id);
+    if (opts?.anchor_call_id) qs.set("anchor_call_id", opts.anchor_call_id);
+    if (opts?.before) qs.set("before", opts.before);
+    if (opts?.after) qs.set("after", opts.after);
+    if (typeof opts?.limit === "number") qs.set("limit", String(opts.limit));
+    if (opts?.refresh_call_ids?.length) qs.set("refresh_call_ids", opts.refresh_call_ids.join(","));
     if (opts?.full) qs.set("full", "1");
     if (typeof opts?.max_pairs === "number") {
       qs.set("max_pairs", String(opts.max_pairs));
@@ -4039,6 +4072,21 @@ export const clientApi = {
     return get<{
       ok: boolean;
       has_more?: boolean;
+      pagination?: "external_calls_v1";
+      limit?: number;
+      next_before_cursor?: string | null;
+      has_newer?: boolean;
+      next_after_cursor?: string | null;
+      anchor_message_id?: string | null;
+      history_revision?: number;
+      read_at?: number;
+      reset_required?: boolean;
+      code?: string;
+      refreshed_messages?: Array<{
+        message_id: string; role: "user" | "assistant"; content: string; turn_id?: string; ts?: string | number;
+        meta?: Record<string, unknown>; turn?: Record<string, unknown> | null; history_key?: [number, number, string];
+      }>;
+      missing_call_ids?: string[];
       session_id: string;
       source?: string;
       strategy_id?: string | null;
@@ -4051,7 +4099,8 @@ export const clientApi = {
         role: "user" | "assistant";
         content: string;
         turn_id?: string;
-        ts?: string;
+        ts?: string | number;
+        history_key?: [number, number, string];
         meta?: Record<string, unknown>;
         turn?: Record<string, unknown> | null;
       }>;
@@ -4077,6 +4126,7 @@ export const clientApi = {
       item_count?: number;
       error?: string;
       note?: string;
+      resume?: {ok?: boolean; error?: string; command?: {command_id?: string; state?: string}} | null;
     }>("/approvals/callback", body),
 };
 

@@ -7,6 +7,7 @@ from typing import Any
 
 from ..core.config import Config
 from .registry import SkillRegistry
+from ..core.errors import SkillNotFoundError
 from .runtime import SkillRuntime
 
 
@@ -25,7 +26,12 @@ class SkillKernel:
     def call(self, skill_id: str, action: str, **kwargs) -> dict[str, Any]:
         return self.runtime.call(skill_id, action, **kwargs)
 
+    @property
+    def catalog_generation(self) -> str:
+        return self.registry.catalog_generation
+
     def list(self) -> list[dict[str, Any]]:
+        generation = self.catalog_generation
         out = []
         for e in self.registry.list():
             manifest = e.manifest
@@ -42,6 +48,8 @@ class SkillKernel:
                 "tags": list(manifest.tags or []),
                 "style": style,
                 "source": manifest.source,
+                "revision": manifest.revision,
+                "catalog_generation": generation,
                 "path": str(manifest.path) if manifest.path else "",
                 "has_playbook": bool(manifest.instructions),
                 "metadata": metadata,
@@ -67,45 +75,47 @@ class SkillKernel:
     def view(self, skill_id: str) -> dict[str, Any] | None:
         """Detailed skill view: manifest + agent-action map + path."""
 
-        for entry in self.registry.list():
-            manifest = entry.manifest
-            if manifest.id != skill_id:
-                continue
-            actions: list[dict[str, Any]] = []
-            for name, spec in manifest.actions.items():
-                actions.append({
-                    "name": name,
-                    "title": spec.title,
-                    "description": spec.description,
-                    "risk_gate": spec.risk_gate,
-                    "approval_gate": spec.approval_gate,
-                    "permissions": list(spec.permissions or []),
-                    "input_schema": spec.input_schema,
-                    "output_schema": spec.output_schema,
-                    "tags": list(spec.tags or []),
-                    "status": spec.status,
-                })
-            metadata = manifest.metadata or {}
-            nerya_meta = metadata.get("nerya") if isinstance(metadata, dict) else None
-            style = ""
-            if isinstance(nerya_meta, dict):
-                style = str(nerya_meta.get("style") or "")
-            return {
-                "id": manifest.id,
-                "title": manifest.title,
-                "version": manifest.version,
-                "description": manifest.description,
-                "source": manifest.source,
-                "permissions": list(manifest.permissions or []),
-                "actions": actions,
-                "tags": list(manifest.tags or []),
-                "status": manifest.status,
-                "path": str(manifest.path) if manifest.path else "",
-                "style": style,
-                "metadata": metadata,
-                "instructions": manifest.instructions or "",
-            }
-        return None
+        try:
+            selected = self.registry.get(skill_id)
+        except SkillNotFoundError:
+            return None
+        manifest = selected.manifest
+        actions: list[dict[str, Any]] = []
+        for name, spec in manifest.actions.items():
+            actions.append({
+                "name": name,
+                "title": spec.title,
+                "description": spec.description,
+                "risk_gate": spec.risk_gate,
+                "approval_gate": spec.approval_gate,
+                "permissions": list(spec.permissions or []),
+                "input_schema": spec.input_schema,
+                "output_schema": spec.output_schema,
+                "tags": list(spec.tags or []),
+                "status": spec.status,
+            })
+        metadata = manifest.metadata or {}
+        nerya_meta = metadata.get("nerya") if isinstance(metadata, dict) else None
+        style = ""
+        if isinstance(nerya_meta, dict):
+            style = str(nerya_meta.get("style") or "")
+        return {
+            "id": manifest.id,
+            "title": manifest.title,
+            "version": manifest.version,
+            "description": manifest.description,
+            "source": manifest.source,
+            "revision": manifest.revision,
+            "catalog_generation": self.catalog_generation,
+            "permissions": list(manifest.permissions or []),
+            "actions": actions,
+            "tags": list(manifest.tags or []),
+            "status": manifest.status,
+            "path": str(manifest.path) if manifest.path else "",
+            "style": style,
+            "metadata": metadata,
+            "instructions": manifest.instructions or "",
+        }
 
     def doctor(self) -> dict[str, Any]:
         """Self-check the registry: surface proposal-only skills, missing
@@ -176,7 +186,7 @@ class SkillKernel:
         }
 
     def reload(self) -> int:
-        """Re-read every skill manifest + actions module from disk.
+        """Re-read definitions and publish a new catalog generation.
 
         Used by ``nerya skill sync`` after an install/promote so the
         live process picks up new manifests without a restart.

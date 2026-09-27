@@ -58,6 +58,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import logging
+import re
 import sys
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -68,6 +69,7 @@ from ..core import yaml_io
 from ..core.errors import NeryaError, TradingError
 from ..core.paths import WorkspacePaths
 from .agent_task_mode import agent_task_requested
+from .documentation import documentation_errors
 from .package import StrategyPackage, _parse_manifest, load_package
 
 
@@ -415,10 +417,21 @@ def static_scan_blockers(
 
 def _validate_loaded(package: StrategyPackage, *, smoke_test: bool = True) -> StrategyValidation:
     issues: list[StrategyValidationIssue] = []
+    for rel in package.files:
+        if rel.endswith(".py") and not rel.startswith(("tests/", "fixtures/")):
+            try:
+                source = (package.root / rel).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue  # Existing source validation reports unreadable files.
+            issues.extend(StrategyValidationIssue(severity="blocker", code="script_documentation_invalid", message=message, where=rel) for message in documentation_errors(source))
 
     # Schema layer was already enforced when load_package returned —
     # but it doesn't check the cross-cuts we care about. Do those here.
     issues.extend(_manifest_placeholder_issues(package))
+    issues.extend(_manifest_backtest_issues(package))
+    from .configuration_contract import configuration_issues
+    issues.extend(StrategyValidationIssue(severity="blocker",code=code,message=message,where="strategy.yml")
+                  for code,message in configuration_issues(package.manifest))
     if (
         package.manifest.policy.allow_direct_order is False
         and not package.manifest.subagents
@@ -486,6 +499,30 @@ def _validate_loaded(package: StrategyPackage, *, smoke_test: bool = True) -> St
     )
 
 
+def _manifest_backtest_issues(package: StrategyPackage) -> list[StrategyValidationIssue]:
+    raw = package.manifest.extras.get("backtest")
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, dict):
+        return [StrategyValidationIssue(
+            severity="blocker",
+            code="backtest_config_invalid",
+            message="strategy.yml backtest must be a mapping of replay defaults",
+            where="strategy.yml",
+        )]
+    try:
+        from ..skills.builtin.backtest.scripts.config import BacktestConfig, BacktestConfigError
+        BacktestConfig.from_raw(raw)
+    except (BacktestConfigError, TypeError, ValueError) as exc:
+        return [StrategyValidationIssue(
+            severity="blocker",
+            code="backtest_config_invalid",
+            message=f"strategy.yml backtest invalid: {exc}",
+            where="strategy.yml",
+        )]
+    return []
+
+
 def _manifest_placeholder_issues(
     package: StrategyPackage,
 ) -> list[StrategyValidationIssue]:
@@ -533,9 +570,12 @@ def _static_scan_package(package: StrategyPackage) -> list[StrategyValidationIss
     is_agent_task = agent_task_requested(package.manifest)
     for py_path in sorted(package.root.rglob("*.py")):
         rel = py_path.relative_to(package.root).as_posix()
-        # Skip per-run state, etc.
-        first = rel.split("/", 1)[0]
-        if first in {"runs", "state", "versions", "reviews"}:
+        # Skip generated runtime evidence, never authored strategy source.
+        # In particular, ``backtests/research_backtest.py`` is a legitimate
+        # package script and must still validate, while
+        # ``backtests/20260927_060241/source/.../main.py`` is an immutable
+        # snapshot of a historical run and must not block a repaired candidate.
+        if _skip_generated_runtime_source(rel):
             continue
         try:
             source = py_path.read_text(encoding="utf-8")
@@ -562,9 +602,19 @@ def _static_scan_package(package: StrategyPackage) -> list[StrategyValidationIss
             )
             continue
         out.extend(_walk_ast(tree, where=rel))
-        if is_agent_task:
+        if is_agent_task and not rel.startswith("tests/"):
             out.extend(_agent_task_contract_issues(tree, where=rel))
     return out
+
+
+def _skip_generated_runtime_source(rel: str) -> bool:
+    parts = str(rel or "").replace("\\", "/").split("/")
+    first = parts[0] if parts else ""
+    if first in {"runs", "state", "versions", "reviews", "__pycache__"}:
+        return True
+    if first == "backtests" and len(parts) >= 2:
+        return bool(re.fullmatch(r"[0-9]{8}_[0-9]{6}", parts[1]))
+    return False
 
 
 def _walk_ast(tree: ast.AST, *, where: str) -> list[StrategyValidationIssue]:
@@ -574,6 +624,7 @@ def _walk_ast(tree: ast.AST, *, where: str) -> list[StrategyValidationIssue]:
     position_collection_names = _collect_position_collection_names(tree)
     market_aliases = _collect_strategy_market_aliases(tree)
     result_aliases = _collect_result_builder_aliases(tree)
+    assignments = _simple_name_assignments(tree)
     called_attribute_ids = {
         id(node.func)
         for node in ast.walk(tree)
@@ -609,12 +660,83 @@ def _walk_ast(tree: ast.AST, *, where: str) -> list[StrategyValidationIssue]:
                     result_aliases=result_aliases,
                 )
             )
+        elif isinstance(node, ast.Compare):
+            issues.extend(
+                _check_self_relative_stop_compare(
+                    node,
+                    where=where,
+                    assignments=assignments,
+                )
+            )
         elif isinstance(node, ast.Name):
             if node.id in DANGEROUS_BUILTINS and isinstance(getattr(node, "ctx", None), ast.Load):
                 # Plain reference is fine in some contexts; the hard
                 # ban applies inside Call (we catch that via _check_call).
                 pass
+    if where.startswith("tests/"):
+        # Test doubles deliberately configure callable return_value/side_effect
+        # and replace facade methods. These are not runtime SDK expressions.
+        # Still enforce import, secret, process and filesystem safety checks.
+        issues = [issue for issue in issues if issue.code not in {
+            "unsupported_strategy_context_surface", "self_relative_stop_condition"}]
     return issues
+
+
+def _simple_name_assignments(tree: ast.AST) -> dict[str, ast.AST]:
+    """Collect simple ``name = expression`` assignments for local lint rules."""
+    out: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            out[target.id] = node.value
+    return out
+
+
+def _check_self_relative_stop_compare(
+    node: ast.Compare,
+    *,
+    where: str,
+    assignments: dict[str, ast.AST],
+) -> list[StrategyValidationIssue]:
+    """Reject stop checks that mathematically cannot trigger.
+
+    Generated strategies occasionally write ``stop = price - distance`` and
+    immediately test ``price <= stop``. For a non-negative stop distance this
+    is impossible because the stop is recomputed from the same current price
+    on every bar. A historical stop must be anchored to entry/high-water state
+    (for example ``max(entry_price, high_water - ATR*k)``), not the current
+    price it is compared against.
+    """
+    if len(node.ops) != 1 or len(node.comparators) != 1:
+        return []
+    if not isinstance(node.ops[0], (ast.Lt, ast.LtE)):
+        return []
+    if not isinstance(node.left, ast.Name) or not isinstance(node.comparators[0], ast.Name):
+        return []
+    price_name = node.left.id
+    stop_name = node.comparators[0].id
+    if "stop" not in stop_name.lower():
+        return []
+    expr = assignments.get(stop_name)
+    if not isinstance(expr, ast.BinOp) or not isinstance(expr.op, ast.Sub):
+        return []
+    if not isinstance(expr.left, ast.Name) or expr.left.id != price_name:
+        return []
+    return [
+        StrategyValidationIssue(
+            severity="blocker",
+            code="self_relative_stop_condition",
+            message=(
+                f"{stop_name} is recomputed as {price_name} minus a distance and "
+                f"then compared as {price_name} <= {stop_name} (line {node.lineno}); "
+                "for a non-negative stop distance this can never trigger. Anchor "
+                "the stop to entry price or persisted high-water/low-water state."
+            ),
+            where=where,
+        )
+    ]
 
 
 def _agent_task_contract_issues(

@@ -59,6 +59,8 @@ def redact_text(text: str) -> str:
     if not _REDACTION_ACTIVE:
         return _REDACTION_DISABLED_PLACEHOLDER if text else text
     out = text
+    from ..security.credential_probe import redact_probe_text
+    out = redact_probe_text(out)
     for pat in _PATTERNS:
         out = pat.sub("***REDACTED***", out)
     return out

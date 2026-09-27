@@ -1,55 +1,53 @@
 "use client";
-import { BrowserPreferences } from './BrowserPreferences';
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useTranslations } from "next-intl";
-import { Advanced, Card, ErrorBanner, PageBody, PageHeader, Pill } from "./Page";
-import { TermTip } from "./TermTip";
-import { GatewayChannelsPanel } from "./GatewayChannelsPanel";
-import { MemoryEvidencePanel } from "./MemoryEvidencePanel";
-import { MemoryProfilePanel } from "./MemoryProfilePanel";
-import { RuntimeFlagsPanel } from "./RuntimeFlagsPanel";
-import { WorkspaceSyncPanel } from "./WorkspaceSyncPanel";
-import McpSettingsPanel from "./settings/McpSettingsPanel";
-import { SwitchControl } from "./SwitchControl";
-import { Select as PortalSelect } from "./Select";
-import { Row, Field, Metric, CompactSelect as Select } from "./settings/SettingsFields";
-import { InterfaceSettings } from "./settings/InterfaceSettings";
-import { PortalDropdown, useDropdown } from "./PortalDropdown";
-import { CheckIcon, ChevronDownIcon, PlusIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon, TrashIcon } from "./icons";
+import { DesktopSettings } from "./settings/DesktopSettings";
+import { copy as i18nCopy } from "../lib/i18n";
+
+import { useLocale,useTranslations } from "next-intl";
+import { useEffect,useMemo,useRef,useState,type ReactNode } from "react";
+import { clearStoredAuthToken,redirectToLogin,setStoredAuthToken } from "../lib/auth";
 import {
-  clientApi,
-  invalidateReadCache,
-  type LlmProviderProfile,
-  type LlmRouteConfig,
-  type LlmTierConfig,
-  type MemoryActivityEvent,
-  type MemoryExternalConfig,
-  type MemoryNotebookSnapshot,
-  type MemoryProviderView,
-  type MemoryWriteRuleConfig,
-  type OAuthProviderStatus,
-  type RuntimeEnvVar,
-  type SecretRef,
-  type MemoryVectorStatus,
-  type AuthStatus,
-  type SearchEnginesStatus,
-  type SearchEngineStatus,
-  type BrowsersStatus,
-  type FinancialDatasetsStatus,
-  type NetworkProxyPreset,
-  type NetworkProxyStatus,
-  type NetworkDashboardStatus,
-  type NetworkTunnelsStatus,
-  type TunnelProviderConfig,
-  type TunnelProviderStatus,
+clientApi,
+invalidateReadCache,
+type AuthStatus,
+type LlmProviderProfile,
+type LlmRouteConfig,
+type LlmTierConfig,
+type NetworkDashboardStatus,
+type NetworkProxyPreset,
+type NetworkProxyStatus,
+type NetworkTunnelsStatus,
+type OAuthProviderStatus,
+type RuntimeEnvVar,
+type SecretRef,
+type TunnelProviderConfig,
+type TunnelProviderStatus
 } from "../lib/clientApi";
-import { clearStoredAuthToken, isLocalDashboardHost, setStoredAuthToken } from "../lib/auth";
-import { confirm, toast } from "../lib/dialogs";
+import { confirm,toast } from "../lib/dialogs";
+import { ChoiceSelect } from "./ChoiceSelect";
+import { GatewayChannelsPanel } from "./GatewayChannelsPanel";
+import { LearningMemoryPanel } from "./LearningMemoryPanel";
+import { Advanced,Card,ErrorBanner,PageBody,PageHeader,Pill } from "./Page";
+import { Select as PortalSelect } from "./Select";
+import { SwitchControl } from "./SwitchControl";
+import { TermTip } from "./TermTip";
+import { WorkspaceSyncPanel } from "./WorkspaceSyncPanel";
+import { CheckIcon,PlusIcon,RefreshIcon,SearchIcon,SettingsIcon,SparkIcon,TrashIcon } from "./icons";
+import { DataServiceSettings } from "./settings/DataServiceSettings";
+import { InterfaceSettings } from "./settings/InterfaceSettings";
+import McpSettingsPanel from "./settings/McpSettingsPanel";
+import { PrimaryModelSettings } from "./settings/PrimaryModelSettings";
+import { editableRoute, explicitRoute, tierPolicy, connectionPatch, type ModelRouteState, type ModelProfileState } from "./settings/modelSettingsState";
+import { SavedModelTest } from "./SetupReadinessCard";
+import { SearchSettings } from "./settings/SearchSettings";
+import { Field,Metric,Row,CompactSelect as Select } from "./settings/SettingsFields";
 
 const STANDARD_TIERS = ["light", "medium", "high"] as const;
 const INTENT_TIER = "intent";
 const ASSIGNMENT_TIERS = [...STANDARD_TIERS, INTENT_TIER] as const;
+const DEFAULT_MODEL_CONTEXT_WINDOW = 1_048_576;
+const MIN_MODEL_CONTEXT_WINDOW = 4_096;
+const MAX_MODEL_CONTEXT_WINDOW = 16_777_216;
 const KNOWN_LLM_PROVIDERS = [
   "openai",
   "anthropic",
@@ -122,22 +120,9 @@ const CUSTOM_PROVIDER_KINDS = [
 ] as const;
 type CustomProviderKind = typeof CUSTOM_PROVIDER_KINDS[number]["id"];
 
-const SETTINGS_TABS = ["models", "access", "runtime", "mcp", "capabilityGates", "envvault", "search", "browsers", "memory", "interface"] as const;
+const SETTINGS_TABS = ["models", "access", "runtime", "mcp", "capabilityGates", "envvault", "search", "memory", "interface"] as const;
 type SettingsTabKey = typeof SETTINGS_TABS[number];
 const DEFAULT_NO_PROXY = "127.0.0.1,localhost,::1";
-
-// Sub-tabs inside the /settings memory panel. Keeps the panel
-// scannable now that it hosts vector index, notebook, activity feed,
-// write rules, AND the provider directory.
-// memsearch ("vector") used to live in this sub-tab list, but its full
-// configuration panel is now inlined into the Selected backend settings
-// card — and only rendered when the operator actually chooses memsearch
-// as the active backend. The sub-tabs below the card are for things
-// that apply regardless of backend (notebook, activity, rules,
-// providers, evidence, profile).
-const MEMORY_SUBTABS = ["notebook", "activity", "rules", "providers", "evidence", "profile"] as const;
-type MemorySubTabKey = typeof MEMORY_SUBTABS[number];
-type MemoryBackendChoice = "builtin" | "memsearch" | "agentmemory";
 
 // Gateway channel forms now live exclusively in
 // ``components/GatewayChannelsPanel.tsx`` (shared draft helpers in
@@ -191,33 +176,40 @@ function splitRouteValues(value: string | string[] | undefined): string[] {
   return out;
 }
 
-function emptyRoute(): LlmRouteConfig {
+function emptyRoute(): ModelRouteState {
   return {
     provider: "",
     model: "",
     models: [],
+    reasoning_effort: "",
+    context_window: DEFAULT_MODEL_CONTEXT_WINDOW,
     base_url: "",
     provider_key_ref: "",
     provider_key_refs: [],
     provider_key: "",
     provider_keys: [],
-    kind: "chat_completions",
+    kind: "",
+    declared: {},
+    effective: { provider: "", model: "", context_window: DEFAULT_MODEL_CONTEXT_WINDOW, reasoning_effort: "" },
   };
 }
 
-function routesOf(row: LlmTierConfig): LlmRouteConfig[] {
+function routesOf(row: LlmTierConfig): ModelRouteState[] {
   if (Array.isArray(row.routes) && row.routes.length > 0) {
     return row.routes.map((route) => ({
+      ...route,
       provider: route.provider || "",
       model: route.model || splitRouteValues(route.models).join(", "),
       models: route.models || splitRouteValues(route.model),
+      reasoning_effort: route.reasoning_effort ?? row.reasoning_effort ?? "",
+      context_window: route.context_window ?? row.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW,
       base_url: route.base_url || "",
       provider_key_ref: route.provider_key_ref || splitRouteValues(route.provider_key_refs).join(", "),
       provider_key_refs: route.provider_key_refs || splitRouteValues(route.provider_key_ref),
       provider_key: route.provider_key || splitRouteValues(route.provider_keys).join(", "),
       provider_keys: route.provider_keys || splitRouteValues(route.provider_key),
       has_key_ref: route.has_key_ref,
-      kind: route.kind || "chat_completions",
+      kind: route.kind || "",
       provider_native_web_search: route.provider_native_web_search,
     }));
   }
@@ -226,6 +218,8 @@ function routesOf(row: LlmTierConfig): LlmRouteConfig[] {
       provider: row.provider || "",
       model: row.model || splitRouteValues(row.models).join(", "),
       models: row.models || splitRouteValues(row.model),
+      reasoning_effort: row.reasoning_effort || "",
+      context_window: row.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW,
       base_url: row.base_url || "",
       provider_key_ref: row.provider_key_ref || "",
       provider_key_refs: splitRouteValues(row.provider_key_ref),
@@ -246,17 +240,20 @@ function tierWithRoutes(row: LlmTierConfig): LlmTierConfig {
     ...row,
     provider: first.provider || row.provider || "",
     model: first.model || row.model || "",
-    base_url: first.base_url || row.base_url || "",
-    provider_key_ref: first.provider_key_ref || row.provider_key_ref || "",
+    context_window: first.context_window ?? row.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+    base_url: first.base_url || "",
+    provider_key_ref: first.provider_key_ref || "",
     routes,
   };
 }
 
 function emptyTier(tier: string): LlmTierConfig {
   return {
+    ...{ declared: {} },
     tier,
     provider: "",
     model: "",
+    context_window: DEFAULT_MODEL_CONTEXT_WINDOW,
     base_url: "",
     provider_key_ref: "",
     reasoning_effort: "",
@@ -290,6 +287,7 @@ function prettifyReasoningLevel(level: string): string {
 }
 
 function ensureAssignmentTiers(rows: LlmTierConfig[]): LlmTierConfig[] {
+  rows = rows.map(row => ({ ...row, routes: row.routes?.map(editableRoute) }));
   const byTier = new Map(rows.map((row) => [row.tier, tierWithRoutes(row)]));
   for (const tier of ASSIGNMENT_TIERS) {
     if (!byTier.has(tier)) byTier.set(tier, emptyTier(tier));
@@ -300,137 +298,6 @@ function ensureAssignmentTiers(rows: LlmTierConfig[]): LlmTierConfig[] {
     .map(tierWithRoutes)
     .sort((a, b) => a.tier.localeCompare(b.tier));
   return [...primary, ...extra];
-}
-
-function ModelSelectInput({
-  value,
-  onChange,
-  options,
-  disabled,
-  placeholder,
-  ariaLabel,
-  className,
-  emptyHint,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  disabled?: boolean;
-  placeholder: string;
-  ariaLabel: string;
-  className?: string;
-  emptyHint: string;
-}) {
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const dropdown = useDropdown();
-  const [panelWidth, setPanelWidth] = useState(220);
-
-  useEffect(() => {
-    if (!rootRef.current) return;
-    const update = () => {
-      const next = rootRef.current?.offsetWidth;
-      if (next && next > 0) setPanelWidth(next);
-    };
-    update();
-    if (typeof ResizeObserver !== "undefined") {
-      const obs = new ResizeObserver(update);
-      obs.observe(rootRef.current);
-      return () => obs.disconnect();
-    }
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-
-  const normalized = useMemo(
-    () => Array.from(new Set(options.map((row) => row.trim()).filter(Boolean))),
-    [options],
-  );
-
-  const filtered = useMemo(() => {
-    const q = value.trim().toLowerCase();
-    const rows = q ? normalized.filter((row) => row.toLowerCase().includes(q)) : normalized;
-    return rows.slice(0, 180);
-  }, [normalized, value]);
-
-  return (
-    <div ref={rootRef} className="w-full">
-      <div
-        className={[
-          "flex h-8 w-full items-center gap-1 rounded-lg border border-brand-500/15 bg-ink-900/40 pr-1 text-ink-100 transition-colors backdrop-blur-soft",
-          dropdown.open ? "border-brand-500/45 bg-ink-900/55" : "hover:border-brand-500/35",
-          disabled ? "opacity-60" : "",
-          className ?? "",
-        ].join(" ")}
-      >
-        <input
-          ref={inputRef}
-          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[12px] font-mono text-ink-100 outline-none placeholder:text-ink-300 disabled:cursor-not-allowed"
-          value={value}
-          onFocus={() => {
-            if (!disabled) dropdown.setOpen(true);
-          }}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
-          aria-label={ariaLabel}
-          autoComplete="off"
-          spellCheck={false}
-          disabled={disabled}
-        />
-        <button
-          type="button"
-          aria-label={ariaLabel}
-          disabled={disabled}
-          onClick={() => {
-            if (disabled) return;
-            dropdown.toggle();
-            inputRef.current?.focus();
-          }}
-          className="inline-flex h-6 w-6 items-center justify-center rounded-md text-ink-400 transition-colors hover:bg-brand-500/12 hover:text-ink-200 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <ChevronDownIcon size={14} className={dropdown.open ? "rotate-180 transition-transform" : "transition-transform"} />
-        </button>
-      </div>
-      <PortalDropdown
-        open={!disabled && dropdown.open}
-        onClose={dropdown.close}
-        anchorRef={rootRef}
-        align="left"
-        width={panelWidth}
-        offset={6}
-        className="max-h-72 overflow-y-auto rounded-lg border border-[color:var(--line)] bg-ink-950/95 py-1"
-      >
-        <ul role="listbox" className="text-[13px]">
-          {filtered.length === 0 ? (
-            <li className="px-3 py-2 text-[12px] text-ink-500 italic">{emptyHint}</li>
-          ) : (
-            filtered.map((item) => {
-              const selected = item === value;
-              return (
-                <li key={item} role="option" aria-selected={selected}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onChange(item);
-                      dropdown.close();
-                      inputRef.current?.focus();
-                    }}
-                    className={[
-                      "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors",
-                      selected ? "bg-brand-500/14 text-white" : "text-ink-200 hover:bg-brand-500/12",
-                    ].join(" ")}
-                  >
-                    <span className="min-w-0 flex-1 truncate font-mono">{item}</span>
-                    {selected ? <span className="h-1.5 w-1.5 rounded-full bg-brand-300" /> : null}
-                  </button>
-                </li>
-              );
-            })
-          )}
-        </ul>
-      </PortalDropdown>
-    </div>
-  );
 }
 
 function isSettingsTabKey(value: string): value is SettingsTabKey {
@@ -481,8 +348,13 @@ function fingerprintConfig(
       routes: routesOf(row).map((route) => ({
         provider: route.provider || "",
         model: route.model || "",
+        reasoning_effort: route.reasoning_effort || "",
+        context_window: route.context_window,
+        provider_key: route.provider_key,
+        provider_native_web_search: route.provider_native_web_search,
         base_url: route.base_url || "",
         provider_key_ref: route.provider_key_ref || "",
+        provider_key_env: route.provider_key_env || "",
         kind: route.kind || "",
       })),
       reasoning_effort: row.reasoning_effort || "",
@@ -490,36 +362,11 @@ function fingerprintConfig(
   });
 }
 
-// Props let the page render in one of two modes:
-//
-//   - Default (no props): regular /settings page. Section navigation
-//     lives in the left rail (SettingsSidebar drives the panels via
-//     the location hash); the page body renders just the active panel.
-//   - `forceSection`: render ONLY the matching panel content (no
-//     section nav, no other tabs). Used by the standalone routes:
-//        /memory     → forceSection="memory"
-//        /web-search → forceSection="search"
-//        /browsers   → forceSection="browsers"
-//     Each route is a 4-line wrapper that mounts the same
-//     SettingsWorkspace component so all those pages reuse the same
-//     state hooks + JSX + helpers. The PageHeader text for each
-//     standalone route is sourced from a dedicated
-//     `<section>Page.{eyebrow,title,description}` i18n namespace.
-//
-// `forceMemoryOnly` (legacy) is preserved as a thin alias for
-// `forceSection="memory"` so any external callers still work, but new
-// pages should pass `forceSection` directly.
-// The set of single-section render modes the SettingsWorkspace can be
-// mounted into. Originally only the four standalone "More" pages
-// (/memory, /web-search, /browsers, /env-vault) used this. The
-// onboarding wizard (/setup) reuses the existing Models / Access /
-// Runtime sections via the same prop so the wizard never re-implements
-// password or LLM-tier editing logic. Section-mode adds
-// `(forceSection === "X")` to each tab's render gate (see below).
+// Settings routes and onboarding share these sections. Legacy memory props
+// resolve to built-in memory; old capability links lead to developer diagnostics.
 export type ForceSectionKey =
   | "memory"
   | "search"
-  | "browsers"
   | "envvault"
   | "access"
   | "models"
@@ -534,7 +381,7 @@ export interface SettingsPageProps {
   forceSection?: ForceSectionKey;
   /**
    * Optional content rendered immediately after the section-mode
-   * PageHeader and before any other content. Used by `/browsers` to
+   * PageHeader and before any other content. Used by host pages to
    * inject its Engines/Session tab strip without duplicating the
    * section-page chrome.
    */
@@ -548,6 +395,10 @@ export interface SettingsPageProps {
    * with 4 tier rows on first contact.
    */
   compactLlm?: boolean;
+  /** Focused onboarding: the host owns the single submit/continue button. */
+  setupMode?: boolean;
+  onSetupComplete?: () => void;
+  onSetupBusyChange?: (busy: boolean) => void;
   /**
    * Hide the built-in PageHeader. Layout-only escape hatch for hosts
    * that render their own title chrome around the panel — the setup
@@ -558,39 +409,51 @@ export interface SettingsPageProps {
   hideHeader?: boolean;
 }
 
-export function SettingsWorkspace({
+function DiagnosticsLink() {
+  const zh = useLocale().startsWith("zh");
+  return <a className="btn btn-ghost" href="/advanced">{i18nCopy(zh, "copy.components_SettingsWorkspace.001")}</a>;
+}
+
+export function SettingsWorkspace(props: SettingsPageProps) {
+  if (props.forceSection === "capabilityGates") return <DiagnosticsLink />;
+  if (props.forceSection === "memory" || props.forceMemoryOnly) return <LearningMemoryPanel />;
+  return <SettingsWorkspaceContent {...props} />;
+}
+
+function SettingsWorkspaceContent({
   forceMemoryOnly = false,
   forceSection: forceSectionProp,
   topBanner,
   compactLlm = false,
   hideHeader = false,
+  setupMode = false,
+  onSetupComplete,
+  onSetupBusyChange,
 }: SettingsPageProps) {
   // Normalise the two equivalent prop shapes into a single value the
   // rest of the component reads. `forceSection` wins if both are set.
   const forceSection: ForceSectionKey | undefined =
     forceSectionProp ?? (forceMemoryOnly ? "memory" : undefined);
   const inSectionMode = forceSection !== undefined;
+  const zh = useLocale().startsWith("zh");
+  const text = (key: string, values?: Record<string, unknown>) => i18nCopy(zh, key, values);
   const t = useTranslations("settings");
+  const tSetup = useTranslations("setupWizard");
+  const [setupError, setSetupError] = useState("");
   const tUi = useTranslations("ui");
   const tProvider = useTranslations("settings.providerCard");
   const tModel = useTranslations("settings.modelCard");
-  const tMemory = useTranslations("settings.memoryCard");
-  const tMemoryPage = useTranslations("memoryPage");
   const tWebSearchPage = useTranslations("webSearchPage");
-  const tBrowsersPage = useTranslations("browsersPage");
   const tEnvVaultPage = useTranslations("envVaultPage");
   const tEnvCard = useTranslations("envVaultPage.envCard");
   const tVaultCard = useTranslations("envVaultPage.vaultCard");
   const tAuth = useTranslations("settings.authCard");
   const tTabs = useTranslations("settings.tabs");
   const tCommon = useTranslations("common");
-  const tBrowserSession = useTranslations("browserSession");
-  const tSearch = useTranslations("settingsSearch");
-  const tBrowsers = useTranslations("settingsBrowsers");
+
   const tTunnel = useTranslations("settings.tunnelCard");
-  const tFdApi = useTranslations("financialDatasets");
+
   const tProxy = useTranslations("networkProxy");
-  const [venues, setVenues] = useState<{ name: string; label: string }[]>([]);
   const [providers, setProviders] = useState<ProviderOption[]>([]);
   const [providerProfiles, setProviderProfiles] = useState<LlmProviderProfile[]>([]);
   const [modelCatalog, setModelCatalog] = useState<Record<string, string[]>>({});
@@ -644,6 +507,8 @@ export function SettingsWorkspace({
   // Custom-provider preset picker.
   const [customProviderKind, setCustomProviderKind] = useState<CustomProviderKind | "">("");
   const [loadedFingerprint, setLoadedFingerprint] = useState("");
+  const [savedRevision, setSavedRevision] = useState("");
+  const [connectionBaseline, setConnectionBaseline] = useState({ base_url: "https://api.openai.com/v1", provider_key_ref: "", kind: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -664,109 +529,11 @@ export function SettingsWorkspace({
   // ``/models`` endpoint is missing, gated, or the operator simply
   // wants to import a single known id without round-tripping discovery.
   const [manualModelDraft, setManualModelDraft] = useState("");
-  const [memoryStatus, setMemoryStatus] = useState<MemoryVectorStatus | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [currentAdminPassword, setCurrentAdminPassword] = useState("");
   const [newAdminPassword, setNewAdminPassword] = useState("");
   const [confirmAdminPassword, setConfirmAdminPassword] = useState("");
-  const [memoryBusy, setMemoryBusy] = useState("");
-  const [memoryQuery, setMemoryQuery] = useState("");
-  const [memoryResults, setMemoryResults] = useState<Array<Record<string, unknown>>>([]);
-  // Memory activity feed + curated notebook state
-  const [memoryActivityEvents, setMemoryActivityEvents] = useState<MemoryActivityEvent[]>([]);
-  const [memoryActivityStats, setMemoryActivityStats] = useState<{
-    write_ok: number;
-    write_skipped: number;
-    search: number;
-    last_event_ts?: string;
-  } | null>(null);
-  const [memoryActivityFilter, setMemoryActivityFilter] = useState<"" | "write_ok" | "write_skipped" | "search">("");
-  const [notebookAgent, setNotebookAgent] = useState<MemoryNotebookSnapshot | null>(null);
-  const [notebookOperator, setNotebookOperator] = useState<MemoryNotebookSnapshot | null>(null);
-  const [notebookDraft, setNotebookDraft] = useState<{ agent: string; operator: string }>({ agent: "", operator: "" });
-  const [notebookBusy, setNotebookBusy] = useState<string>("");
-  const [notebookMessage, setNotebookMessage] = useState<string>("");
-  const [writeRules, setWriteRules] = useState<Record<string, MemoryWriteRuleConfig>>({});
-  const [writeRuleCategories, setWriteRuleCategories] = useState<Array<{ id: string; name: string; description: string }>>([]);
-  const [writeRuleDedupes, setWriteRuleDedupes] = useState<string[]>(["none", "by_hash", "by_key"]);
-  const [writeRuleBusy, setWriteRuleBusy] = useState(false);
-  // Memory sub-tab + provider directory state
-  const [activeMemorySubTab, setActiveMemorySubTab] = useState<MemorySubTabKey>("notebook");
-  const [memoryProvidersData, setMemoryProvidersData] = useState<{
-    builtin: MemoryProviderView | null;
-    external: MemoryProviderView | null;
-    available_external: MemoryProviderView[];
-  } | null>(null);
-  const [memoryExternalConfig, setMemoryExternalConfig] = useState<MemoryExternalConfig | null>(null);
-  const [agentmemoryDraft, setAgentmemoryDraft] = useState({
-    base_url: "http://127.0.0.1:3111",
-    secret_ref: "",
-    secret_env: "AGENTMEMORY_SECRET",
-    project: "",
-    session_id: "",
-    context_budget: "2000",
-    timeout_s: "1.5",
-  });
-  const [agentmemoryInstall, setAgentmemoryInstall] = useState<{
-    commands: string[];
-    health_url: string;
-    viewer_url: string;
-    dependency_available: boolean;
-    note: string;
-  } | null>(null);
-  // Last result of the "Install dependency" button on the Selected backend
-  // settings card. Mirrors the shape of /memory/external/install/run for
-  // agentmemory and /memory/vector/install for memsearch so we can render
-  // a single status block regardless of backend.
-  const [backendInstallResult, setBackendInstallResult] = useState<{
-    backend: "memsearch" | "agentmemory";
-    ok: boolean;
-    cmd?: string[];
-    returncode?: number;
-    stdout_tail?: string;
-    stderr_tail?: string;
-    dependency_available?: boolean;
-    note?: string;
-    error?: string;
-    detail?: string | null;
-  } | null>(null);
-  // Last result of the "Test recall" button — populated by /memory/test
-  // which returns 1..N per-backend entries depending on what's enabled.
-  const [backendTestResult, setBackendTestResult] = useState<{
-    query: string;
-    backends: Array<{
-      backend: "builtin" | "memsearch" | "agentmemory";
-      ok: boolean;
-      agent_entries?: number;
-      operator_entries?: number;
-      matches?: number;
-      available?: boolean;
-      enabled?: boolean;
-      base_url?: string;
-      last_error?: string | null;
-      note?: string;
-      error?: string;
-      detail?: string | null;
-      preview?: Array<Record<string, unknown>>;
-    }>;
-  } | null>(null);
-  // Editable query used by the "Test recall" button on the summary card.
-  // Independent from `memoryQuery` (the memsearch sub-tab's query input)
-  // so toggling between backends doesn't surprise the operator.
-  const [backendTestQuery, setBackendTestQuery] = useState("");
-  const [embProvider, setEmbProvider] = useState("openai");
-  const [embModel, setEmbModel] = useState("text-embedding-3-small");
-  const [embBaseUrl, setEmbBaseUrl] = useState("");
-  const [embKeyRef, setEmbKeyRef] = useState("");
-  // Operator can paste a plaintext API key here; the backend stashes
-  // it in the SecretVault and points the embedding `api_key_ref` at
-  // the new entry. Always cleared after a successful save so the
-  // secret never sticks around in component state.
-  const [embKeyPlain, setEmbKeyPlain] = useState("");
-  const [milvusUri, setMilvusUri] = useState("~/.memsearch/milvus.db");
-  const [milvusToken, setMilvusToken] = useState("");
-  const [milvusCollection, setMilvusCollection] = useState("memsearch_chunks");
   // Action feedback (save/delete/test results) goes through the global
   // toast stack instead of a page-top banner: these panels are far
   // taller than one viewport, so a banner under the page header was
@@ -784,20 +551,12 @@ export function SettingsWorkspace({
   const [sectionErrors, setSectionErrors] = useState<Record<string, string>>({});
   const loadedSections = useRef(new Set<string>());
   const sectionRequests = useRef(new Map<string, Promise<void>>());
-  const sectionKey = effectiveSettingsTab === "memory"
-    ? `memory:${activeMemorySubTab}${activeMemorySubTab === "activity" ? `:${memoryActivityFilter}` : ""}`
-    : effectiveSettingsTab;
-  const currentSectionKey = useRef(sectionKey);
-  currentSectionKey.current = sectionKey;
+  const sectionKey = effectiveSettingsTab;
   const sectionBusy = !settingsReady || sectionStates[sectionKey] === "loading";
   const modelLoadError = sectionErrors.models;
-  const memoryBackendChoice: MemoryBackendChoice =
-    memoryExternalConfig?.enabled && memoryExternalConfig.provider === "agentmemory"
-      ? "agentmemory"
-      : memoryStatus?.enabled
-        ? "memsearch"
-        : "builtin";
-
+  useEffect(() => {
+    onSetupBusyChange?.(sectionBusy || loading || saving || discovering || importing || Boolean(oauthBusy));
+  }, [sectionBusy, loading, saving, discovering, importing, oauthBusy, onSetupBusyChange]);
   // ---- Vault-backed runtime env + generic secret refs -------------
   const [runtimeEnv, setRuntimeEnv] = useState<RuntimeEnvVar[]>([]);
   const [vaultRefs, setVaultRefs] = useState<SecretRef[]>([]);
@@ -833,53 +592,7 @@ export function SettingsWorkspace({
   const [vaultKindDraft, setVaultKindDraft] = useState("opaque");
   const [vaultScopeDraft, setVaultScopeDraft] = useState("runtime");
 
-  // ---- Web search engines ----------------------------------------
-  const [searchStatus, setSearchStatus] = useState<SearchEnginesStatus | null>(null);
-  const [searchChainCsv, setSearchChainCsv] = useState<string>("");
-  const [searchRegion, setSearchRegion] = useState<string>("wt-wt");
-  const [searchSafesearch, setSearchSafesearch] = useState<string>("moderate");
-  const [searchKeyDrafts, setSearchKeyDrafts] = useState<Record<string, string>>({});
-  const [searchBaseUrlDrafts, setSearchBaseUrlDrafts] = useState<Record<string, string>>({});
-  const [searchStore, setSearchStore] = useState<"vault" | "workspace">("vault");
-  const [searchBusy, setSearchBusy] = useState<string>("");
-  const [searchTestQuery, setSearchTestQuery] = useState<string>("Nvidia earnings");
-  const [searchTestEngine, setSearchTestEngine] = useState<string>("");
-  const [searchTestResult, setSearchTestResult] = useState<string | null>(null);
-  const [searxngHostPort, setSearxngHostPort] = useState<string>("8888");
-  const [searxngImage, setSearxngImage] = useState<string>("searxng/searxng:latest");
-  const [searxngRebuild, setSearxngRebuild] = useState<boolean>(false);
-  const [searchEngineRowResult, setSearchEngineRowResult] = useState<Record<string, string>>({});
 
-
-  // ---- Financial Datasets API keys -------------------------------
-  const [fdStatus, setFdStatus] = useState<FinancialDatasetsStatus | null>(null);
-  const [fdKeysDraft, setFdKeysDraft] = useState<string>("");
-  const [fdStore, setFdStore] = useState<"vault" | "workspace">("vault");
-  const [fdBusy, setFdBusy] = useState<string>("");
-
-  async function loadMemoryStatus() {
-    try {
-      const next = await clientApi.memoryVectorStatus();
-      setMemoryStatus(next);
-      syncMemoryDrafts(next);
-    } catch {
-      setMemoryStatus(null);
-    }
-  }
-
-  function syncMemoryDrafts(s: MemoryVectorStatus | null | undefined) {
-    if (!s) return;
-    if (s.embedding) {
-      setEmbProvider(s.embedding.provider || "openai");
-      setEmbModel(s.embedding.model || "text-embedding-3-small");
-      setEmbBaseUrl(s.embedding.base_url || "");
-      setEmbKeyRef(s.embedding.api_key_ref || "");
-    }
-    if (s.milvus) {
-      setMilvusUri(s.milvus.uri || "~/.memsearch/milvus.db");
-      setMilvusCollection(s.milvus.collection || "memsearch_chunks");
-    }
-  }
 
   async function loadAuthStatus() {
     try {
@@ -887,20 +600,6 @@ export function SettingsWorkspace({
     } catch {
       setAuthStatus(null);
     }
-  }
-
-  function syncMemoryExternalDrafts(cfg: MemoryExternalConfig | null | undefined) {
-    if (!cfg?.agentmemory) return;
-    setMemoryExternalConfig(cfg);
-    setAgentmemoryDraft({
-      base_url: cfg.agentmemory.base_url || "http://127.0.0.1:3111",
-      secret_ref: cfg.agentmemory.secret_ref || "",
-      secret_env: cfg.agentmemory.secret_env || "AGENTMEMORY_SECRET",
-      project: cfg.agentmemory.project || "",
-      session_id: cfg.agentmemory.session_id || "",
-      context_budget: String(cfg.agentmemory.context_budget || 2000),
-      timeout_s: String(cfg.agentmemory.timeout_s || 1.5),
-    });
   }
 
   async function loadSecurityRuntime() {
@@ -1259,37 +958,6 @@ export function SettingsWorkspace({
     }
   }
 
-  function applySearchStatus(status: SearchEnginesStatus | null | undefined) {
-    if (!status) return;
-    setSearchStatus(status);
-    setSearchChainCsv((status.engines || []).join(", "));
-    setSearchRegion(status.region || "wt-wt");
-    setSearchSafesearch(status.safesearch || "moderate");
-    setSearchKeyDrafts({});
-    const nextBaseUrls: Record<string, string> = {};
-    for (const row of status.engine_status || []) {
-      if (!row.needs_base_url) continue;
-      const ws = row.base_url?.workspace || "";
-      nextBaseUrls[row.name] = ws;
-    }
-    setSearchBaseUrlDrafts(nextBaseUrls);
-    if (status.searxng?.host_port) {
-      setSearxngHostPort(String(status.searxng.host_port));
-    }
-    if (status.searxng?.image) setSearxngImage(status.searxng.image);
-  }
-
-  async function loadSearchStatus() {
-    try {
-      const res = await clientApi.searchEnginesStatus();
-      applySearchStatus(res);
-      return res;
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
   async function loadModelConfig() {
     setLoading(true);
     try {
@@ -1305,6 +973,22 @@ export function SettingsWorkspace({
       const loadedIntentTier = cfg.intent_tier || "light";
       const loadedTiers = ensureAssignmentTiers(cfg.tiers || []);
       const profiles = cfg.provider_profiles || [];
+      setSavedRevision((cfg as typeof cfg & { revision?: string }).revision || "");
+      let selectedProvider = providerDraft;
+      if (setupMode) {
+        const primary = routesOf(loadedTiers.find(row => row.tier === loadedDefaultTier) || emptyTier(loadedDefaultTier))[0];
+        if (primary?.provider && primary.provider !== "mock") {
+          selectedProvider = primary.provider;
+        }
+      }
+      const selectedProfile = profiles.find(profile => profile.provider === selectedProvider) as ModelProfileState | undefined;
+      const selectedUrl = selectedProfile?.base_url || DEFAULT_PROVIDER_BASE_URLS[selectedProvider] || "";
+      setProviderDraft(selectedProvider);
+      setProviderBaseUrlDraft(selectedUrl);
+      setProviderKeyDraft("");
+      setCustomProviderKind("");
+      setManualModelDraft("");
+      setConnectionBaseline({ base_url: selectedUrl, provider_key_ref: selectedProfile?.provider_key_ref || "", kind: selectedProfile?.kind || "" });
       setDefaultTier(loadedDefaultTier);
       setIntentTier(loadedIntentTier);
       setTierRows(loadedTiers);
@@ -1360,7 +1044,7 @@ export function SettingsWorkspace({
     const key = sectionKey;
     const pending = sectionRequests.current.get(key);
     if (pending) return pending;
-    if (!refresh && loadedSections.current.has(key) && !key.startsWith("memory:activity")) return Promise.resolve();
+    if (!refresh && loadedSections.current.has(key)) return Promise.resolve();
     if (refresh) invalidateReadCache();
     setSectionStates((previous) => ({ ...previous, [key]: "loading" }));
     setSectionErrors((previous) => ({ ...previous, [key]: "" }));
@@ -1369,15 +1053,8 @@ export function SettingsWorkspace({
         case "models":
           if (!(await loadModelConfig())) throw new Error(tUi("loadFailed"));
           break;
-        case "interface": {
-          const result = checked(await clientApi.marketVenues());
-          setVenues((result.venues || []).map((venue) => ({ name: venue.name, label: venue.label })));
-          break;
-        }
         case "access": {
-          const [auth, datasets] = await Promise.all([clientApi.authStatus(), clientApi.financialDatasetsStatus()]);
-          setAuthStatus(checked(auth));
-          setFdStatus(checked(datasets));
+          setAuthStatus(checked(await clientApi.authStatus()));
           break;
         }
         case "runtime": {
@@ -1393,38 +1070,7 @@ export function SettingsWorkspace({
           setVaultRefs(checked(secrets).refs || []);
           break;
         }
-        case "search":
-          applySearchStatus(checked(await clientApi.searchEnginesStatus()));
-          break;
-        case "browsers":
-          break; // BrowserPreferences owns the single automatic-mode preference.
-        case "memory": {
-          if (refresh || !loadedSections.current.has("memory:status")) {
-            const [status, external] = await Promise.all([clientApi.memoryVectorStatus(), clientApi.memoryExternalConfig()]);
-            setMemoryStatus(checked(status));
-            syncMemoryDrafts(status);
-            setMemoryExternalConfig(checked(external));
-            syncMemoryExternalDrafts(external);
-            loadedSections.current.add("memory:status");
-          }
-          if (activeMemorySubTab === "notebook") {
-            const notebook = checked(await clientApi.memoryNotebookList());
-            setNotebookAgent(notebook.agent || null);
-            setNotebookOperator(notebook.operator || null);
-          } else if (activeMemorySubTab === "activity") {
-            const activity = checked(await clientApi.memoryActivity({ limit: 200, kinds: memoryActivityFilter ? [memoryActivityFilter] : undefined }));
-            if (currentSectionKey.current === key) {
-              setMemoryActivityEvents(activity.events || []);
-              setMemoryActivityStats(activity.stats || null);
-            }
-          } else if (activeMemorySubTab === "rules") {
-            await loadWriteRules(true);
-          } else if (activeMemorySubTab === "providers") {
-            setMemoryProvidersData(checked(await clientApi.memoryProviders()));
-          }
-          // Evidence/Profile panels own their requests when mounted.
-          break;
-        }
+
         // RuntimeFlagsPanel and GatewayChannelsPanel own their own reads.
         default:
           break;
@@ -1446,33 +1092,12 @@ export function SettingsWorkspace({
   }, [settingsReady, sectionKey]);
 
   async function refreshCurrentSection() {
+    if (effectiveSettingsTab === "search") { window.dispatchEvent(new Event("nerya:search-refresh")); return; }
     if (effectiveSettingsTab === "mcp") { window.dispatchEvent(new Event("nerya:mcp-refresh")); return; }
     if (effectiveSettingsTab === "models" && dirty && !(await confirm({
       title: tUi("discardChanges"), message: tUi("discardChangesDescription"), tone: "warning",
     }))) return;
     await loadSettingsSection(true);
-  }
-
-  // Keep the memory sub-tab in the URL (`/memory?tab=evidence`) so
-  // sub-tabs can be deep-linked, shared, and survive a page refresh —
-  // mirroring how the /settings panels are driven by the hash.
-  useEffect(() => {
-    if (forceSection !== "memory" || typeof window === "undefined") return;
-    const sync = () => {
-      const tab = new URLSearchParams(window.location.search).get("tab");
-      setActiveMemorySubTab(tab && (MEMORY_SUBTABS as readonly string[]).includes(tab) ? tab as MemorySubTabKey : "notebook");
-    };
-    sync();
-    window.addEventListener("popstate", sync);
-    return () => window.removeEventListener("popstate", sync);
-  }, [forceSection]);
-
-  function switchMemorySubTab(key: MemorySubTabKey) {
-    setActiveMemorySubTab(key);
-    if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    url.searchParams.set("tab", key);
-    if (url.href !== window.location.href) window.history.pushState(window.history.state, "", url);
   }
 
   useEffect(() => {
@@ -1484,9 +1109,9 @@ export function SettingsWorkspace({
     // they don't end up on a tab that no longer exists in the section
     // nav.
     const movedSections: Record<string, string> = {
-      memory: "/memory",
+      memory: "/self-evolution?tab=memory",
+      capabilityGates: "/advanced",
       search: "/web-search",
-      browsers: "/browsers",
       envvault: "/env-vault",
     };
     const syncHash = () => {
@@ -1594,52 +1219,8 @@ export function SettingsWorkspace({
     return map;
   }, [providerProfiles]);
 
-  function providerArtifacts(rawProvider: string) {
-    const trimmed = rawProvider.trim();
-    const lower = trimmed.toLowerCase();
-    const provider = providers.find(
-      (row) => row.provider === trimmed || row.provider === lower,
-    );
-    const profile = providerProfileMap.get(trimmed) || providerProfileMap.get(lower);
-    const catalog = catalogById.get(trimmed) || catalogById.get(lower);
-    return {
-      provider_id: lower,
-      provider,
-      profile,
-      catalog,
-      base_url:
-        profile?.base_url ||
-        provider?.base_url ||
-        catalog?.base_url ||
-        DEFAULT_PROVIDER_BASE_URLS[lower] ||
-        "",
-    };
-  }
-
-  function routeDefaultsForProvider(rawProvider: string) {
-    const artifacts = providerArtifacts(rawProvider);
-    return {
-      base_url: artifacts.base_url,
-      kind:
-        artifacts.catalog?.api_mode === "anthropic_messages"
-          ? "anthropic_messages"
-          : "chat_completions",
-    };
-  }
-
-  function routeHasCredential(route: LlmRouteConfig): boolean {
-    if (!route.provider.trim()) return false;
-    const artifacts = providerArtifacts(route.provider);
-    return Boolean(
-      route.provider_key ||
-      route.provider_key_ref ||
-      route.has_key_ref ||
-      (route.provider_key_refs || []).length > 0 ||
-      artifacts.profile?.provider_key_ref ||
-      artifacts.profile?.has_key_ref ||
-      artifacts.provider?.ready ||
-      artifacts.provider_id === "ollama",
-    );
+  function routeDefaultsForProvider(_rawProvider: string) {
+    return { base_url: "", kind: "" };
   }
 
   const configuredTierCount = useMemo(
@@ -1647,11 +1228,6 @@ export function SettingsWorkspace({
       routesOf(row).some((route) => route.provider && route.model),
     ).length,
     [tierRows],
-  );
-
-  const readyProviderCount = useMemo(
-    () => providers.filter((provider) => provider.ready).length,
-    [providers],
   );
 
   const catalogModelCount = useMemo(
@@ -1664,7 +1240,31 @@ export function SettingsWorkspace({
     [defaultTier, intentTier, providerProfiles, tierRows],
   );
 
-  const dirty = Boolean(loadedFingerprint && currentFingerprint !== loadedFingerprint);
+  const pendingConnection = connectionPatch({ ...connectionBaseline, provider: providerDraft }, providerDraft.trim().toLowerCase(), providerBaseUrlDraft, providerKeyDraft,
+    CUSTOM_PROVIDER_KINDS.find(kind => kind.id === customProviderKind)?.api_mode);
+  const connectionDirty = Object.keys(pendingConnection).length > 1;
+  const dirty = Boolean(loadedFingerprint && (currentFingerprint !== loadedFingerprint || connectionDirty || (setupMode && manualModelDraft.trim())));
+
+  useEffect(() => {
+    if (!dirty || setupMode) return;
+    const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const navigation = (window as Window & { navigation?: EventTarget }).navigation;
+    let approvedClick = false;
+    const leave = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target.closest("a[href], [data-settings-section]") : null;
+      if (!target || (target instanceof HTMLAnchorElement && (target.target === "_blank" || target.hasAttribute("download")))) return;
+      if (!window.confirm(tUi("discardChangesDescription"))) { event.preventDefault(); event.stopImmediatePropagation(); }
+      else { approvedClick = true; setTimeout(() => { approvedClick = false; }, 0); }
+    };
+    const navigate = (event: Event) => {
+      // Navigation API covers browser back/forward and imperative SPA routes.
+      if (event.cancelable && !approvedClick && !window.confirm(tUi("discardChangesDescription"))) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", unload);
+    document.addEventListener("click", leave, true);
+    navigation?.addEventListener("navigate", navigate);
+    return () => { window.removeEventListener("beforeunload", unload); document.removeEventListener("click", leave, true); navigation?.removeEventListener("navigate", navigate); };
+  }, [dirty, setupMode, tUi]);
 
   const tunnelEnabledCount = useMemo(
     () => tunnelsStatus?.providers.filter((row) => row.config.enabled).length || 0,
@@ -1686,7 +1286,8 @@ export function SettingsWorkspace({
     : null;
   const selectedTunnelExternalUrls = selectedTunnel?.state?.external_urls?.filter(Boolean) || [];
 
-  function setProviderDraftFromSelect(provider: string) {
+  async function setProviderDraftFromSelect(provider: string) {
+    if (connectionDirty && !(await confirm({ title: tUi("discardChanges"), message: tUi("discardChangesDescription"), tone: "warning" }))) return;
     // Free-text combo: normalise common case differences so typing
     // "OpenAI" still matches the "openai" catalogue entry. We keep
     // the original casing in the draft so the user sees what they
@@ -1710,35 +1311,21 @@ export function SettingsWorkspace({
       DEFAULT_PROVIDER_BASE_URLS[key] ||
       "",
     );
-    setProviderKeyDraft(profile?.provider_key_ref || "");
+    setProviderKeyDraft("");
+    setConnectionBaseline({
+      base_url: profile?.base_url || providerInfo?.base_url || catalogEntry?.base_url || DEFAULT_PROVIDER_BASE_URLS[key] || "",
+      provider_key_ref: profile?.provider_key_ref || "", kind: (profile as ModelProfileState)?.kind || "",
+    });
     // Switching to a catalogue provider clears the custom-kind picker —
     // the picker is only meaningful when the user is rolling their own
     // provider id outside the catalogue.
-    if (catalogEntry) setCustomProviderKind("");
-  }
-
-  function upsertProviderProfile(profile: LlmProviderProfile) {
-    setProviderProfiles((prev) => {
-      const next = prev.filter((row) => row.provider !== profile.provider);
-      return [...next, profile].sort((a, b) => a.provider.localeCompare(b.provider));
-    });
-  }
-
-  function patchTier(index: number, patch: Partial<LlmTierConfig>) {
-    setTierRows((rows) =>
-      rows.map((row, i) => {
-        if (i !== index) return row;
-        const next = { ...row, ...patch };
-        if (patch.provider) next.model = "";
-        return next;
-      }),
-    );
+    setCustomProviderKind("");
   }
 
   function patchTierRoute(
     tierIndex: number,
     routeIndex: number,
-    patch: Partial<LlmRouteConfig>,
+    patch: Partial<ModelRouteState>,
   ) {
     setTierRows((rows) =>
       rows.map((row, i) => {
@@ -1752,6 +1339,7 @@ export function SettingsWorkspace({
             next.provider_key = "";
             next.provider_keys = [];
             next.provider_key_ref = "";
+            next.provider_key_env = "";
             next.provider_key_refs = [];
             next.has_key_ref = false;
           }
@@ -1762,12 +1350,48 @@ export function SettingsWorkspace({
           ...row,
           provider: first.provider || "",
           model: first.model || "",
+          context_window: first.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW,
           base_url: first.base_url || "",
           provider_key_ref: first.provider_key_ref || "",
           routes,
         };
       }),
     );
+  }
+
+  function setPrimaryContextWindow(index: number, contextWindow: number) {
+    const tierIndex = tierRows.findIndex((row) => row.tier === defaultTier);
+    if (tierIndex < 0) return;
+    patchTierRoute(tierIndex, index, {
+      context_window: Math.max(
+        MIN_MODEL_CONTEXT_WINDOW,
+        Math.min(MAX_MODEL_CONTEXT_WINDOW, Math.round(contextWindow)),
+      ),
+    });
+  }
+
+  function selectPrimaryModel(index: number, choice: { provider: string; model: string } | null) {
+    setTierRows((rows) => {
+      const active = rows.find((row) => row.tier === defaultTier);
+      if (!active || (!choice && index === 0)) return rows;
+      const routes = routesOf(active);
+      if (choice) {
+        const previous = routes[index];
+        routes[index] = {
+          ...(previous?.provider === choice.provider ? previous : { ...emptyRoute(), ...routeDefaultsForProvider(choice.provider) }),
+          ...choice, models: [choice.model],
+        };
+      } else routes.splice(index, 1);
+      const primary = routes[0];
+      return rows.map((row) => {
+        if (row.tier === defaultTier) return tierWithRoutes({ ...row, routes });
+        const configured = routesOf(row).some((route) => route.provider && route.model && route.provider !== "mock");
+        if (index === 0 && primary && !configured && STANDARD_TIERS.includes(row.tier as typeof STANDARD_TIERS[number])) {
+          return tierWithRoutes({ ...row, routes: [{ ...primary }] });
+        }
+        return row;
+      });
+    });
   }
 
   function addTierRoute(tierIndex: number) {
@@ -1790,6 +1414,7 @@ export function SettingsWorkspace({
           ...row,
           provider: first.provider || "",
           model: first.model || "",
+          context_window: first.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW,
           base_url: first.base_url || "",
           provider_key_ref: first.provider_key_ref || "",
           routes: nextRoutes,
@@ -1799,34 +1424,40 @@ export function SettingsWorkspace({
   }
 
   function profilesForSave(): LlmProviderProfile[] {
-    const profiles = [...providerProfiles];
-    const provider = providerDraft.trim().toLowerCase();
-    if (provider) {
-      const idx = profiles.findIndex((row) => row.provider === provider);
-      const next = {
-        provider,
-        base_url: providerBaseUrlDraft.trim() || DEFAULT_PROVIDER_BASE_URLS[provider] || "",
-        ...(providerKeyDraft.trim()
-          ? providerKeyDraft.trim().startsWith("vault://")
-            ? { provider_key_ref: providerKeyDraft.trim() }
-            : { provider_key: providerKeyDraft.trim() }
-          : {}),
-      };
-      if (idx >= 0) profiles[idx] = { ...profiles[idx], ...next };
-      else profiles.push(next);
-    }
-    return profiles.filter((row) => row.provider);
+    return connectionDirty && pendingConnection.provider ? [pendingConnection] : [];
   }
 
   async function saveModelConfig() {
+    if (loading || saving || discovering || sectionStates.models !== "ready") return;
+    setSetupError("");
+    let configuredRows = tierRows;
+    const manualModel = setupMode ? manualModelDraft.trim() : "";
+    const manualProvider = providerDraft.trim().toLowerCase();
+    if (manualModel && manualProvider && manualProvider !== "mock") {
+      const active = tierRows.find(row => row.tier === defaultTier) || emptyTier(defaultTier);
+      const routes = [...routesOf(active)];
+      const previous = routes[0];
+      const primaryDraft = {
+        ...(previous?.provider === manualProvider ? previous : { ...emptyRoute(), ...routeDefaultsForProvider(manualProvider) }),
+        provider: manualProvider, model: manualModel, models: [manualModel],
+      };
+      routes[0] = primaryDraft;
+      configuredRows = tierRows.map(row => {
+        if (row.tier === defaultTier) return tierWithRoutes({ ...row, routes });
+        const configured = routesOf(row).some(route => route.provider && route.provider !== "mock" && route.model);
+        return !configured && STANDARD_TIERS.includes(row.tier as typeof STANDARD_TIERS[number])
+          ? tierWithRoutes({ ...row, routes: [{ ...primaryDraft }] }) : row;
+      });
+    }
+    const primary = routesOf(configuredRows.find(row => row.tier === defaultTier) || emptyTier(defaultTier))[0];
+    if (setupMode && (!primary?.provider || primary.provider === "mock" || !primary.model?.trim())) {
+      setSetupError(tSetup("modelRequired"));
+      return;
+    }
     setSaving(true);
     try {
-      const intentRow = tierRows.find((row) => row.tier === INTENT_TIER);
-      const intentReady = intentRow
-        ? routesOf(intentRow).some((route) => route.provider && route.model)
-        : false;
-      const nextIntentTier = intentReady ? INTENT_TIER : intentTier || "light";
-      const rowsForSave = tierRows
+      const nextIntentTier = intentTier || "light";
+      const rowsForSave = configuredRows
         .map((row) => {
           const routes = routesOf(row)
             .filter((route) => route.provider.trim() && route.model.trim())
@@ -1838,7 +1469,8 @@ export function SettingsWorkspace({
               const providerKeys = splitRouteValues(
                 route.provider_keys?.length ? route.provider_keys : route.provider_key,
               );
-              return {
+              return explicitRoute({
+                ...route,
                 provider: route.provider.trim().toLowerCase(),
                 model: models.join(", "),
                 models,
@@ -1848,7 +1480,10 @@ export function SettingsWorkspace({
                 provider_key: providerKeys.join(", "),
                 provider_keys: providerKeys,
                 kind: (route.kind || "").trim(),
-              };
+                provider_native_web_search: route.provider_native_web_search,
+                reasoning_effort: (route.reasoning_effort ?? row.reasoning_effort ?? "").trim().toLowerCase(),
+                context_window: route.context_window ?? row.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+              });
             });
           if (!row.tier.trim() || routes.length === 0) return null;
           const first = routes[0];
@@ -1858,12 +1493,13 @@ export function SettingsWorkspace({
             model: first.model,
             base_url: first.base_url,
             provider_key_ref: first.provider_key_ref,
-            reasoning_effort: (row.reasoning_effort || "").trim().toLowerCase(),
+            ...tierPolicy(row),
             routes,
           };
         })
         .filter(Boolean) as LlmTierConfig[];
       const res = await clientApi.llmConfigSet({
+        ...{ explicit_overrides: true },
         default_tier: defaultTier,
         intent_tier: nextIntentTier,
         providers: profilesForSave(),
@@ -1872,15 +1508,25 @@ export function SettingsWorkspace({
       if (!res.ok) throw new Error(res.error || "save failed");
       const savedDefaultTier = res.default_tier || defaultTier;
       const savedIntentTier = res.intent_tier || nextIntentTier;
-      const savedProfiles = res.provider_profiles || profilesForSave();
-      const nextTiers = ensureAssignmentTiers(res.tiers || tierRows);
+      const savedProfiles = res.provider_profiles || providerProfiles;
+      const nextTiers = ensureAssignmentTiers(res.tiers || configuredRows);
       setDefaultTier(savedDefaultTier);
       setIntentTier(savedIntentTier);
       setTierRows(nextTiers);
       setProviderProfiles(savedProfiles);
       setLoadedFingerprint(fingerprintConfig(savedDefaultTier, savedIntentTier, nextTiers, savedProfiles));
+      setProviderKeyDraft("");
+      setSavedRevision((res as typeof res & { revision?: string }).revision || "");
+      const profile = savedProfiles.find(row => row.provider === manualProvider) as ModelProfileState | undefined;
+      const savedUrl = profile?.base_url || DEFAULT_PROVIDER_BASE_URLS[manualProvider] || "";
+      setProviderBaseUrlDraft(savedUrl);
+      setConnectionBaseline({ base_url: savedUrl, provider_key_ref: profile?.provider_key_ref || "", kind: profile?.kind || "" });
+      setCustomProviderKind("");
+      if (setupMode) setManualModelDraft("");
       reportOk(tModel("savedToWorkspace"));
+      onSetupComplete?.();
     } catch (e) {
+      if (setupMode) setSetupError(e instanceof Error ? e.message : String(e));
       reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
@@ -1893,6 +1539,7 @@ export function SettingsWorkspace({
       reportError(tProvider("providerRequired"));
       return;
     }
+    if (saving || discovering) return;
     setDiscovering(true);
     setDiscoveryError(null);
     try {
@@ -1928,13 +1575,21 @@ export function SettingsWorkspace({
       setDiscoveredBaseUrl(resolvedBaseUrl);
       setDiscoveredModels(rows);
       setSelectedModelIds(new Set(rows.map(modelId)));
-      setProviderKeyDraft(res.provider_key_ref || "");
-      if (resolvedBaseUrl) setProviderBaseUrlDraft(resolvedBaseUrl);
-      upsertProviderProfile({
-        provider: resolvedProvider,
-        base_url: resolvedBaseUrl,
-        provider_key_ref: res.provider_key_ref || key,
-        has_key_ref: Boolean(res.provider_key_ref || key),
+      setProviderKeyDraft("");
+      setProviderBaseUrlDraft(resolvedBaseUrl);
+      const saved = res as typeof res & { provider_profile?: ModelProfileState; revision?: string };
+      const profile: ModelProfileState = saved.provider_profile || { provider: resolvedProvider, base_url: resolvedBaseUrl, provider_key_ref: res.provider_key_ref || "" };
+      const nextProfiles = [...providerProfiles.filter(row => row.provider !== resolvedProvider), profile].sort((a, b) => a.provider.localeCompare(b.provider));
+      setProviderProfiles(nextProfiles);
+      setConnectionBaseline({ base_url: resolvedBaseUrl, provider_key_ref: res.provider_key_ref || "", kind: profile.kind || "" });
+      setCustomProviderKind("");
+      setSavedRevision(saved.revision || "");
+      // Discovery saves only the connection; preserve unrelated route drafts.
+      setLoadedFingerprint(previous => {
+        if (!previous) return previous;
+        const baseline = JSON.parse(previous);
+        baseline.provider_profiles = JSON.parse(fingerprintConfig(defaultTier, intentTier, [], nextProfiles)).provider_profiles;
+        return JSON.stringify(baseline);
       });
       setProviders((prev) => {
         const next = prev.filter((row) => row.provider !== resolvedProvider);
@@ -1945,7 +1600,7 @@ export function SettingsWorkspace({
         });
         return next.sort((a, b) => a.provider.localeCompare(b.provider));
       });
-      reportOk(tProvider("discovered", { count: rows.length, provider: resolvedProvider }));
+      reportOk(zh ? "连接已保存；模型列表已获取。尚未测试模型回复。" : "Connection saved; model list fetched. Model response remains untested.");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Mirror the failure both to the global banner (for visibility)
@@ -1967,6 +1622,13 @@ export function SettingsWorkspace({
     if (!id) return;
     setDiscoveryError(null);
     const provider = providerDraft.trim().toLowerCase();
+    if (setupMode && provider) {
+      setModelCatalog(previous => ({ ...previous, [provider]: [...new Set([...(previous[provider] || []), id])] }));
+      selectPrimaryModel(0, { provider, model: id });
+      setManualModelDraft("");
+      setSetupError("");
+      return;
+    }
     if (provider && !discoveredProvider) {
       setDiscoveredProvider(provider);
     }
@@ -2017,6 +1679,7 @@ export function SettingsWorkspace({
         nextCatalog[name] = rows.map(modelId).filter(Boolean).slice(0, 400);
       }
       setModelCatalog(nextCatalog);
+      if (setupMode) selectPrimaryModel(0, { provider, model: modelId(selected[0]) });
       reportOk(tProvider("imported", { count: selected.length, provider }));
     } catch (e) {
       reportError(e instanceof Error ? e.message : String(e));
@@ -2051,252 +1714,6 @@ export function SettingsWorkspace({
     }
   }
 
-  async function runMemoryAction(action: string, fn: () => Promise<unknown>) {
-    setMemoryBusy(action);
-    try {
-      const result = await fn();
-      if (result && typeof result === "object" && "ok" in result && !(result as { ok?: boolean }).ok) {
-        const body = result as { error?: string; detail?: string };
-        throw new Error(body.detail || body.error || "memory vector action failed");
-      }
-      await loadMemoryStatus();
-      return result;
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-      return null;
-    } finally {
-      setMemoryBusy("");
-    }
-  }
-
-  async function loadMemoryActivity() {
-    try {
-      const res = await clientApi.memoryActivity({
-        limit: 200,
-        kinds: memoryActivityFilter ? [memoryActivityFilter] : undefined,
-      });
-      setMemoryActivityEvents(res.events || []);
-      setMemoryActivityStats(res.stats || null);
-    } catch (e) {
-      // Activity stream is best-effort; don't surface a banner for a
-      // transient backend hiccup. The empty list is the visible cue.
-      console.warn("memory activity load failed", e);
-    }
-  }
-
-  async function loadNotebook() {
-    try {
-      const res = await clientApi.memoryNotebookList();
-      setNotebookAgent(res.agent || null);
-      setNotebookOperator(res.operator || null);
-    } catch (e) {
-      console.warn("memory notebook load failed", e);
-    }
-  }
-
-  async function loadMemoryProviders() {
-    try {
-      const [providersRes, configRes] = await Promise.all([
-        clientApi.memoryProviders(),
-        clientApi.memoryExternalConfig(),
-      ]);
-      setMemoryProvidersData(providersRes);
-      syncMemoryExternalDrafts(configRes);
-    } catch (e) {
-      console.warn("memory providers load failed", e);
-    }
-  }
-
-  async function setMemoryBackendChoice(next: MemoryBackendChoice) {
-    setMemoryBusy(`backend:${next}`);
-    try {
-      if (next === "builtin") {
-        await clientApi.memoryVectorConfig({ enabled: false, watch_enabled: false });
-        const ext = await clientApi.memoryExternalConfigSet({
-          enabled: false,
-          provider: "",
-        });
-        if (ext.ok === false) throw new Error(ext.error || "memory backend config failed");
-        syncMemoryExternalDrafts(ext);
-      } else if (next === "memsearch") {
-        const ext = await clientApi.memoryExternalConfigSet({
-          enabled: false,
-          provider: "",
-        });
-        if (ext.ok === false) throw new Error(ext.error || "memory backend config failed");
-        const status = await clientApi.memoryVectorConfig({ enabled: true });
-        setMemoryStatus(status);
-        syncMemoryDrafts(status);
-      } else {
-        await clientApi.memoryVectorConfig({ enabled: false, watch_enabled: false });
-        const ext = await clientApi.memoryExternalConfigSet({
-          enabled: true,
-          provider: "agentmemory",
-          agentmemory: {
-            base_url: agentmemoryDraft.base_url.trim() || "http://127.0.0.1:3111",
-            secret_ref: agentmemoryDraft.secret_ref.trim(),
-            secret_env: agentmemoryDraft.secret_env.trim() || "AGENTMEMORY_SECRET",
-            project: agentmemoryDraft.project.trim(),
-            session_id: agentmemoryDraft.session_id.trim(),
-            context_budget: Number(agentmemoryDraft.context_budget) || 2000,
-            timeout_s: Number(agentmemoryDraft.timeout_s) || 1.5,
-          },
-        });
-        if (ext.ok === false) throw new Error(ext.error || "agentmemory config failed");
-        syncMemoryExternalDrafts(ext);
-      }
-      await Promise.all([loadMemoryStatus(), loadMemoryProviders()]);
-      reportOk(tMemory(`backendSaved_${next}`));
-      // Auto-reveal the matching detail sub-tab so the operator sees
-      // config for the backend they just selected without hunting.
-      // builtin → notebook (curated content), agentmemory → providers
-      // (external creds). memsearch no longer maps to a sub-tab because
-      // its full configuration card is now inlined into the Selected
-      // backend settings panel above — only visible when memsearch is
-      // the active backend.
-      if (next === "builtin") {
-        switchMemorySubTab("notebook");
-      } else if (next === "agentmemory") {
-        switchMemorySubTab("providers");
-      }
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMemoryBusy("");
-    }
-  }
-
-  async function saveAgentmemoryConfig(enable?: boolean) {
-    setMemoryBusy("agentmemory:save");
-    try {
-      const enabled = enable ?? Boolean(memoryExternalConfig?.enabled);
-      const res = await clientApi.memoryExternalConfigSet({
-        enabled,
-        provider: enabled ? "agentmemory" : "",
-        agentmemory: {
-          base_url: agentmemoryDraft.base_url.trim() || "http://127.0.0.1:3111",
-          secret_ref: agentmemoryDraft.secret_ref.trim(),
-          secret_env: agentmemoryDraft.secret_env.trim() || "AGENTMEMORY_SECRET",
-          project: agentmemoryDraft.project.trim(),
-          session_id: agentmemoryDraft.session_id.trim(),
-          context_budget: Number(agentmemoryDraft.context_budget) || 2000,
-          timeout_s: Number(agentmemoryDraft.timeout_s) || 1.5,
-        },
-      });
-      if (res.ok === false) throw new Error(res.error || "agentmemory config failed");
-      syncMemoryExternalDrafts(res);
-      await Promise.all([loadMemoryStatus(), loadMemoryProviders()]);
-      reportOk(enabled ? tMemory("agentmemoryEnabled") : tMemory("agentmemoryDisabled"));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMemoryBusy("");
-    }
-  }
-
-  async function loadAgentmemoryInstall() {
-    setMemoryBusy("agentmemory:install");
-    try {
-      const res = await clientApi.memoryExternalInstall();
-      setAgentmemoryInstall({
-        commands: res.commands || [],
-        health_url: res.health_url,
-        viewer_url: res.viewer_url,
-        dependency_available: Boolean(res.dependency_available),
-        note: res.note,
-      });
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMemoryBusy("");
-    }
-  }
-
-  // -- Selected backend install + test handlers ----------------------- //
-  // Wire the "Install dependency" button on the summary card. Routes to
-  // the matching backend installer (pip for memsearch, npm for
-  // agentmemory) and stores the full stdout/stderr tail so the operator
-  // can see why a real install failed without leaving the dashboard.
-  async function runBackendInstall(backend: "memsearch" | "agentmemory") {
-    setMemoryBusy(`${backend}:install:run`);
-    setBackendInstallResult(null);
-    try {
-      let res: {
-        ok?: boolean;
-        cmd?: string[];
-        returncode?: number;
-        stdout_tail?: string;
-        stderr_tail?: string;
-        dependency_available?: boolean;
-        note?: string;
-        error?: string;
-        detail?: string | null;
-      };
-      if (backend === "memsearch") {
-        res = await clientApi.memoryVectorInstall();
-      } else {
-        res = await clientApi.memoryExternalInstallRun();
-      }
-      setBackendInstallResult({
-        backend,
-        ok: Boolean(res.ok),
-        cmd: res.cmd,
-        returncode: res.returncode,
-        stdout_tail: res.stdout_tail,
-        stderr_tail: res.stderr_tail,
-        dependency_available: res.dependency_available,
-        note: res.note,
-        error: res.error,
-        detail: res.detail ?? null,
-      });
-      if (res.ok) {
-        reportOk(
-          backend === "memsearch"
-            ? tMemory("memsearchInstalled")
-            : tMemory("agentmemoryInstalled"),
-        );
-      } else if (res.error || res.detail) {
-        reportError(res.detail || res.error || "install failed");
-      }
-      // Refresh memsearch status so the "dependency_available" pill on the
-      // summary card flips ok/warn without a manual reload. agentmemory's
-      // health is probed by its own polling so we don't have to refresh it
-      // here.
-      if (backend === "memsearch") await loadMemoryStatus();
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMemoryBusy("");
-    }
-  }
-
-  // Wire the "Test recall" button. Calls the unified /memory/test endpoint
-  // which probes all 3 backends in one shot and returns per-backend
-  // diagnostics — much friendlier than asking the operator to switch
-  // sub-tabs to run each backend's individual probe.
-  async function runBackendTest(query?: string) {
-    const q = (query ?? backendTestQuery).trim();
-    setMemoryBusy("memory:test");
-    try {
-      const res = await clientApi.memoryTest(q ? { query: q } : {});
-      setBackendTestResult({
-        query: res.query,
-        backends: res.backends || [],
-      });
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setMemoryBusy("");
-    }
-  }
-
-  // -- OAuth login-link helpers ---------------------------------------- //
-
-  // Show the operator the right login affordance for ``providerId``:
-  //  - flow=cli: copy-paste a CLI command.
-  //  - flow=device_code: kick off GitHub's device-code flow (Copilot)
-  //    and open the verification URL in a new tab.
-  //  - flow=paste: nothing more to do, the existing paste field handles it.
   async function generateLoginLink(providerId: string) {
     setOauthBusy(providerId);
     setOauthMessage("");
@@ -2442,62 +1859,6 @@ export function SettingsWorkspace({
     }
   }
 
-  async function loadWriteRules(throwOnError = false) {
-    try {
-      const res = await clientApi.memoryWriteRulesGet();
-      setWriteRules(res.rules || {});
-      setWriteRuleCategories(
-        (res.categories || []).map((c) => ({
-          id: c.id,
-          name: c.name,
-          description: c.description,
-        })),
-      );
-      if (Array.isArray(res.dedupe_strategies) && res.dedupe_strategies.length) {
-        setWriteRuleDedupes(res.dedupe_strategies);
-      }
-    } catch (e) {
-      if (throwOnError) throw e;
-      reportError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  async function notebookMutate(
-    target: "agent" | "operator",
-    action: "add" | "replace" | "remove",
-    payload: { content?: string; old_text?: string },
-  ) {
-    setNotebookBusy(`${target}.${action}`);
-    setNotebookMessage("");
-    try {
-      const res = await clientApi.memoryNotebookMutate({ target, action, ...payload });
-      if (!res.ok) throw new Error(res.error || `notebook ${action} failed`);
-      // Refresh the snapshot + activity feed so the operator sees the
-      // update immediately on both panes.
-      await Promise.all([loadNotebook(), loadMemoryActivity()]);
-      setNotebookMessage(res.message || `${target} ${action} ok`);
-      setNotebookDraft((prev) => ({ ...prev, [target]: "" }));
-    } catch (e) {
-      setNotebookMessage(e instanceof Error ? e.message : String(e));
-    } finally {
-      setNotebookBusy("");
-    }
-  }
-
-  async function searchMemory() {
-    const query = memoryQuery.trim();
-    if (!query) return;
-    const result = await runMemoryAction("search", () =>
-      clientApi.memoryVectorSearch({ query, top_k: 5 }),
-    );
-    // Refresh the activity stream so the operator sees their search
-    // appear in the trace alongside any writes.
-    void loadMemoryActivity();
-    if (result && typeof result === "object" && "results" in result) {
-      setMemoryResults((result as { results?: Array<Record<string, unknown>> }).results || []);
-    }
-  }
-
   async function saveAdminPassword() {
     if (newAdminPassword.length < 8) {
       reportError(tAuth("tooShort"));
@@ -2530,268 +1891,7 @@ export function SettingsWorkspace({
   function logoutAdmin() {
     clearStoredAuthToken();
     reportOk(tAuth("loggedOut"));
-    if (!isLocalDashboardHost()) {
-      window.location.assign("/login");
-    }
-  }
-
-  function parseSearchChain(csv: string): string[] {
-    return csv
-      .split(/[,\n]/)
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean);
-  }
-
-  async function saveSearchEngines(opts: { keysOnly?: boolean } = {}) {
-    setSearchBusy("save");
-    try {
-      const body: Parameters<typeof clientApi.searchEnginesConfig>[0] = {
-        store: searchStore,
-      };
-      if (!opts.keysOnly) {
-        const chain = parseSearchChain(searchChainCsv);
-        if (chain.length) body.engines = chain;
-        if (searchRegion.trim()) body.region = searchRegion.trim();
-        if (searchSafesearch.trim()) body.safesearch = searchSafesearch.trim();
-        const baseUrlBody: Record<string, string> = {};
-        const previousByEngine = new Map(
-          (searchStatus?.engine_status || [])
-            .filter((row) => row.needs_base_url)
-            .map((row) => [row.name, row.base_url?.workspace || ""]),
-        );
-        for (const [engine, draft] of Object.entries(searchBaseUrlDrafts)) {
-          const next = (draft || "").trim();
-          const previous = previousByEngine.get(engine) || "";
-          if (next === previous) continue;
-          baseUrlBody[engine] = next;
-        }
-        if (Object.keys(baseUrlBody).length) body.base_urls = baseUrlBody;
-      }
-      const drafts: Record<string, string> = {};
-      for (const [engine, raw] of Object.entries(searchKeyDrafts)) {
-        const trimmed = (raw || "").trim();
-        if (trimmed === "") continue; // empty/untouched draft → don't overwrite vault
-        drafts[engine] = trimmed;
-      }
-      if (Object.keys(drafts).length) body.keys = drafts;
-      const res = await clientApi.searchEnginesConfig(body);
-      applySearchStatus(res);
-      reportOk(tSearch("savedAll"));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSearchBusy("");
-    }
-  }
-
-  async function clearSearchKeys(engine: string) {
-    setSearchBusy(`clear:${engine}`);
-    try {
-      const res = await clientApi.searchEnginesConfig({
-        store: searchStore,
-        keys: { [engine]: [] },
-      });
-      applySearchStatus(res);
-      reportOk(tSearch("keysCleared", { engine }));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSearchBusy("");
-    }
-  }
-
-  async function saveSearchEngineRow(engine: string) {
-    setSearchBusy(`save:${engine}`);
-    try {
-      const body: Parameters<typeof clientApi.searchEnginesConfig>[0] = {
-        store: searchStore,
-      };
-      const draftKey = (searchKeyDrafts[engine] ?? "").trim();
-      if (draftKey) {
-        body.keys = { [engine]: draftKey };
-      }
-      const row = (searchStatus?.engine_status || []).find((r) => r.name === engine);
-      if (row?.needs_base_url) {
-        const previous = row.base_url?.workspace || "";
-        const next = (searchBaseUrlDrafts[engine] ?? "").trim();
-        if (next !== previous) {
-          body.base_urls = { [engine]: next };
-        }
-      }
-      if (!body.keys && !body.base_urls) {
-        setSearchEngineRowResult((p) => ({
-          ...p,
-          [engine]: "no changes: type a key or change the base URL first",
-        }));
-        return;
-      }
-      const res = await clientApi.searchEnginesConfig(body);
-      applySearchStatus(res);
-      setSearchEngineRowResult((p) => ({
-        ...p,
-        [engine]: `saved (${searchStore})`,
-      }));
-    } catch (e) {
-      setSearchEngineRowResult((p) => ({
-        ...p,
-        [engine]: e instanceof Error ? e.message : String(e),
-      }));
-    } finally {
-      setSearchBusy("");
-    }
-  }
-
-  async function testSearchEngineRow(engine: string) {
-    setSearchBusy(`test:${engine}`);
-    setSearchEngineRowResult((p) => ({ ...p, [engine]: "probing…" }));
-    try {
-      const res = await clientApi.searchEnginesTest({
-        query: searchTestQuery.trim() || "Nerya engine probe",
-        engine,
-        max_results: 3,
-      });
-      if (!res.ok) {
-        setSearchEngineRowResult((p) => ({
-          ...p,
-          [engine]: `error: ${res.error || "test failed"}${res.stderr_tail ? "\n" + res.stderr_tail : ""}`,
-        }));
-        return;
-      }
-      const result = res.result as Record<string, unknown> | null;
-      const items = result && typeof result === "object"
-        ? (result as { results?: unknown[] }).results
-        : undefined;
-      const count = Array.isArray(items) ? items.length : 0;
-      const engineUsed = result && typeof result === "object"
-        ? String((result as { engine?: unknown }).engine || "")
-        : "";
-      setSearchEngineRowResult((p) => ({
-        ...p,
-        [engine]: `ok: ${count} result(s) via ${engineUsed || engine} · ${res.elapsed_ms ?? "?"}ms`,
-      }));
-    } catch (e) {
-      setSearchEngineRowResult((p) => ({
-        ...p,
-        [engine]: e instanceof Error ? e.message : String(e),
-      }));
-    } finally {
-      setSearchBusy("");
-    }
-  }
-
-  async function deploySearxng() {
-    setSearchBusy("searxng-deploy");
-    try {
-      const res = await clientApi.searchSearxngDeploy({
-        host_port: searxngHostPort.trim() ? Number(searxngHostPort.trim()) : undefined,
-        image: searxngImage.trim() || undefined,
-        rebuild: searxngRebuild,
-      });
-      if (!res.ok) {
-        throw new Error(res.detail || res.error || "deploy failed");
-      }
-      reportOk(tSearch("searxngDeployed", { url: res.base_url || `http://127.0.0.1:${searxngHostPort}` }));
-      await loadSearchStatus();
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSearchBusy("");
-    }
-  }
-
-  async function teardownSearxng(opts: { remove?: boolean } = {}) {
-    setSearchBusy(opts.remove === false ? "searxng-stop" : "searxng-teardown");
-    try {
-      const res = await clientApi.searchSearxngTeardown({
-        remove: opts.remove !== false,
-      });
-      if (!res.ok) throw new Error(res.detail || res.error || "teardown failed");
-      reportOk(opts.remove === false ? tSearch("searxngStopped") : tSearch("searxngRemoved"));
-      await loadSearchStatus();
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSearchBusy("");
-    }
-  }
-
-  async function loadFinancialDatasetsStatus() {
-    try {
-      const next = await clientApi.financialDatasetsStatus();
-      setFdStatus(next);
-    } catch (e) {
-      setFdStatus(null);
-    }
-  }
-
-  async function saveFinancialDatasetsKeys() {
-    setFdBusy("save");
-    try {
-      const text = fdKeysDraft.trim();
-      const res = await clientApi.financialDatasetsSetKeys({
-        keys: text,
-        store: fdStore,
-      });
-      setFdStatus(res);
-      setFdKeysDraft("");
-      reportOk(tFdApi("keysSaved"));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setFdBusy("");
-    }
-  }
-
-  async function clearFinancialDatasetsKeys() {
-    setFdBusy("clear");
-    try {
-      const res = await clientApi.financialDatasetsSetKeys({
-        keys: [],
-        store: fdStore,
-      });
-      setFdStatus(res);
-      setFdKeysDraft("");
-      reportOk(tFdApi("keysCleared", { store: fdStore }));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setFdBusy("");
-    }
-  }
-
-  async function runSearchEngineTest() {
-    setSearchBusy("test");
-    setSearchTestResult(null);
-    try {
-      const res = await clientApi.searchEnginesTest({
-        query: searchTestQuery.trim() || "Nerya search engine probe",
-        engine: searchTestEngine.trim().toLowerCase() || undefined,
-        max_results: 3,
-      });
-      if (!res.ok) {
-        setSearchTestResult(
-          res.error
-            ? `${res.error}${res.stderr_tail ? "\n" + res.stderr_tail : ""}`
-            : "test failed",
-        );
-        return;
-      }
-      const result = res.result as Record<string, unknown> | null;
-      const engineUsed = result && typeof result === "object"
-        ? String((result as { engine?: unknown }).engine || "")
-        : "";
-      const items = result && typeof result === "object"
-        ? (result as { results?: unknown[] }).results
-        : undefined;
-      const count = Array.isArray(items) ? items.length : 0;
-      setSearchTestResult(
-        `engine=${engineUsed || "?"} · results=${count} · ${res.elapsed_ms ?? "?"}ms`,
-      );
-    } catch (e) {
-      setSearchTestResult(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSearchBusy("");
-    }
+    if (authStatus?.local_access !== true) redirectToLogin();
   }
 
   // Pick which i18n namespace owns the PageHeader title/description for
@@ -2810,156 +1910,12 @@ export function SettingsWorkspace({
   // have no entry here — `tSectionPage` resolves to `null` and the
   // component falls back to the generic `t("title")` copy.
   const sectionPageTranslations: Partial<Record<ForceSectionKey, SectionPageTranslator>> = {
-    memory: tMemoryPage as unknown as SectionPageTranslator,
     search: tWebSearchPage as unknown as SectionPageTranslator,
-    browsers: tBrowsersPage as unknown as SectionPageTranslator,
     envvault: tEnvVaultPage as unknown as SectionPageTranslator,
   };
   const tSectionPage: SectionPageTranslator | null = forceSection
     ? sectionPageTranslations[forceSection] ?? null
     : null;
-
-  function renderSearchEngineRow(row: SearchEngineStatus) {
-    const counts = row.key_counts || { workspace: 0, vault: 0, env: 0, total: 0 };
-    const draftKey = searchKeyDrafts[row.name] ?? "";
-    const inChain = (searchStatus?.engines || []).includes(row.name);
-    const baseUrlInfo = row.base_url || {};
-    const baseUrlDraft = searchBaseUrlDrafts[row.name] ?? (baseUrlInfo.workspace || "");
-    return (
-      <div
-        key={row.name}
-        className="rounded-lg border border-[color:var(--line)] p-3"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-[13px] font-medium text-ink-100">{row.name}</div>
-            <div
-              className="mt-0.5 text-[11px] text-ink-500"
-              title={
-                row.needs_key
-                  ? tSearch("keysCountsLocation", {
-                      vault: counts.vault,
-                      workspace: counts.workspace,
-                      env: counts.env,
-                    })
-                  : undefined
-              }
-            >
-              {row.needs_key
-                ? tSearch("keysCounts", { total: counts.total })
-                : tSearch("keyless")}
-              {row.needs_base_url
-                ? ` · ${tSearch("baseUrlInline", {
-                    url: baseUrlInfo.effective || "–",
-                  })}`
-                : ""}
-            </div>
-          </div>
-          <div className="flex flex-wrap justify-end gap-1.5">
-            {inChain ? <Pill tone="brand">{tSearch("inChain")}</Pill> : null}
-            <Pill tone={row.ready ? "ok" : "warn"}>
-              {row.ready
-                ? tSearch("ready")
-                : row.needs_base_url && !baseUrlInfo.effective
-                  ? tSearch("needsBaseUrl")
-                  : tSearch("needsKey")}
-            </Pill>
-          </div>
-        </div>
-        {row.needs_key ? (
-          <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto_auto]">
-            <textarea
-              className="input-dark font-mono text-xs"
-              rows={Math.min(4, Math.max(1, draftKey.split(/[,\n]/).filter(Boolean).length || 1))}
-              value={draftKey}
-              onChange={(e) => setSearchKeyDrafts((p) => ({ ...p, [row.name]: e.target.value }))}
-              placeholder={tSearch("keyPlaceholder")}
-              spellCheck={false}
-              autoCorrect="off"
-              autoCapitalize="off"
-            />
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => setSearchKeyDrafts((p) => {
-                const next = { ...p };
-                delete next[row.name];
-                return next;
-              })}
-              disabled={!draftKey}
-            >
-              {tSearch("undo")}
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => void clearSearchKeys(row.name)}
-              disabled={Boolean(searchBusy) || counts.total === 0}
-            >
-              {searchBusy === `clear:${row.name}` ? tCommon("saving") : tSearch("clear")}
-            </button>
-          </div>
-        ) : null}
-        {row.needs_base_url ? (
-          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
-            <input
-              className="input-dark font-mono text-xs"
-              value={baseUrlDraft}
-              onChange={(e) => setSearchBaseUrlDrafts((p) => ({ ...p, [row.name]: e.target.value }))}
-              placeholder={baseUrlInfo.default || "https://example.com"}
-              spellCheck={false}
-            />
-            <span className="self-center text-[11px] text-ink-500">
-              {tSearch("envDefault", {
-                env: baseUrlInfo.env || "–",
-                def: baseUrlInfo.default || "–",
-              })}
-            </span>
-          </div>
-        ) : null}
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          {row.needs_key || row.needs_base_url ? (
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => void saveSearchEngineRow(row.name)}
-              disabled={Boolean(searchBusy)}
-              title={tSearch("saveRowTitle")}
-            >
-              <CheckIcon size={12} />
-              {searchBusy === `save:${row.name}` ? tCommon("saving") : tSearch("save")}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => void testSearchEngineRow(row.name)}
-            disabled={Boolean(searchBusy)}
-            title={tSearch("testRowTitle")}
-          >
-            <SearchIcon size={12} />
-            {searchBusy === `test:${row.name}` ? tSearch("testing") : tSearch("test")}
-          </button>
-          {row.key_preview && row.key_preview.length ? (
-            <span className="font-mono text-[11px] text-ink-500">
-              {tSearch("stored", { value: row.key_preview.join(" · ") })}
-            </span>
-          ) : null}
-          {searchEngineRowResult[row.name] ? (
-            <span
-              className={`ml-auto font-mono text-[11px] ${
-                /^(error|fail|missing|❌)/i.test(searchEngineRowResult[row.name] || "")
-                  ? "text-rose-300"
-                  : "text-emerald-300"
-              }`}
-            >
-              {searchEngineRowResult[row.name]}
-            </span>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <PageBody>
@@ -2984,7 +1940,7 @@ export function SettingsWorkspace({
         />
       )}
 
-      {/* Optional banner injected by a host page (e.g. /browsers
+      {/* Optional banner injected by a host page (e.g. a host page
           passes its Engines/Session tab strip here so the strip lives
           immediately under the section-page header instead of below
           the panel content). */}
@@ -2997,55 +1953,20 @@ export function SettingsWorkspace({
       <div aria-busy={sectionBusy}>
         <fieldset
           className="settings-flat m-0 min-w-0 space-y-6 border-0 p-0"
-          disabled={!["interface", "capabilityGates", "gateway", "mcp"].includes(effectiveSettingsTab) && sectionStates[sectionKey] !== "ready"}
+          disabled={(effectiveSettingsTab === "models" && (saving || discovering)) || (!["interface", "search", "capabilityGates", "gateway", "mcp"].includes(effectiveSettingsTab) && sectionStates[sectionKey] !== "ready")}
         >
 
       {settingsReady && effectiveSettingsTab === "models" && !loading && !modelLoadError && (!inSectionMode || forceSection === "models") ? (
-        <div
-          id={settingsPanelId("models")}
+        <form
+          id={setupMode ? "nerya-setup-llm" : settingsPanelId("models")}
+          onSubmit={(event) => { event.preventDefault(); void saveModelConfig(); }}
           role="region"
           aria-label={tTabs("models")}
           className="space-y-5"
         >
-          {/* Plain-language orientation strip. The models panel is the
-              first thing every new operator must configure and the old
-              copy assumed familiarity with vault refs and model ids.
-              Three steps + inline TermTips orient before the form
-              starts. */}
-          <div className="rounded-lg border border-brand-500/15 bg-brand-500/[0.04] px-4 py-3">
-            <div className="text-[13px] font-medium text-[color:var(--text-base)]">
-              {tProvider("introTitle")}
-            </div>
-            <ol className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {[
-                { title: tProvider("introStep1"), desc: tProvider("introStep1Desc") },
-                { title: tProvider("introStep2"), desc: tProvider("introStep2Desc") },
-                { title: tProvider("introStep3"), desc: tProvider("introStep3Desc") },
-              ].map((step, i) => (
-                <li
-                  key={step.title}
-                  className="flex items-start gap-2 rounded-md border border-brand-500/10 bg-ink-950/30 px-2.5 py-2"
-                >
-                  <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-brand-500/30 bg-brand-500/10 text-[11px] font-medium text-brand-200">
-                    {i + 1}
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block text-[12px] font-medium text-ink-100">{step.title}</span>
-                    <span className="mt-0.5 block text-[11px] leading-snug text-ink-400">{step.desc}</span>
-                  </span>
-                </li>
-              ))}
-            </ol>
-          </div>
-
           <Card
-            title={tProvider("title")}
-            description={tProvider("description")}
-            actions={
-              discoveredModels.length ? (
-                <Pill tone="brand">{tProvider("selectedCount", { selected: selectedModelIds.size, total: discoveredModels.length })}</Pill>
-              ) : null
-            }
+            title={setupMode ? tSetup("modelConnection") : tProvider("title")}
+            description={setupMode ? tSetup("manualModelHint") : tProvider("description")}
           >
             {/* OAuth provider login row — shown only when the
                 selected chat provider has an associated OAuth login
@@ -3316,31 +2237,19 @@ export function SettingsWorkspace({
 
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
               <Field label={tProvider("providerLabel")} hint={tProvider("providerHint")}>
-                {/* Combo input: type any provider id (free-form) or
-                    pick one from the catalogue via the datalist. The
-                    free-text path is what unlocks "manually add a
-                    provider" — anything not in the catalogue is treated
-                    as a custom id and the operator picks the API shape
-                    from the preset selector below. */}
-                <input
-                  className="input-dark font-mono"
-                  list="provider-catalog-options"
+                <ChoiceSelect
                   value={providerDraft}
-                  onChange={(e) => setProviderDraftFromSelect(e.target.value)}
-                  placeholder={tProvider("providerPlaceholder")}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <datalist id="provider-catalog-options">
-                  {providerOptions.map((p) => {
-                    const entry = catalogById.get(p);
-                    return (
-                      <option key={p} value={p}>
-                        {entry ? `${entry.api_mode}` : "custom"}
-                      </option>
-                    );
+                  onValueChange={setProviderDraftFromSelect}
+                  searchable
+                  createOption={(value) => tProvider("createProvider", { value })}
+                  aria-label={tProvider("providerLabel")}
+                  className="w-full font-mono"
+                >
+                  {providerOptions.map((provider) => {
+                    const entry = catalogById.get(provider);
+                    return <option key={provider} value={provider}>{entry?.name || provider}</option>;
                   })}
-                </datalist>
+                </ChoiceSelect>
               </Field>
               <Field
                 label={
@@ -3354,49 +2263,29 @@ export function SettingsWorkspace({
                 <input
                   className="input-dark font-mono"
                   value={providerKeyDraft}
+                  aria-label={tProvider("apiKeyLabel")}
                   onChange={(e) => setProviderKeyDraft(e.target.value)}
                   type={providerKeyDraft.startsWith("vault://") ? "text" : "password"}
                   placeholder={tProvider("apiKeyPlaceholder")}
                 />
               </Field>
-              <div className="lg:col-span-2 flex flex-wrap items-end gap-2">
+              <div className="lg:col-span-2 flex flex-wrap items-center gap-2 border-t border-[color:var(--line)] pt-3">
                 <button
                   type="button"
-                  className="btn btn-primary"
+                  className={setupMode ? "btn btn-secondary" : "btn btn-primary"}
                   onClick={discoverProviderModels}
                   disabled={discovering || !providerDraft.trim()}
                 >
                   <SearchIcon size={14} />
-                  {discovering ? tProvider("fetching") : tProvider("fetchModels")}
+                  {discovering ? tProvider("fetching") : (zh ? "获取模型并保存连接" : "Fetch models and save connection")}
                 </button>
                 <TermTip term="fetchModels" />
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => setSelectedModelIds(new Set(discoveredModels.map(modelId)))}
-                  disabled={!discoveredModels.length}
-                >
-                  {tProvider("selectAll")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => setSelectedModelIds(new Set())}
-                  disabled={!discoveredModels.length}
-                >
-                  {tProvider("clear")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary ml-auto"
-                  onClick={importSelectedModels}
-                  disabled={importing || selectedModelIds.size === 0}
-                >
-                  <CheckIcon size={14} />
-                  {importing
-                    ? tProvider("importing")
-                    : tProvider("importSelectedCount", { count: selectedModelIds.size })}
-                </button>
+                <span className="text-xs text-[color:var(--text-muted)]">{zh ? "成功后保存 URL 和凭据；失败保留草稿，不保存连接。此操作不会验证模型回复。" : "Saves URL and credentials on success; failure keeps drafts without saving. This does not test a model response."}</span>
+                {!setupMode && <>
+                  <button type="button" className="btn btn-secondary" disabled={!dirty || saving} onClick={() => void saveModelConfig()}>{zh ? "保存设置" : "Save settings"}</button>
+                  <button type="button" className="btn btn-ghost" disabled={!dirty || saving} onClick={() => void refreshCurrentSection()}>{zh ? "放弃草稿" : "Discard drafts"}</button>
+                  {dirty && <Pill tone="warn">{tModel("unsaved")}</Pill>}
+                </>}
               </div>
             </div>
 
@@ -3414,15 +2303,17 @@ export function SettingsWorkspace({
                 preset picker only matters for custom ids, and manual
                 model entry is an escape hatch when /models is gated. */}
             <Advanced
-              title={tProvider("advancedTitle")}
-              description={tProvider("advancedDesc")}
-              storageKey="nerya.settings.provider.advanced"
+              title={setupMode ? tSetup("modelConnection") : tProvider("advancedTitle")}
+              description={setupMode ? tSetup("manualModelHint") : tProvider("advancedDesc")}
+              defaultOpen={setupMode}
+              storageKey={setupMode ? undefined : "nerya.settings.provider.advanced"}
             >
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <Field label={tProvider("baseUrlLabel")} hint={tProvider("baseUrlHint")}>
                   <input
                     className="input-dark font-mono"
                     value={providerBaseUrlDraft}
+                    aria-label={tProvider("baseUrlLabel")}
                     onChange={(e) => setProviderBaseUrlDraft(e.target.value)}
                     placeholder={
                       customProviderKind
@@ -3477,6 +2368,7 @@ export function SettingsWorkspace({
                   <input
                     className="input-dark font-mono"
                     value={manualModelDraft}
+                    aria-label={tProvider("manualLabel")}
                     onChange={(e) => setManualModelDraft(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
@@ -3502,7 +2394,28 @@ export function SettingsWorkspace({
             </Advanced>
 
             {discoveredModels.length ? (
-              <div className="embedded-list-scroll mt-4 rounded-lg border border-brand-500/10 bg-ink-950/35">
+              <div className="mt-4 overflow-hidden rounded-lg border border-[color:var(--line)] bg-ink-950/25">
+                <div className="flex flex-wrap items-center gap-2 border-b border-[color:var(--line)] px-3 py-2">
+                  <span className="text-xs font-medium text-[color:var(--text-base)]">
+                    {tProvider("selectedCount", { selected: selectedModelIds.size, total: discoveredModels.length })}
+                  </span>
+                  <button type="button" className="btn btn-ghost ml-auto" onClick={() => setSelectedModelIds(new Set(discoveredModels.map(modelId)))}>
+                    {tProvider("selectAll")}
+                  </button>
+                  <button type="button" className="btn btn-ghost" onClick={() => setSelectedModelIds(new Set())}>
+                    {tProvider("clear")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={importSelectedModels}
+                    disabled={importing || selectedModelIds.size === 0}
+                  >
+                    <CheckIcon size={14} />
+                    {importing ? tProvider("importing") : tProvider("importSelectedCount", { count: selectedModelIds.size })}
+                  </button>
+                </div>
+                <div className="embedded-list-scroll">
                 {discoveredModels.map((row) => {
                   const id = modelId(row);
                   const owner = String(row.owned_by ?? "");
@@ -3536,6 +2449,7 @@ export function SettingsWorkspace({
                     </label>
                   );
                 })}
+                </div>
               </div>
             ) : null}
           </Card>
@@ -3546,53 +2460,26 @@ export function SettingsWorkspace({
               <span className="inline-flex items-center gap-2">
                 <SparkIcon size={16} className="text-fluid-300" />
                 {tModel("title")}
-                <TermTip term="tier" />
+
               </span>
             }
             description={tModel("description")}
-            actions={
+            actions={setupMode ? null :
               <div className="flex items-center gap-2">
                 {dirty ? <Pill tone="warn">{tModel("unsaved")}</Pill> : null}
-                <Pill tone="brand">{tModel("catalogModels", { count: catalogModelCount })}</Pill>
+                <Pill tone={configuredTierCount === tierRows.length ? "ok" : "warn"}>
+                  {tModel("configuredSummary", { configured: configuredTierCount, total: tierRows.length })}
+                </Pill>
               </div>
             }
           >
-            <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-              <Metric
-                label={tModel("defaultLabel")}
-                value={<span className="font-mono">{defaultTier}</span>}
-                detail={tModel("agentTurns")}
-                icon={<SparkIcon size={14} />}
-              />
-              <Metric
-                label={tModel("intentLabel")}
-                value={<span className="font-mono">{intentTier}</span>}
-                detail={tModel("classification")}
-                icon={<SearchIcon size={14} />}
-              />
-              <Metric
-                label={tModel("configuredLabel")}
-                value={`${configuredTierCount}/${tierRows.length}`}
-                detail={tModel("providerModel")}
-                icon={<CheckIcon size={14} />}
-              />
-              <Metric
-                label={tModel("providersLabel")}
-                value={`${readyProviderCount}/${providers.length || providerOptions.length}`}
-                detail={tModel("credentialReady")}
-                icon={<SettingsIcon size={14} />}
-              />
-            </div>
+            <PrimaryModelSettings primaryOnly={setupMode} routes={routesOf(tierRows.find((row) => row.tier === defaultTier) || emptyTier(defaultTier))}
+              catalog={modelCatalog} disabled={saving || loading} onChange={selectPrimaryModel}
+              onContextChange={setPrimaryContextWindow}
+              onInheritConnection={(routeIndex) => patchTierRoute(tierRows.findIndex(row => row.tier === defaultTier), routeIndex, { base_url: "", provider_key_ref: "", provider_key_refs: [], provider_key_env: "", provider_key: "", provider_keys: [], kind: "" })} />
+            <SavedModelTest revision={savedRevision} dirty={dirty} disabled={saving || loading || discovering} />
+            {!setupMode ? <div className="flex flex-wrap items-end gap-3 rounded-lg bg-ink-950/20 p-3">
 
-            <div className="mb-4 flex flex-wrap items-end gap-3 rounded-lg border border-[color:var(--line)] p-3">
-              <label className="text-[12px] text-ink-300">
-                {tModel("defaultTier")}
-                <Select
-                  value={defaultTier}
-                  onChange={setDefaultTier}
-                  options={defaultTierOptions}
-                />
-              </label>
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -3602,6 +2489,9 @@ export function SettingsWorkspace({
                 <RefreshIcon size={14} />
                 {refreshing ? tCommon("refreshing") : tModel("refreshCatalog")}
               </button>
+              <span className="hidden text-xs text-[color:var(--text-muted)] lg:inline">
+                {tModel("catalogModels", { count: catalogModelCount })}
+              </span>
               <button
                 type="button"
                 className="btn btn-primary ml-auto"
@@ -3611,22 +2501,29 @@ export function SettingsWorkspace({
                 <CheckIcon size={14} />
                 {saving ? tCommon("saving") : tModel("saveAssignments")}
               </button>
-            </div>
+            </div> : null}
 
-            <Advanced
+            {!setupMode ? <Advanced
               title={tUi("advancedRouting")}
               description={tUi("advancedRoutingDescription")}
-              defaultOpen={configuredTierCount === 0}
+              defaultOpen={false}
               storageKey="nerya.settings.models.advancedRouting"
             >
             <div className="space-y-3">
+              <label className="min-w-[180px] text-[12px] text-ink-300">
+                {tModel("defaultTier")}
+                <Select
+                  value={defaultTier}
+                  onChange={setDefaultTier}
+                  options={defaultTierOptions}
+                />
+              </label>
               {tierRows.map((row, index) => {
                 const routes = routesOf(row);
                 const configuredRoutes = routes.filter((route) =>
                   route.provider.trim() && route.model.trim()
                 ).length;
                 const anyRouteConfigured = configuredRoutes > 0;
-                const anyRouteReady = routes.some((route) => routeHasCredential(route));
                 const laneKey = row.tier === INTENT_TIER
                   ? "laneIntent"
                   : row.tier === "light" ? "laneLight"
@@ -3638,27 +2535,23 @@ export function SettingsWorkspace({
                     key={row.tier}
                     className="rounded-lg border border-[color:var(--line)] p-3.5"
                   >
-                    <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                    <div className="mb-3 flex flex-col gap-3 border-b border-[color:var(--line)] pb-3 lg:flex-row lg:items-end lg:justify-between">
                       <div>
                         <div className="text-[13px] font-medium text-ink-100">{tierLabel(row.tier, tModel)}</div>
                         <div className="mt-0.5 text-[11px] text-ink-500">
                           {laneKey ? tModel(laneKey) : `${row.tier} model lane`}
                         </div>
                       </div>
-                      <div className="flex flex-wrap justify-end gap-1.5">
-                        <Pill tone={anyRouteReady ? "ok" : "warn"}>
-                          {anyRouteReady ? tModel("ready") : tModel("keyRefMissing")}
-                        </Pill>
-                        <Pill tone={anyRouteConfigured ? "neutral" : "warn"}>
-                          {tModel("configuredRoutes", { count: configuredRoutes })}
-                        </Pill>
-                        {row.tier === defaultTier ? <Pill tone="brand">{tModel("default")}</Pill> : null}
-                        {row.tier === intentTier ? <Pill tone="brand">{tModel("intent")}</Pill> : null}
+                      <div className="flex flex-wrap gap-1.5">
+                          <Pill tone={anyRouteConfigured ? "neutral" : "warn"}>
+                            {tModel("configuredRoutes", { count: configuredRoutes })}
+                          </Pill>
+                          {row.tier === defaultTier ? <Pill tone="brand">{tModel("default")}</Pill> : null}
+                          {row.tier === intentTier ? <Pill tone="brand">{tModel("intent")}</Pill> : null}
                       </div>
                     </div>
                     <div className="space-y-2.5">
                       {routes.map((route, routeIndex) => {
-                        const artifacts = providerArtifacts(route.provider);
                         const models = modelCatalog[route.provider] || [];
                         const routeModelValues = splitRouteValues(
                           route.models?.length ? route.models : route.model,
@@ -3669,18 +2562,6 @@ export function SettingsWorkspace({
                         const modelOptions = modelInputValue && !models.includes(modelInputValue)
                           ? [modelInputValue, ...models]
                           : models;
-                        const providerKeyValues = splitRouteValues(
-                          route.provider_keys?.length ? route.provider_keys : route.provider_key,
-                        );
-                        const providerKeyRefValues = splitRouteValues(
-                          route.provider_key_refs?.length
-                            ? route.provider_key_refs
-                            : route.provider_key_ref,
-                        );
-                        const keyValue = providerKeyValues.length
-                          ? providerKeyValues.join(", ")
-                          : providerKeyRefValues.join(", ");
-                        const routeReady = routeHasCredential(route);
                         const canRemove = routes.length > 1;
                         return (
                           <div
@@ -3692,9 +2573,6 @@ export function SettingsWorkspace({
                                 <span className="text-[12px] font-medium text-ink-200">
                                   {tModel("routeLabel", { index: routeIndex + 1 })}
                                 </span>
-                                <Pill tone={routeReady ? "ok" : "warn"}>
-                                  {routeReady ? tModel("ready") : tModel("keyRefMissing")}
-                                </Pill>
                               </div>
                               <button
                                 type="button"
@@ -3707,14 +2585,11 @@ export function SettingsWorkspace({
                                 <TrashIcon size={13} />
                               </button>
                             </div>
-                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
-                              <Field
-                                label={tProvider("providerLabel")}
-                                hint={artifacts.base_url || tModel("selectProvider")}
-                              >
-                                <PortalSelect
+                            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                              <Field label={tProvider("providerLabel")}>
+                                <ChoiceSelect
                                   value={route.provider}
-                                  onChange={(value) => {
+                                  onValueChange={(value) => {
                                     const defaults = routeDefaultsForProvider(value);
                                     patchTierRoute(index, routeIndex, {
                                       provider: value,
@@ -3722,24 +2597,19 @@ export function SettingsWorkspace({
                                       kind: defaults.kind,
                                     });
                                   }}
-                                  options={[
-                                    { value: "", label: tModel("selectProvider") },
-                                    ...providerOptions.map((p) => ({
-                                      value: p,
-                                      label: p,
-                                    })),
-                                  ]}
-                                  size="sm"
-                                  ariaLabel={tProvider("providerLabel")}
-                                />
+                                  searchable
+                                  createOption={(value) => tProvider("createProvider", { value })}
+                                  placeholder={tModel("selectProvider")}
+                                  aria-label={`${tierLabel(row.tier, tModel)} · ${tModel("routeLabel", { index: routeIndex + 1 })} · ${tProvider("providerLabel")}`}
+                                  className="w-full font-mono"
+                                >
+                                  {providerOptions.map((provider) => <option key={provider} value={provider}>{catalogById.get(provider)?.name || provider}</option>)}
+                                </ChoiceSelect>
                               </Field>
-                              <Field
-                                label={tProvider("modelLabel")}
-                                hint={models.length ? tModel("importedCount", { count: models.length }) : tModel("importModelsFirst")}
-                              >
-                                <ModelSelectInput
+                              <Field label={tProvider("modelLabel")}>
+                                <ChoiceSelect
                                   value={modelInputValue}
-                                  onChange={(value) => {
+                                  onValueChange={(value) => {
                                     patchTierRoute(index, routeIndex, {
                                       model: value,
                                       models: splitRouteValues(value),
@@ -3748,73 +2618,61 @@ export function SettingsWorkspace({
                                       setIntentTier(INTENT_TIER);
                                   }}
                                   disabled={!route.provider}
-                                  options={modelOptions}
+                                  searchable
                                   placeholder={tModel("selectModel")}
-                                  ariaLabel={tProvider("modelLabel")}
-                                  className="font-mono"
-                                  emptyHint={models.length ? tModel("selectModel") : tModel("importModelsFirst")}
-                                />
+                                  aria-label={`${tierLabel(row.tier, tModel)} · ${tModel("routeLabel", { index: routeIndex + 1 })} · ${tProvider("modelLabel")}`}
+                                  className="w-full font-mono"
+                                >
+                                  {modelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
+                                </ChoiceSelect>
                               </Field>
-                              <Field label={tProvider("baseUrlLabel")} hint={tProvider("baseUrlHint")}>
+                              <Field label={tModel("contextWindowLabel")} hint={tModel("contextWindowHint")}>
                                 <input
-                                  className="input-dark font-mono text-xs"
-                                  value={route.base_url || ""}
-                                  onChange={(e) =>
-                                    patchTierRoute(index, routeIndex, { base_url: e.target.value })
-                                  }
-                                  placeholder={artifacts.base_url || "https://api.example.com/v1"}
-                                  autoComplete="off"
-                                  spellCheck={false}
-                                />
-                              </Field>
-                              <Field label={tProvider("apiKeyLabel")} hint={tProvider("apiKeyHint")}>
-                                <input
-                                  className="input-dark font-mono text-xs"
-                                  value={keyValue}
-                                  onChange={(e) => {
-                                    const value = e.target.value;
-                                    const values = splitRouteValues(value);
-                                    patchTierRoute(index, routeIndex, value.trim().startsWith("vault://")
-                                      ? {
-                                          provider_key_ref: value,
-                                          provider_key_refs: values,
-                                          provider_key: "",
-                                          provider_keys: [],
-                                        }
-                                      : {
-                                          provider_key: value,
-                                          provider_keys: values,
-                                          provider_key_ref: "",
-                                          provider_key_refs: [],
-                                        });
+                                  className="input-dark font-mono"
+                                  type="number"
+                                  min={MIN_MODEL_CONTEXT_WINDOW}
+                                  max={MAX_MODEL_CONTEXT_WINDOW}
+                                  step={1000}
+                                  value={route.context_window ?? DEFAULT_MODEL_CONTEXT_WINDOW}
+                                  onChange={(event) => {
+                                    const value = Number(event.currentTarget.value);
+                                    if (Number.isFinite(value) && value >= MIN_MODEL_CONTEXT_WINDOW) {
+                                      patchTierRoute(index, routeIndex, {
+                                        context_window: Math.min(MAX_MODEL_CONTEXT_WINDOW, Math.round(value)),
+                                      });
+                                    }
                                   }}
-                                  type={keyValue.startsWith("vault://") ? "text" : "password"}
-                                  placeholder={tProvider("apiKeyPlaceholder")}
-                                  autoComplete="off"
-                                  spellCheck={false}
+                                  aria-label={`${tierLabel(row.tier, tModel)} · ${tModel("routeLabel", { index: routeIndex + 1 })} · ${tModel("contextWindowLabel")}`}
                                 />
                               </Field>
-                              <Field label={tModel("kindLabel")} hint={tModel("kindHint")}>
+                              <Field label={tModel("reasoningEffortLabel")}>
                                 <PortalSelect
-                                  value={route.kind || "chat_completions"}
-                                  onChange={(value) =>
-                                    patchTierRoute(index, routeIndex, { kind: value })
-                                  }
+                                  value={route.reasoning_effort || ""}
+                                  onChange={(value) => patchTierRoute(index, routeIndex, { reasoning_effort: value })}
                                   options={[
-                                    {
-                                      value: "chat_completions",
-                                      label: tModel("kindChatCompletions"),
-                                    },
-                                    {
-                                      value: "anthropic_messages",
-                                      label: tModel("kindAnthropicMessages"),
-                                    },
+                                    { value: "", label: tModel("reasoningEffortDefault") },
+                                    ...reasoningLevels.map((level) => {
+                                      let label: string;
+                                      try {
+                                        label = tModel(`reasoningEffortLevel.${level}` as never);
+                                      } catch {
+                                        label = prettifyReasoningLevel(level);
+                                      }
+                                      return { value: level, label };
+                                    }),
                                   ]}
                                   size="sm"
-                                  ariaLabel={tModel("kindLabel")}
-                                  className="font-mono"
+                                  className="!min-h-[34px]"
+                                  ariaLabel={`${tierLabel(row.tier, tModel)} · ${tModel("routeLabel", { index: routeIndex + 1 })} · ${tModel("reasoningEffortLabel")}`}
                                 />
                               </Field>
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[color:var(--text-muted)]">
+                              <span>{zh ? "连接覆盖：" : "Connection overrides: "}{route.base_url || (zh ? "URL 继承" : "URL inherited")} · {route.provider_key_ref ? (zh ? "路由凭据" : "Route credentials") : (zh ? "凭据继承" : "Credentials inherited")}</span>
+                              <button type="button" className="btn btn-ghost" disabled={!route.base_url && !route.provider_key_ref && !route.provider_key_env && !route.kind}
+                                onClick={() => patchTierRoute(index, routeIndex, { base_url: "", provider_key_ref: "", provider_key_refs: [], provider_key_env: "", provider_key: "", provider_keys: [], kind: "" })}>
+                                {zh ? "恢复连接继承" : "Inherit connection"}
+                              </button>
                             </div>
                           </div>
                         );
@@ -3830,47 +2688,15 @@ export function SettingsWorkspace({
                         </button>
                       </div>
                     </div>
-                    <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-                      <Field
-                        label={tModel("reasoningEffortLabel")}
-                        hint={tModel("reasoningEffortHint")}
-                      >
-                        <PortalSelect
-                          value={row.reasoning_effort || ""}
-                          onChange={(value) =>
-                            patchTier(index, { reasoning_effort: value })
-                          }
-                          disabled={!anyRouteConfigured}
-                          options={[
-                            {
-                              value: "",
-                              label: tModel("reasoningEffortDefault"),
-                            },
-                            ...reasoningLevels.map((level) => {
-                              let label: string;
-                              try {
-                                label = tModel(
-                                  `reasoningEffortLevel.${level}` as never,
-                                );
-                              } catch {
-                                label = prettifyReasoningLevel(level);
-                              }
-                              return { value: level, label };
-                            }),
-                          ]}
-                          size="sm"
-                          ariaLabel={tModel("reasoningEffortLabel")}
-                        />
-                      </Field>
-                    </div>
                   </div>
                 );
               })}
             </div>
-            </Advanced>
+            </Advanced> : null}
           </Card>
           )}
-        </div>
+          {setupError ? <p role="alert" className="text-sm text-danger">{setupError}</p> : null}
+        </form>
       ) : null}
 
       {effectiveSettingsTab === "access" && (!inSectionMode || forceSection === "access") ? (
@@ -3891,11 +2717,6 @@ export function SettingsWorkspace({
             }
           >
             <div className="space-y-3">
-              <Row label={tAuth("mode")} desc={tAuth("modeDesc")}>
-                <span className="font-mono text-[11px] text-ink-200">
-                  {authStatus?.mode || "local"}
-                </span>
-              </Row>
               {authStatus?.password_configured ? (
                 <Field label={tAuth("currentPassword")} hint={tAuth("requiredForRotation")}>
                   <input
@@ -3955,100 +2776,8 @@ export function SettingsWorkspace({
               </p>
             </div>
           </Card>
-
-          <Advanced
-            title={tFdApi("title")}
-            description={tFdApi("description")}
-            count={
-              fdStatus?.ready
-                ? fdStatus.total_keys === 1
-                  ? tFdApi("keysReady", { count: fdStatus.total_keys })
-                  : tFdApi("keysReadyPlural", { count: fdStatus.total_keys })
-                : undefined
-            }
-            storageKey="nerya.settings.access.advanced.fdapi"
-          >
-            <div className="space-y-3">
-              <div className="text-[11px] text-ink-500">
-                Vault: <span className="font-mono">{fdStatus?.vault_count ?? 0}</span> ·
-                Env: <span className="font-mono">{fdStatus?.env_count ?? 0}</span>
-                {fdStatus?.env_sources?.length
-                  ? ` (${fdStatus.env_sources.join(", ")})`
-                  : ""}
-                {fdStatus?.key_preview?.length ? (
-                  <>
-                    {" · "}
-                    <span className="font-mono">{fdStatus.key_preview.join(" ")}</span>
-                  </>
-                ) : null}
-              </div>
-              <Field
-                label={tProxy("apiKeys")}
-                hint={tProxy("apiKeysHint")}
-              >
-                <input
-                  className="input-dark font-mono text-xs"
-                  type="password"
-                  value={fdKeysDraft}
-                  onChange={(e) => setFdKeysDraft(e.target.value)}
-                  placeholder="k1,k2,k3"
-                />
-              </Field>
-              <Field label={tProxy("storage")} hint={tProxy("storageHint")}>
-                <Select
-                  value={fdStore}
-                  onChange={(v) => setFdStore(v === "workspace" ? "workspace" : "vault")}
-                  options={[
-                    { value: "vault", label: tProxy("storageVault") },
-                    { value: "workspace", label: tProxy("storageWorkspace") },
-                  ]}
-                />
-              </Field>
-              <div className="flex flex-wrap justify-end gap-2">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => void clearFinancialDatasetsKeys()}
-                  disabled={Boolean(fdBusy) || (fdStatus?.total_keys ?? 0) === 0}
-                >
-                  {fdBusy === "clear" ? tCommon("saving") : tProxy("clearLower")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => void loadFinancialDatasetsStatus()}
-                  disabled={Boolean(fdBusy)}
-                >
-                  <RefreshIcon size={14} />
-                  {tCommon("refresh")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => void saveFinancialDatasetsKeys()}
-                  disabled={Boolean(fdBusy) || !fdKeysDraft.trim()}
-                >
-                  <CheckIcon size={14} />
-                  {fdBusy === "save" ? tCommon("saving") : tProxy("apiKeysSave")}
-                </button>
-              </div>
-              {fdStatus?.documentation ? (
-                <a
-                  className="text-[11px] text-brand-300 hover:underline"
-                  href={fdStatus.documentation}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {tProxy("docsFinancialDatasets")}
-                </a>
-              ) : null}
-            </div>
-          </Advanced>
+          <DesktopSettings passwordConfigured={Boolean(authStatus?.password_configured)} />
           </div>
-          {/* Gateway channels now live in the dedicated /gateway page
-              (see components/GatewayChannelsPanel) — there is no
-              right column here any more so the Admin password +
-              Financial Datasets API cards span the full width. */}
         </div>
       ) : null}
 
@@ -4067,6 +2796,7 @@ export function SettingsWorkspace({
         >
           <div className="xl:col-span-2">
             <WorkspaceSyncPanel />
+            <a className="mt-3 inline-block text-xs text-[color:var(--text-muted)] underline" href="/advanced">{text("copy.components_SettingsWorkspace.002")}</a>
           </div>
           <div className="xl:col-span-2">
             <Card
@@ -4593,17 +3323,6 @@ export function SettingsWorkspace({
 
       {effectiveSettingsTab === "mcp" ? <McpSettingsPanel /> : null}
 
-      {effectiveSettingsTab === "capabilityGates" && (!inSectionMode || forceSection === "capabilityGates") ? (
-        <div
-          id={settingsPanelId("capabilityGates")}
-          role="region"
-          aria-label={tTabs("capabilityGates")}
-          className="space-y-5"
-        >
-          <RuntimeFlagsPanel />
-        </div>
-      ) : null}
-
       {effectiveSettingsTab === "envvault" && forceSection === "envvault" ? (
         <div
           id={settingsPanelId("envvault")}
@@ -4786,1575 +3505,13 @@ export function SettingsWorkspace({
         </div>
       ) : null}
 
-      {effectiveSettingsTab === "search" && (!inSectionMode || forceSection === "search") ? (
-        <div
-          id={settingsPanelId("search")}
-          role="region"
-          aria-label={tTabs("search")}
-          className="space-y-5"
-        >
-          <Card
-            title={tSearch("cardTitle")}
-            description={tSearch("cardDesc")}
-            actions={
-              searchStatus ? (
-                <Pill tone={searchStatus.usable_in_chain > 0 ? "ok" : "warn"}>
-                  {tSearch("enginesReady", {
-                    ready: searchStatus.usable_in_chain,
-                    total: searchStatus.engines.length,
-                  })}
-                </Pill>
-              ) : null
-            }
-          >
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_auto_auto] lg:items-end">
-              <Field label={tSearch("engineChain")} hint={tSearch("engineChainHint")}>
-                <input
-                  className="input-dark font-mono text-xs"
-                  value={searchChainCsv}
-                  onChange={(e) => setSearchChainCsv(e.target.value)}
-                  placeholder={tSearch("engineChainPlaceholder")}
-                />
-              </Field>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => void saveSearchEngines()}
-                disabled={Boolean(searchBusy)}
-              >
-                <CheckIcon size={14} />
-                {searchBusy === "save" ? tCommon("saving") : tSearch("saveChain")}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void loadSearchStatus()}
-                disabled={Boolean(searchBusy)}
-              >
-                <RefreshIcon size={14} />
-                {tCommon("refresh")}
-              </button>
-            </div>
+      {effectiveSettingsTab === "search" ? <SearchSettings /> : null}
 
-            <Advanced
-              title={tSearch("defaultsAdvancedTitle")}
-              storageKey="nerya.settings.search.advanced.defaults"
-            >
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <Field label={tSearch("region")} hint={tSearch("regionHint")}>
-                  <input
-                    className="input-dark font-mono text-xs"
-                    value={searchRegion}
-                    onChange={(e) => setSearchRegion(e.target.value)}
-                    placeholder="wt-wt"
-                  />
-                </Field>
-                <Field label={tSearch("safesearch")}>
-                  <Select
-                    value={searchSafesearch}
-                    onChange={setSearchSafesearch}
-                    options={[
-                      { value: "off", label: tSearch("safesearchOff") },
-                      { value: "moderate", label: tSearch("safesearchModerate") },
-                      { value: "strict", label: tSearch("safesearchStrict") },
-                    ]}
-                  />
-                </Field>
-                <Field label={tSearch("keyStorage")} hint={tSearch("keyStorageHint")}>
-                  <Select
-                    value={searchStore}
-                    onChange={(v) => setSearchStore(v === "workspace" ? "workspace" : "vault")}
-                    options={[
-                      { value: "vault", label: tSearch("storeVault") },
-                      { value: "workspace", label: tSearch("storeWorkspace") },
-                    ]}
-                  />
-                </Field>
-              </div>
-            </Advanced>
+      {effectiveSettingsTab === "envvault" ? <DataServiceSettings /> : null}
 
-            {(() => {
-              const allRows = searchStatus?.engine_status || [];
-              const chainSet = new Set(searchStatus?.engines || []);
-              const inChainRows = allRows.filter((r) => chainSet.has(r.name));
-              const otherRows = allRows.filter((r) => !chainSet.has(r.name));
-              return (
-                <>
-                  <div className="mt-4 space-y-2">
-                    {inChainRows.map((row) => renderSearchEngineRow(row))}
-                  </div>
-                  {otherRows.length ? (
-                    <Advanced
-                      title={tSearch("otherEnginesTitle", { count: otherRows.length })}
-                      storageKey="nerya.settings.search.advanced.others"
-                    >
-                      <div className="space-y-2">
-                        {otherRows.map((row) => renderSearchEngineRow(row))}
-                      </div>
-                    </Advanced>
-                  ) : null}
-                </>
-              );
-            })()}
-          </Card>
-
-          {(searchStatus?.engines || []).includes("searxng") ? (
-            <Card
-              title={tSearch("searxngTitle")}
-              description={tSearch("searxngDesc")}
-              actions={
-                <Pill tone={searchStatus?.searxng?.container_running ? "ok" : "warn"}>
-                  {searchStatus?.searxng?.docker_available
-                    ? searchStatus?.searxng?.container_running
-                      ? tSearch("searxngStateRunning")
-                      : tSearch("searxngStateStopped")
-                    : tSearch("searxngStateMissing")}
-                </Pill>
-              }
-            >
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <Field label={tSearch("hostPort")} hint={tSearch("hostPortHint")}>
-                  <input
-                    className="input-dark font-mono text-xs"
-                    value={searxngHostPort}
-                    onChange={(e) => setSearxngHostPort(e.target.value.replace(/[^0-9]/g, "").slice(0, 5))}
-                    placeholder="8888"
-                  />
-                </Field>
-                <Field label={tSearch("image")}>
-                  <input
-                    className="input-dark font-mono text-xs"
-                    value={searxngImage}
-                    onChange={(e) => setSearxngImage(e.target.value)}
-                    placeholder="searxng/searxng:latest"
-                  />
-                </Field>
-                <Row label={tSearch("rebuild")} desc={tSearch("rebuildDesc")}>
-                  <SwitchControl
-                    checked={searxngRebuild}
-                    label={tSearch("rebuildSwitch")}
-                    onCheckedChange={(v) => setSearxngRebuild(v)}
-                  />
-                </Row>
-              </div>
-              <div className="mt-3 space-y-1 text-[11px] text-ink-500">
-                <div>
-                  {tSearch("probe")}: <span className="font-mono">{searchStatus?.searxng?.probe?.ok ? "ok" : (searchStatus?.searxng?.probe?.error || "–")}</span>
-                  {searchStatus?.searxng?.probe?.elapsed_ms != null
-                    ? ` · ${searchStatus.searxng.probe.elapsed_ms}ms`
-                    : ""}
-                </div>
-                <div>
-                  {tSearch("baseUrl")}: <span className="font-mono">{searchStatus?.searxng?.base_url || "–"}</span>
-                </div>
-                <div>
-                  {tSearch("config")}: <span className="font-mono">{searchStatus?.searxng?.config_dir || "–"}</span>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => void deploySearxng()}
-                  disabled={Boolean(searchBusy) || searchStatus?.searxng?.docker_available === false}
-                >
-                  <SparkIcon size={14} />
-                  {searchBusy === "searxng-deploy"
-                    ? tSearch("deploying")
-                    : searchStatus?.searxng?.container_running
-                      ? tSearch("redeploy")
-                      : tSearch("deploy")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => void teardownSearxng({ remove: false })}
-                  disabled={Boolean(searchBusy) || !searchStatus?.searxng?.container_running}
-                >
-                  {searchBusy === "searxng-stop" ? tSearch("stopping") : tSearch("stop")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={async () => {
-                    // Removing the container also wipes its data —
-                    // confirm before the destructive teardown.
-                    const confirmed = await confirm({
-                      title: tSearch("removeConfirmTitle"),
-                      message: tSearch("removeConfirmMessage"),
-                      tone: "danger",
-                      okLabel: tCommon("delete"),
-                      cancelLabel: tCommon("cancel"),
-                    });
-                    if (confirmed) void teardownSearxng({ remove: true });
-                  }}
-                  disabled={Boolean(searchBusy) || searchStatus?.searxng?.deployed === false}
-                >
-                  {searchBusy === "searxng-teardown" ? tSearch("removing") : tSearch("remove")}
-                </button>
-                {searchStatus?.searxng?.docker_available === false ? (
-                  <span className="self-center text-[11px] text-amber-300">
-                    {tSearch("dockerMissingHint")}
-                  </span>
-                ) : null}
-              </div>
-            </Card>
-          ) : null}
-
-          <Advanced
-            title={tSearch("probeTitle")}
-            description={tSearch("probeDesc")}
-            storageKey="nerya.settings.search.advanced.probe"
-          >
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_180px_auto]">
-              <Field label={tSearch("query")}>
-                <input
-                  className="input-dark text-xs"
-                  value={searchTestQuery}
-                  onChange={(e) => setSearchTestQuery(e.target.value)}
-                  placeholder={tSearch("queryPlaceholder")}
-                />
-              </Field>
-              <Field label={tSearch("engineOverride")} hint={tSearch("engineOverrideHint")}>
-                <input
-                  className="input-dark font-mono text-xs"
-                  value={searchTestEngine}
-                  onChange={(e) => setSearchTestEngine(e.target.value)}
-                  placeholder={tSearch("engineOverridePlaceholder")}
-                />
-              </Field>
-              <div className="flex items-end">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => void runSearchEngineTest()}
-                  disabled={Boolean(searchBusy)}
-                >
-                  <SearchIcon size={14} />
-                  {searchBusy === "test" ? tSearch("probing") : tSearch("probe")}
-                </button>
-              </div>
-            </div>
-            {searchTestResult ? (
-              <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-950/35 px-3 py-2 font-mono text-[11px] text-ink-300 whitespace-pre-wrap">
-                {searchTestResult}
-              </div>
-            ) : null}
-          </Advanced>
-        </div>
-      ) : null}
-
-      {effectiveSettingsTab === "browsers" && (!inSectionMode || forceSection === "browsers") ? (
-        <BrowserPreferences />
-      ) : null}
-
-      {/* Memory panel renders ONLY when this component is mounted by
-          /memory/page.tsx (forceSection="memory"). The Memory tab is
-          no longer reachable from the regular /settings page; the
-          standalone /memory page owns this UI now. */}
-      {effectiveSettingsTab === "memory" && forceSection === "memory" ? (
-        <div
-          id={settingsPanelId("memory")}
-          role="region"
-          aria-label={tTabs("memory")}
-          className="max-w-5xl space-y-5"
-        >
-          <Card title={tMemory("backendTitle")}>
-            <div
-              className="flex rounded-lg border border-brand-500/15 bg-ink-950/30 p-1"
-              role="radiogroup"
-              aria-label={tMemory("backendTitle")}
-            >
-              {(["builtin", "memsearch", "agentmemory"] as const).map((choice) => {
-                const active = memoryBackendChoice === choice;
-                const busy = memoryBusy === `backend:${choice}`;
-                return (
-                  <button
-                    key={choice}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    disabled={Boolean(memoryBusy)}
-                    className={[
-                      "flex-1 rounded-md px-3 py-2 text-center text-[12px] transition-colors",
-                      active
-                        ? "bg-brand-500/20 text-white"
-                        : "text-ink-400 hover:bg-white/[0.04] hover:text-ink-200",
-                    ].join(" ")}
-                    onClick={() => void setMemoryBackendChoice(choice)}
-                  >
-                    <span className="font-mono">{tMemory(`backend_${choice}`)}</span>
-                    {busy ? (
-                      <span className="ml-2 text-[10px] text-ink-500">
-                        {tMemory("backendSaving")}
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="mt-2 text-[11px] text-ink-500">
-              {tMemory(`backend_${memoryBackendChoice}_hint`)}
-            </div>
-          </Card>
-
-          {/* Inline summary for the currently selected backend. Renders
-              a small status card with 1-click CTAs that switch the
-              sub-tab to the matching detail surface, so the operator
-              never has to hunt for where a backend is configured. The
-              full configuration UI lives in the targeted sub-tab. */}
-          <Card title={tMemory("backendSummaryTitle")}>
-            {memoryBackendChoice === "builtin" ? (
-              <div className="space-y-3">
-                <div>
-                  <div className="text-[13px] font-medium text-ink-100">
-                    {tMemory("backendSummary_builtin_title")}
-                  </div>
-                  <div className="mt-1 text-[11px] text-ink-500">
-                    {tMemory("backendSummary_builtin_desc")}
-                  </div>
-                </div>
-                <Row
-                  label={tMemory("backendSummary_builtin_paths")}
-                  desc={(memoryStatus?.paths || []).join(", ") || "memory, strategies"}
-                >
-                  <Pill tone="ok">{tMemory("backendActive")}</Pill>
-                </Row>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => switchMemorySubTab("notebook")}
-                  >
-                    {tMemory("backendSummary_builtin_open_notebook")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => switchMemorySubTab("rules")}
-                  >
-                    {tMemory("backendSummary_builtin_open_rules")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => switchMemorySubTab("activity")}
-                  >
-                    {tMemory("backendSummary_builtin_open_activity")}
-                  </button>
-                </div>
-              </div>
-            ) : memoryBackendChoice === "memsearch" ? (
-              <div className="space-y-3">
-                <div>
-                  <div className="text-[13px] font-medium text-ink-100">
-                    {tMemory("backendSummary_memsearch_title")}
-                  </div>
-                  <div className="mt-1 text-[11px] text-ink-500">
-                    {tMemory("backendSummary_memsearch_desc")}
-                  </div>
-                </div>
-                <Row
-                  label={tMemory("backendSummary_memsearch_dep")}
-                  desc={memoryStatus?.install_package || "–"}
-                >
-                  <Pill tone={memoryStatus?.dependency_available ? "ok" : "warn"}>
-                    {memoryStatus?.dependency_available
-                      ? tMemory("dependencyAvailable")
-                      : tMemory("dependencyMissing")}
-                  </Pill>
-                </Row>
-                <Row
-                  label={tMemory("backendSummary_memsearch_embedding")}
-                  desc={memoryStatus?.embedding?.base_url || ""}
-                >
-                  <span className="font-mono text-[12px] text-ink-200">
-                    {memoryStatus?.embedding?.model || "–"}
-                  </span>
-                </Row>
-                <Row
-                  label={tMemory("backendSummary_memsearch_milvus")}
-                  desc={memoryStatus?.milvus?.collection || ""}
-                >
-                  <span className="font-mono text-[12px] text-ink-200">
-                    {memoryStatus?.milvus?.uri || "–"}
-                  </span>
-                </Row>
-                <Row label={tMemory("backendSummary_memsearch_watcher")}>
-                  <Pill tone={memoryStatus?.watcher_running ? "ok" : "warn"}>
-                    {memoryStatus?.watcher_running
-                      ? tMemory("backendSummary_memsearch_watcher_running")
-                      : tMemory("backendSummary_memsearch_watcher_idle")}
-                  </Pill>
-                </Row>
-                <div className="flex flex-wrap gap-2">
-                  {/* Install + Test recall live here; the full
-                      embedding/Milvus form is rendered directly below
-                      the Selected backend settings card when memsearch
-                      is the active backend (was a separate sub-tab in
-                      previous versions). */}
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={Boolean(memoryBusy)}
-                    onClick={() => void runBackendInstall("memsearch")}
-                  >
-                    {memoryBusy === "memsearch:install:run"
-                      ? tMemory("installRunning")
-                      : tMemory("installDependency")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={Boolean(memoryBusy)}
-                    onClick={() => void runBackendTest()}
-                  >
-                    {memoryBusy === "memory:test"
-                      ? tMemory("testRunning")
-                      : tMemory("testRecall")}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div>
-                  <div className="text-[13px] font-medium text-ink-100">
-                    {tMemory("backendSummary_agentmemory_title")}
-                  </div>
-                  <div className="mt-1 text-[11px] text-ink-500">
-                    {tMemory("backendSummary_agentmemory_desc")}
-                  </div>
-                </div>
-                <Row label={tMemory("backendSummary_agentmemory_base_url")}>
-                  <span className="font-mono text-[12px] text-ink-200">
-                    {agentmemoryDraft.base_url || "–"}
-                  </span>
-                </Row>
-                <Row label={tMemory("backendSummary_agentmemory_project")}>
-                  <span className="font-mono text-[12px] text-ink-200">
-                    {agentmemoryDraft.project || "–"}
-                  </span>
-                </Row>
-                <Row label={tMemory("backendSummary_agentmemory_secret")}>
-                  <Pill tone={agentmemoryDraft.secret_ref ? "ok" : "warn"}>
-                    {agentmemoryDraft.secret_ref
-                      ? tMemory("backendSummary_agentmemory_secret_present")
-                      : tMemory("backendSummary_agentmemory_secret_missing")}
-                  </Pill>
-                </Row>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => switchMemorySubTab("providers")}
-                  >
-                    {tMemory("backendSummary_agentmemory_open")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={Boolean(memoryBusy)}
-                    onClick={() => void runBackendInstall("agentmemory")}
-                  >
-                    {memoryBusy === "agentmemory:install:run"
-                      ? tMemory("installRunning")
-                      : tMemory("installDependency")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    disabled={Boolean(memoryBusy)}
-                    onClick={() => void runBackendTest()}
-                  >
-                    {memoryBusy === "memory:test"
-                      ? tMemory("testRunning")
-                      : tMemory("testRecall")}
-                  </button>
-                </div>
-              </div>
-            )}
-            {/* Inline test query input — lets the operator drive the
-                "Test recall" button with a custom query without leaving
-                the card. Empty query falls back to "memory test". */}
-            {memoryBackendChoice !== "builtin" && (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <input
-                  type="text"
-                  className="input-dark text-xs flex-1 min-w-[200px]"
-                  value={backendTestQuery}
-                  onChange={(e) => setBackendTestQuery(e.target.value)}
-                  placeholder={tMemory("testQueryPlaceholder")}
-                />
-              </div>
-            )}
-            {/* Install result block — shows command, exit code, and the
-                full stdout/stderr tail returned by the backend so the
-                operator can debug a failed install without opening a
-                separate terminal. */}
-            {backendInstallResult && (
-              <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-950/35 p-3 text-[12px]">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Pill tone={backendInstallResult.ok ? "ok" : "danger"}>
-                    {backendInstallResult.ok
-                      ? tMemory("installSuccess")
-                      : tMemory("installFailed")}
-                  </Pill>
-                  <span className="text-ink-400">
-                    {backendInstallResult.backend}
-                  </span>
-                  {typeof backendInstallResult.returncode === "number" && (
-                    <span className="font-mono text-ink-500">
-                      exit={backendInstallResult.returncode}
-                    </span>
-                  )}
-                  {backendInstallResult.dependency_available !== undefined && (
-                    <Pill tone={backendInstallResult.dependency_available ? "ok" : "warn"}>
-                      {backendInstallResult.dependency_available
-                        ? tMemory("dependencyAvailable")
-                        : tMemory("dependencyMissing")}
-                    </Pill>
-                  )}
-                </div>
-                {backendInstallResult.cmd && backendInstallResult.cmd.length > 0 && (
-                  <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-300">
-                    {backendInstallResult.cmd.join(" ")}
-                  </pre>
-                )}
-                {backendInstallResult.stderr_tail && (
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-[11px] text-ink-400">
-                      {tMemory("installStderr")}
-                    </summary>
-                    <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-rose-300">
-                      {backendInstallResult.stderr_tail}
-                    </pre>
-                  </details>
-                )}
-                {backendInstallResult.stdout_tail && (
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-[11px] text-ink-400">
-                      {tMemory("installStdout")}
-                    </summary>
-                    <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-ink-300">
-                      {backendInstallResult.stdout_tail}
-                    </pre>
-                  </details>
-                )}
-                {backendInstallResult.note && (
-                  <p className="mt-2 text-[11px] text-ink-400">
-                    {backendInstallResult.note}
-                  </p>
-                )}
-                {backendInstallResult.detail && !backendInstallResult.stderr_tail && (
-                  <p className="mt-2 text-[11px] text-rose-300">
-                    {backendInstallResult.detail}
-                  </p>
-                )}
-              </div>
-            )}
-            {/* Test recall result block — renders one row per backend so
-                the operator can compare reach (built-in entries,
-                memsearch matches, agentmemory health) side-by-side. */}
-            {backendTestResult && (
-              <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-950/35 p-3 text-[12px]">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <span className="text-ink-300">{tMemory("testResultsTitle")}</span>
-                  <span className="font-mono text-ink-500">
-                    {tMemory("testResultsQuery")}: {backendTestResult.query}
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  {backendTestResult.backends.map((b) => (
-                    <div
-                      key={b.backend}
-                      className="flex flex-wrap items-center gap-2 rounded border border-brand-500/10 bg-ink-950/30 p-2"
-                    >
-                      <Pill tone={b.ok ? "ok" : b.enabled === false ? "neutral" : "warn"}>
-                        {b.backend}
-                      </Pill>
-                      {b.backend === "builtin" && (
-                        <span className="text-ink-300">
-                          {tMemory("testBuiltin", {
-                            agent: String(b.agent_entries ?? 0),
-                            operator: String(b.operator_entries ?? 0),
-                          })}
-                        </span>
-                      )}
-                      {b.backend === "memsearch" && (
-                        <span className="text-ink-300">
-                          {b.ok
-                            ? tMemory("testMatches", { n: String(b.matches ?? 0) })
-                            : b.error || tMemory("testNotConfigured")}
-                        </span>
-                      )}
-                      {b.backend === "agentmemory" && (
-                        <span className="text-ink-300">
-                          {b.enabled === false
-                            ? tMemory("testNotEnabled")
-                            : b.ok
-                            ? tMemory("testMatches", { n: String(b.matches ?? 0) })
-                            : b.last_error || b.error || tMemory("testNotReachable")}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </Card>
-
-          {/* Memory sub-tab nav. Plain inline pills because we're
-              already inside a panel; the selected sub-tab is mirrored
-              to ?tab= so it can be deep-linked and survives refresh. */}
-          <nav aria-label={tMemory("subtabsAriaLabel")} className="flex flex-wrap gap-1.5">
-            {MEMORY_SUBTABS.map((key) => {
-              const selected = key === activeMemorySubTab;
-              // "vector" used to live in this map but the memsearch
-              // panel is now rendered above the sub-tab nav (only when
-              // memsearch is the active backend) — no per-backend
-              // sub-tab needed anymore.
-              const labelKey = (
-                key === "notebook" ? "subtabNotebook" :
-                key === "activity" ? "subtabActivity" :
-                key === "rules" ? "subtabRules" :
-                key === "evidence" ? "subtabEvidence" :
-                key === "profile" ? "subtabProfile" :
-                "subtabProviders"
-              );
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={selected}
-                  className={[
-                    "rounded-full border px-3 py-1.5 text-[12px] transition-colors",
-                    selected
-                      ? "border-brand-300/60 bg-brand-500/15 text-white"
-                      : "border-brand-500/15 bg-ink-950/30 text-ink-300 hover:border-brand-500/30 hover:text-ink-100",
-                  ].join(" ")}
-                  onClick={() => switchMemorySubTab(key)}
-                >
-                  {tMemory(labelKey)}
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Full memsearch configuration — embedding model, Milvus,
-              install/rebuild/start, search. Previously lived behind a
-              dedicated "memsearch" sub-tab; now rendered inline
-              directly under the Selected backend settings card, and
-              only when memsearch is the active backend. Builtin /
-              agentmemory deployments don't need this surface so it
-              stays hidden, keeping the page focused. */}
-          {memoryBackendChoice === "memsearch" ? (
-          <Card title={tMemory("title")} description={tMemory("description")}>
-            <Row
-              label={tMemory("enableLabel")}
-              desc={memoryStatus?.dependency_available ? tMemory("dependencyAvailable") : tMemory("dependencyMissing")}
-            >
-              <SwitchControl
-                checked={Boolean(memoryStatus?.enabled)}
-                disabled={Boolean(memoryBusy)}
-                label={tMemory("enableLabel")}
-                onCheckedChange={(v) => {
-                  void setMemoryBackendChoice(v ? "memsearch" : "builtin");
-                }}
-              />
-            </Row>
-            <Row label={tMemory("backendLabel")} desc={memoryStatus?.paths?.join(", ") || "memory, strategies"}>
-              <span className="font-mono text-xs text-ink-200">
-                {memoryStatus?.backend || "memsearch"}
-              </span>
-            </Row>
-            <div className="mt-3 space-y-3 rounded-lg border border-brand-500/15 bg-ink-950/30 p-3">
-              {/* Make the independence obvious — embedding/vector model
-                  is configured separately from the chat tiers, even
-                  though the API key store is shared. */}
-              <div className="flex flex-wrap items-start justify-between gap-2 border-b border-brand-500/10 pb-2">
-                <div>
-                  <div className="text-[13px] font-medium text-ink-100">
-                    {tMemory("embeddingTitle")}
-                  </div>
-                  <div className="mt-0.5 text-[11px] text-ink-500">
-                    {tMemory("embeddingIndependent")}
-                  </div>
-                </div>
-                <Pill tone={memoryStatus?.embedding?.has_key ? "ok" : "warn"}>
-                  {memoryStatus?.embedding?.has_key
-                    ? tMemory("embeddingKeyResolved")
-                    : tMemory("embeddingKeyMissing")}
-                </Pill>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <Field label={tMemory("embeddingProviderLabel")} hint={tMemory("embeddingProviderHint")}>
-                  <PortalSelect
-                    value={embProvider}
-                    onChange={(next) => {
-                      setEmbProvider(next);
-                      const entry = catalogById.get(next);
-                      if (entry && !embBaseUrl) setEmbBaseUrl(entry.base_url);
-                    }}
-                    options={Array.from(
-                      new Set([
-                        "openai",
-                        "google",
-                        "voyage",
-                        "ollama",
-                        "local",
-                        ...providerCatalog
-                          .filter((e) => e.api_mode === "chat_completions")
-                          .map((e) => e.id),
-                        embProvider,
-                      ]),
-                    )
-                      .filter(Boolean)
-                      .sort()
-                      .map((id) => ({
-                        value: id,
-                        label:
-                          id === "local"
-                            ? `${id} (sentence-transformers)`
-                            : id,
-                      }))}
-                    size="sm"
-                    ariaLabel={tMemory("embeddingProviderLabel")}
-                    className="font-mono"
-                  />
-                </Field>
-                <Field label={tMemory("embeddingModelLabel")} hint={tMemory("embeddingModelHint")}>
-                  <input
-                    className="input-dark text-xs font-mono"
-                    value={embModel}
-                    onChange={(e) => setEmbModel(e.target.value)}
-                    placeholder="text-embedding-3-small"
-                  />
-                </Field>
-                <Field
-                  label={tMemory("embeddingBaseUrlLabel")}
-                  hint={
-                    embProvider === "openai"
-                      ? tMemory("embeddingBaseUrlOpenAIHint")
-                      : tMemory("embeddingBaseUrlGenericHint")
-                  }
-                >
-                  <input
-                    className="input-dark text-xs font-mono"
-                    value={embBaseUrl}
-                    onChange={(e) => setEmbBaseUrl(e.target.value)}
-                    placeholder={catalogById.get(embProvider)?.base_url || "https://api.openai.com/v1"}
-                  />
-                </Field>
-                <Field label={tMemory("embeddingKeyRefLabel")} hint={tMemory("embeddingKeyRefHint")}>
-                  <div className="flex flex-col gap-2">
-                    <Select
-                      value={embKeyRef}
-                      onChange={setEmbKeyRef}
-                      options={[
-                        { value: "", label: tMemory("embeddingKeyRefNone") },
-                        ...providerProfiles
-                          .filter((p) => (p.provider_key_ref || "").startsWith("vault://"))
-                          .map((p) => ({
-                            value: String(p.provider_key_ref || ""),
-                            label: `${p.provider} (${String(p.provider_key_ref || "").replace("vault://", "")})`,
-                          })),
-                      ]}
-                    />
-                    {/* Direct paste: when the operator types a key here,
-                        we send it to the backend as ``api_key_plain``;
-                        the server stashes it in the SecretVault and
-                        rewrites ``api_key_ref`` automatically. The
-                        field is cleared on successful save. */}
-                    <input
-                      className="input-dark font-mono"
-                      type="password"
-                      autoComplete="off"
-                      value={embKeyPlain}
-                      onChange={(e) => setEmbKeyPlain(e.target.value)}
-                      placeholder={tMemory("embeddingKeyPlainPlaceholder")}
-                    />
-                    <div className="text-[11px] text-ink-500">
-                      {tMemory("embeddingKeyPlainHint")}
-                    </div>
-                  </div>
-                </Field>
-              </div>
-              <div className="text-[11px] text-ink-500">
-                {tMemory("milvusStoreHint")}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label={tMemory("milvusUriLabel")}>
-                  <input
-                    className="input-dark text-xs"
-                    value={milvusUri}
-                    onChange={(e) => setMilvusUri(e.target.value)}
-                    placeholder="~/.memsearch/milvus.db"
-                  />
-                </Field>
-                <Field label={tMemory("milvusCollectionLabel")}>
-                  <input
-                    className="input-dark text-xs"
-                    value={milvusCollection}
-                    onChange={(e) => setMilvusCollection(e.target.value)}
-                    placeholder="memsearch_chunks"
-                  />
-                </Field>
-                <Field
-                  label={tMemory("milvusTokenLabel")}
-                  hint={memoryStatus?.milvus?.has_token ? tMemory("milvusTokenStored") : tMemory("milvusTokenOptional")}
-                >
-                  <input
-                    className="input-dark text-xs"
-                    type="password"
-                    value={milvusToken}
-                    onChange={(e) => setMilvusToken(e.target.value)}
-                    placeholder={memoryStatus?.milvus?.has_token ? tMemory("milvusTokenUnchanged") : tMemory("milvusTokenOptional")}
-                  />
-                </Field>
-              </div>
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={memoryBusy === "save"}
-                  onClick={() =>
-                    void runMemoryAction("save", async () => {
-                      const res = await clientApi.memoryVectorConfig({
-                        embedding: {
-                          provider: embProvider,
-                          model: embModel.trim(),
-                          base_url: embBaseUrl.trim(),
-                          api_key_ref: embKeyRef.trim(),
-                          // When the operator pasted a plaintext key,
-                          // ship it as a separate field. The server
-                          // stores it in the SecretVault and rewrites
-                          // ``api_key_ref`` to ``vault://...`` so the
-                          // secret is never persisted in plaintext.
-                          ...(embKeyPlain.trim()
-                            ? { api_key_plain: embKeyPlain.trim() }
-                            : {}),
-                        },
-                        milvus: {
-                          uri: milvusUri.trim(),
-                          collection: milvusCollection.trim(),
-                          // Only send token when user typed something: empty
-                          // means "keep existing" so we don't overwrite a
-                          // previously-saved secret with blanks.
-                          ...(milvusToken ? { token: milvusToken } : {}),
-                        },
-                      });
-                      if (res.ok) {
-                        reportOk(tMemory("embeddingSaved"));
-                        setMilvusToken("");
-                        setEmbKeyPlain("");
-                        // Reflect the freshly-minted vault ref in the
-                        // dropdown so the operator sees what was saved.
-                        if (res.embedding?.api_key_ref) {
-                          setEmbKeyRef(res.embedding.api_key_ref);
-                        }
-                      }
-                      return res;
-                    })
-                  }
-                >
-                  {tMemory("saveEmbedding")}
-                </button>
-              </div>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={!memoryStatus?.enabled || memoryBusy === "install"}
-                onClick={() =>
-                  void runMemoryAction("install", async () => {
-                    const res = await clientApi.memoryVectorInstall();
-                    if (res.ok) reportOk(tMemory("memsearchInstalled"));
-                    return res;
-                  })
-                }
-              >
-                {tMemory("installDeps")}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={!memoryStatus?.enabled || !memoryStatus?.dependency_available || memoryBusy === "reindex"}
-                onClick={() =>
-                  void runMemoryAction("reindex", async () => {
-                    const res = await clientApi.memoryVectorReindex({ force: false });
-                    if (res.ok) reportOk(tMemory("indexRebuilt"));
-                    return res;
-                  })
-                }
-              >
-                {tMemory("rebuildIndex")}
-              </button>
-              {memoryStatus?.watcher_running ? (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={memoryBusy === "stop"}
-                  onClick={() => void runMemoryAction("stop", () => clientApi.memoryVectorStop())}
-                >
-                  {tMemory("stopWatcher")}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={!memoryStatus?.enabled || !memoryStatus?.dependency_available || memoryBusy === "start"}
-                  onClick={() => void runMemoryAction("start", () => clientApi.memoryVectorStart())}
-                >
-                  {tMemory("startWatcher")}
-                </button>
-              )}
-            </div>
-            <div className="mt-4 flex gap-2">
-              <input
-                className="input-dark text-xs"
-                value={memoryQuery}
-                onChange={(e) => setMemoryQuery(e.target.value)}
-                placeholder={tMemory("searchPlaceholder")}
-                disabled={!memoryStatus?.enabled || !memoryStatus?.dependency_available}
-              />
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={!memoryQuery.trim() || memoryBusy === "search"}
-                onClick={() => void searchMemory()}
-              >
-                <SearchIcon size={14} />
-                {tCommon("search")}
-              </button>
-            </div>
-            {memoryResults.length ? (
-              <div className="embedded-list-scroll mt-3 max-h-64 rounded-lg border border-brand-500/10 bg-ink-950/35">
-                {memoryResults.map((row, idx) => (
-                  <div key={idx} className="border-b border-brand-500/10 px-3 py-2 text-xs last:border-b-0">
-                    <div className="font-mono text-ink-300">
-                      {String(row.source || row.path || row.file || "memory")}
-                    </div>
-                    <div className="mt-1 text-ink-100">
-                      {String(row.content || row.text || row.chunk || "").slice(0, 260)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </Card>
-          ) : null}
-
-          {activeMemorySubTab === "notebook" ? (
-          /* ---- Curated agent / operator notebook ---------------- */
-          <Card
-            title={tMemory("notebookTitle")}
-            description={tMemory("notebookDescription")}
-            actions={
-              notebookMessage ? <Pill tone="brand">{notebookMessage}</Pill> : null
-            }
-          >
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {(["agent", "operator"] as const).map((target) => {
-                const snap = target === "agent" ? notebookAgent : notebookOperator;
-                const draftKey = target;
-                const used = snap?.used_chars ?? 0;
-                const limit = snap?.char_limit ?? (target === "agent" ? 2200 : 1375);
-                const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-                return (
-                  <div key={target} className="rounded-lg border border-[color:var(--line)] p-3">
-                    <div className="mb-2 flex items-start justify-between gap-2">
-                      <div>
-                        <div className="text-[13px] font-medium text-ink-100">
-                          {target === "agent" ? tMemory("notebookAgent") : tMemory("notebookOperator")}
-                        </div>
-                        <div className="mt-0.5 text-[11px] text-ink-500">
-                          {tMemory("notebookFrozenHint")}
-                        </div>
-                      </div>
-                      <Pill tone={pct > 90 ? "warn" : "brand"}>
-                        {`${pct}% (${used}/${limit})`}
-                      </Pill>
-                    </div>
-                    <div className="space-y-2">
-                      {(snap?.entries || []).length === 0 ? (
-                        <div className="rounded-md border border-dashed border-brand-500/15 px-3 py-2 text-[11px] text-ink-500">
-                          {tMemory("notebookEmpty")}
-                        </div>
-                      ) : (
-                        (snap?.entries || []).map((entry, idx) => (
-                          <div
-                            key={`${target}-${idx}`}
-                            className="group flex items-start justify-between gap-2 rounded-md border border-brand-500/10 bg-ink-900/40 px-3 py-2 text-[12px] text-ink-100"
-                          >
-                            <div className="whitespace-pre-wrap">{entry}</div>
-                            <button
-                              type="button"
-                              className="btn btn-ghost shrink-0 opacity-60 group-hover:opacity-100"
-                              disabled={notebookBusy === `${target}.remove`}
-                              onClick={() =>
-                                void notebookMutate(target, "remove", { old_text: entry })
-                              }
-                            >
-                              {tCommon("delete")}
-                            </button>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                    <div className="mt-3 flex flex-col gap-2">
-                      <textarea
-                        className="input-dark text-xs"
-                        rows={3}
-                        value={notebookDraft[draftKey]}
-                        placeholder={tMemory("notebookPlaceholder")}
-                        onChange={(e) =>
-                          setNotebookDraft((prev) => ({ ...prev, [draftKey]: e.target.value }))
-                        }
-                      />
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          className="btn btn-primary"
-                          disabled={
-                            notebookBusy === `${target}.add` ||
-                            !(notebookDraft[draftKey] || "").trim()
-                          }
-                          onClick={() =>
-                            void notebookMutate(target, "add", {
-                              content: notebookDraft[draftKey],
-                            })
-                          }
-                        >
-                          <CheckIcon size={14} />
-                          {tMemory("notebookAdd")}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </Card>
-          ) : null}
-
-          {activeMemorySubTab === "activity" ? (
-          /* ---- Activity stream (writes + searches) -------------- */
-          <Card
-            title={tMemory("activityTitle")}
-            description={tMemory("activityDescription")}
-            actions={
-              memoryActivityStats ? (
-                <span className="text-[11px] text-ink-500">
-                  {tMemory("activityStats", {
-                    writes: memoryActivityStats.write_ok,
-                    skipped: memoryActivityStats.write_skipped,
-                    searches: memoryActivityStats.search,
-                  })}
-                </span>
-              ) : null
-            }
-          >
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <Field label={tMemory("activityFilterLabel")}>
-                <PortalSelect<typeof memoryActivityFilter>
-                  value={memoryActivityFilter}
-                  onChange={(value) => setMemoryActivityFilter(value)}
-                  options={[
-                    { value: "", label: tMemory("activityFilterAll") },
-                    {
-                      value: "write_ok",
-                      label: tMemory("activityFilterWriteOk"),
-                    },
-                    {
-                      value: "write_skipped",
-                      label: tMemory("activityFilterWriteSkipped"),
-                    },
-                    {
-                      value: "search",
-                      label: tMemory("activityFilterSearch"),
-                    },
-                  ]}
-                  size="sm"
-                  ariaLabel={tMemory("activityFilterLabel")}
-                />
-              </Field>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void loadMemoryActivity()}
-              >
-                <RefreshIcon size={14} />
-                {tCommon("refresh")}
-              </button>
-            </div>
-            <div className="embedded-list-scroll max-h-96 rounded-lg border border-brand-500/10 bg-ink-950/35">
-              {memoryActivityEvents.length === 0 ? (
-                <div className="px-3 py-4 text-center text-[11px] text-ink-500">
-                  {tMemory("activityEmpty")}
-                </div>
-              ) : (
-                memoryActivityEvents.map((ev, idx) => {
-                  const tone =
-                    ev.kind === "write_ok" ? "ok" :
-                    ev.kind === "write_skipped" ? "warn" : "brand";
-                  return (
-                    <div
-                      key={`${ev.ts}-${idx}`}
-                      className="border-b border-brand-500/10 px-3 py-2 text-[11px] last:border-b-0"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <Pill tone={tone}>{ev.kind}</Pill>
-                        <span className="font-mono text-ink-500">{ev.ts}</span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-ink-300">
-                        {ev.category ? <span className="text-ink-100">{ev.category}</span> : null}
-                        {ev.skip_reason ? (
-                          <span className="text-amber-300">skip:{ev.skip_reason}</span>
-                        ) : null}
-                        {ev.source ? <span>· {ev.source}</span> : null}
-                        {typeof ev.result_count === "number" ? (
-                          <span>· {ev.result_count} hits</span>
-                        ) : null}
-                        {typeof ev.latency_ms === "number" ? (
-                          <span>· {ev.latency_ms}ms</span>
-                        ) : null}
-                      </div>
-                      {ev.title ? (
-                        <div className="mt-1 text-ink-100">{ev.title}</div>
-                      ) : null}
-                      {ev.preview ? (
-                        <div className="mt-1 line-clamp-2 text-ink-200">{ev.preview}</div>
-                      ) : null}
-                      {ev.query ? (
-                        <div className="mt-1 italic text-ink-200">&quot;{ev.query}&quot;</div>
-                      ) : null}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </Card>
-          ) : null}
-
-          {activeMemorySubTab === "rules" ? (
-          /* ---- Write rules editor (per-category enable / retention) */
-          writeRuleCategories.length ? (
-            <Card
-              title={tMemory("rulesTitle")}
-              description={tMemory("rulesDescription")}
-              actions={
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={writeRuleBusy}
-                  onClick={async () => {
-                    setWriteRuleBusy(true);
-                    try {
-                      const res = await clientApi.memoryWriteRulesSet(writeRules);
-                      if (!res.ok && res.error) throw new Error(res.error);
-                      setWriteRules(res.rules || writeRules);
-                      reportOk(tMemory("rulesSaved"));
-                    } catch (e) {
-                      reportError(e instanceof Error ? e.message : String(e));
-                    } finally {
-                      setWriteRuleBusy(false);
-                    }
-                  }}
-                >
-                  <CheckIcon size={14} />
-                  {writeRuleBusy ? tCommon("saving") : tCommon("save")}
-                </button>
-              }
-            >
-              <div className="space-y-2">
-                {writeRuleCategories.map((cat) => {
-                  const rule = writeRules[cat.id];
-                  if (!rule) return null;
-                  return (
-                    <div
-                      key={cat.id}
-                      className="rounded-lg border border-brand-500/10 bg-ink-950/40 p-3"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <div className="font-mono text-[12px] text-ink-100">{cat.name}</div>
-                          <div className="mt-0.5 text-[11px] text-ink-500">{cat.description}</div>
-                        </div>
-                        <SwitchControl
-                          checked={rule.enabled}
-                          onCheckedChange={(v) =>
-                            setWriteRules((prev) => ({
-                              ...prev,
-                              [cat.id]: { ...prev[cat.id], enabled: v },
-                            }))
-                          }
-                          label={tMemory("rulesEnabled")}
-                        />
-                      </div>
-                      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-                        <Field label={tMemory("rulesRetention")}>
-                          <input
-                            type="number"
-                            min={0}
-                            className="input-dark text-xs font-mono"
-                            value={rule.retention_days}
-                            onChange={(e) =>
-                              setWriteRules((prev) => ({
-                                ...prev,
-                                [cat.id]: {
-                                  ...prev[cat.id],
-                                  retention_days: Number(e.target.value || 0),
-                                },
-                              }))
-                            }
-                          />
-                        </Field>
-                        <Field label={tMemory("rulesMaxEntries")}>
-                          <input
-                            type="number"
-                            min={0}
-                            className="input-dark text-xs font-mono"
-                            value={rule.max_entries}
-                            onChange={(e) =>
-                              setWriteRules((prev) => ({
-                                ...prev,
-                                [cat.id]: {
-                                  ...prev[cat.id],
-                                  max_entries: Number(e.target.value || 0),
-                                },
-                              }))
-                            }
-                          />
-                        </Field>
-                        <Field label={tMemory("rulesDedupe")}>
-                          <PortalSelect
-                            value={rule.dedupe}
-                            onChange={(value) =>
-                              setWriteRules((prev) => ({
-                                ...prev,
-                                [cat.id]: {
-                                  ...prev[cat.id],
-                                  dedupe: value,
-                                },
-                              }))
-                            }
-                            options={writeRuleDedupes.map((s) => ({
-                              value: s,
-                              label: s,
-                            }))}
-                            size="sm"
-                            ariaLabel={tMemory("rulesDedupe")}
-                            className="font-mono"
-                          />
-                        </Field>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </Card>
-          ) : null
-          ) : null}
-
-          {activeMemorySubTab === "providers" ? (
-          /* ---- Memory provider directory (builtin + external) ----- */
-          <Card
-            title={tMemory("providersTitle")}
-            description={tMemory("providersDescription")}
-            actions={
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void loadMemoryProviders()}
-              >
-                <RefreshIcon size={14} />
-                {tCommon("refresh")}
-              </button>
-            }
-          >
-            <div className="space-y-3">
-              {memoryProvidersData?.builtin ? (
-                <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/5 p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <div className="font-mono text-[12px] text-ink-100">
-                        {memoryProvidersData.builtin.name}
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-ink-500">
-                        {memoryProvidersData.builtin.description}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Pill tone="ok">{tMemory("providersBuiltinAlwaysOn")}</Pill>
-                      <Pill tone={memoryProvidersData.builtin.initialised ? "ok" : "warn"}>
-                        {memoryProvidersData.builtin.initialised
-                          ? tMemory("providersInitialised")
-                          : tMemory("providersInitFailed")}
-                      </Pill>
-                    </div>
-                  </div>
-                  {memoryProvidersData.builtin.last_error ? (
-                    <div className="mt-2 text-[11px] text-amber-300">
-                      {memoryProvidersData.builtin.last_error}
-                    </div>
-                  ) : null}
-                  <div className="mt-2 text-[11px] text-ink-500">
-                    {memoryProvidersData.builtin.cost_hint}
-                  </div>
-                </div>
-              ) : (
-                <div className="rounded-lg border border-dashed border-brand-500/15 px-3 py-4 text-[11px] text-ink-500">
-                  {tMemory("providersBuiltinMissing")}
-                </div>
-              )}
-
-              <div className="rounded-lg border border-brand-500/15 bg-ink-950/40 p-3">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="font-mono text-[12px] text-ink-100">
-                      {tMemory("providersExternalTitle")}
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-ink-500">
-                      {tMemory("providersExternalHint")}
-                    </div>
-                  </div>
-                  {memoryProvidersData?.external ? (
-                    <Pill tone="brand">
-                      {tMemory("providersActive", {
-                        name: memoryProvidersData.external.name,
-                      })}
-                    </Pill>
-                  ) : (
-                    <Pill tone="warn">{tMemory("providersExternalNone")}</Pill>
-                  )}
-                </div>
-                <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-900/25 p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <div className="font-mono text-[11px] text-ink-100">
-                        {tMemory("agentmemoryTitle")}
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-ink-500">
-                        {tMemory("agentmemoryHint")}
-                      </div>
-                    </div>
-                    <Pill tone={memoryExternalConfig?.enabled ? "ok" : "warn"}>
-                      {memoryExternalConfig?.enabled
-                        ? tMemory("agentmemoryConfigured")
-                        : tMemory("agentmemoryNotConfigured")}
-                    </Pill>
-                  </div>
-                  <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    <Field label={tMemory("agentmemoryBaseUrl")}>
-                      <input
-                        className="input-dark font-mono text-xs"
-                        value={agentmemoryDraft.base_url}
-                        onChange={(e) =>
-                          setAgentmemoryDraft((prev) => ({
-                            ...prev,
-                            base_url: e.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label={tMemory("agentmemoryProject")}>
-                      <input
-                        className="input-dark font-mono text-xs"
-                        value={agentmemoryDraft.project}
-                        onChange={(e) =>
-                          setAgentmemoryDraft((prev) => ({
-                            ...prev,
-                            project: e.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label={tMemory("agentmemorySecretRef")} hint={tMemory("agentmemorySecretHint")}>
-                      <input
-                        className="input-dark font-mono text-xs"
-                        value={agentmemoryDraft.secret_ref}
-                        onChange={(e) =>
-                          setAgentmemoryDraft((prev) => ({
-                            ...prev,
-                            secret_ref: e.target.value,
-                          }))
-                        }
-                        placeholder="vault://agentmemory_secret"
-                      />
-                    </Field>
-                    <Field label={tMemory("agentmemorySecretEnv")}>
-                      <input
-                        className="input-dark font-mono text-xs"
-                        value={agentmemoryDraft.secret_env}
-                        onChange={(e) =>
-                          setAgentmemoryDraft((prev) => ({
-                            ...prev,
-                            secret_env: e.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label={tMemory("agentmemorySessionId")} hint={tMemory("agentmemoryOptional")}>
-                      <input
-                        className="input-dark font-mono text-xs"
-                        value={agentmemoryDraft.session_id}
-                        onChange={(e) =>
-                          setAgentmemoryDraft((prev) => ({
-                            ...prev,
-                            session_id: e.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Field label={tMemory("agentmemoryBudget")}>
-                        <input
-                          className="input-dark font-mono text-xs"
-                          type="number"
-                          min={1}
-                          value={agentmemoryDraft.context_budget}
-                          onChange={(e) =>
-                            setAgentmemoryDraft((prev) => ({
-                              ...prev,
-                              context_budget: e.target.value,
-                            }))
-                          }
-                        />
-                      </Field>
-                      <Field label={tMemory("agentmemoryTimeout")}>
-                        <input
-                          className="input-dark font-mono text-xs"
-                          type="number"
-                          min={0.1}
-                          step={0.1}
-                          value={agentmemoryDraft.timeout_s}
-                          onChange={(e) =>
-                            setAgentmemoryDraft((prev) => ({
-                              ...prev,
-                              timeout_s: e.target.value,
-                            }))
-                          }
-                        />
-                      </Field>
-                    </div>
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={memoryBusy === "agentmemory:save"}
-                      onClick={() => void saveAgentmemoryConfig(true)}
-                    >
-                      <CheckIcon size={14} />
-                      {tMemory("agentmemorySaveEnable")}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={memoryBusy === "agentmemory:save"}
-                      onClick={() => void saveAgentmemoryConfig(false)}
-                    >
-                      {tMemory("agentmemoryDisable")}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={memoryBusy === "agentmemory:install"}
-                      onClick={() => void loadAgentmemoryInstall()}
-                    >
-                      {tMemory("agentmemoryInstall")}
-                    </button>
-                  </div>
-                  {agentmemoryInstall ? (
-                    <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-950/50 p-2 text-[11px] text-ink-400">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Pill tone={agentmemoryInstall.dependency_available ? "ok" : "warn"}>
-                          {agentmemoryInstall.dependency_available
-                            ? tMemory("providersAvailable")
-                            : tMemory("providersUnavailable")}
-                        </Pill>
-                        <span>{agentmemoryInstall.note}</span>
-                      </div>
-                      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-ink-950 p-2 font-mono text-[11px] text-ink-100">
-                        {agentmemoryInstall.commands.join("\n")}
-                      </pre>
-                      <div className="mt-1 font-mono text-[11px] text-ink-500">
-                        {agentmemoryInstall.health_url} · {agentmemoryInstall.viewer_url}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-                {memoryProvidersData &&
-                memoryProvidersData.available_external.length === 0 &&
-                memoryProvidersData.external === null ? (
-                  <div className="mt-2 text-[11px] text-ink-500">
-                    {tMemory("providersAvailableEmpty")}
-                  </div>
-                ) : null}
-                {memoryProvidersData?.external ? (
-                  <div className="mt-3 rounded-md border border-brand-500/20 bg-ink-900/40 p-2">
-                    <div className="font-mono text-[11px] text-ink-100">
-                      {memoryProvidersData.external.name}
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-ink-500">
-                      {memoryProvidersData.external.description}
-                    </div>
-                    {memoryProvidersData.external.cost_hint ? (
-                      <div className="mt-1 text-[11px] text-ink-500">
-                        {memoryProvidersData.external.cost_hint}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-                {memoryProvidersData && memoryProvidersData.available_external.length > 0 ? (
-                  <div className="mt-3 space-y-2">
-                    {memoryProvidersData.available_external.map((ext) => (
-                      <div
-                        key={ext.id}
-                        className="flex flex-wrap items-start justify-between gap-2 rounded-md border border-brand-500/10 bg-ink-900/30 p-2"
-                      >
-                        <div>
-                          <div className="font-mono text-[11px] text-ink-100">{ext.name}</div>
-                          <div className="mt-0.5 text-[11px] text-ink-500">{ext.description}</div>
-                        </div>
-                        <Pill tone={ext.available ? "ok" : "warn"}>
-                          {ext.available ? tMemory("providersAvailable") : tMemory("providersUnavailable")}
-                        </Pill>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </Card>
-          ) : null}
-
-          {activeMemorySubTab === "evidence" ? (
-            <MemoryEvidencePanel />
-          ) : null}
-
-          {activeMemorySubTab === "profile" ? (
-            <MemoryProfilePanel />
-          ) : null}
-        </div>
-      ) : null}
-
-      {effectiveSettingsTab === "interface" && !inSectionMode ? <InterfaceSettings venues={venues} /> : null}
+      {effectiveSettingsTab === "interface" && !inSectionMode ? <InterfaceSettings /> : null}
         </fieldset>
       </div>
     </PageBody>
   );
 }
-
-// SettingsWorkspace is mounted by FOUR thin wrapper routes:
-//   /settings   → <SettingsWorkspace />                     (Models / Access / Network & Env / Interface)
-//   /memory     → <SettingsWorkspace forceSection="memory" />
-//   /web-search → <SettingsWorkspace forceSection="search" />
-//   /browsers   → <SettingsWorkspace forceSection="browsers" />
-// Each standalone route reuses every state hook / helper / JSX block
-// in this file via the `forceSection` prop so we never duplicate
-// ~7000 lines. The file lives under `components/` (not `app/.../page.tsx`)
-// because Next's app-router page validation forbids extra named
-// exports on `page.tsx`.

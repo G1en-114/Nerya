@@ -18,7 +18,7 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         "## Verdict",
         str(metrics.get("verdict") or "UNKNOWN"),
         "",
-        "Assumption: v1 fills entries at current bar open and exits at next bar open; limit/stop style intents are degraded to market simulation.",
+        "Assumption: signals use closed bars; orders are queued and settle at the next available bar open. At data end, remaining orders use the recorded last close. Unsupported order types are rejected, never silently converted. Missing market marks carry the last known close, not zero. The benchmark uses fixed equal-weight allocations.",
         "",
         "## Key metrics",
         "| Metric | Value |",
@@ -46,6 +46,13 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         "total_missed_profit_pct",
     ]:
         lines.append(f"| {key} | {_fmt_metric(key, metrics.get(key))} |")
+    evidence = metrics.get("replay") or {}
+    lines.extend(["", "## Order execution evidence", "A strategy status of ok is not an order or a fill.",
+                  "| Stage | Count |", "|---|---:|"])
+    for key in ("order_attempts", "orders_submitted", "orders_filled", "orders_rejected", "sdk_errors", "forced_closes", "ok_without_orders"):
+        lines.append(f"| {key} | {evidence.get(key, 'not recorded')} |")
+    for reason, count in evidence.get("rejection_reasons", {}).items():
+        lines.append(f"- rejection {reason}: {count}")
     lines.extend(["", "## Trades by reason", "| Reason | N | Total notional | Fees |", "|---|---:|---:|---:|"])
     by_reason: dict[str, dict[str, float]] = {}
     for t in result.trades:

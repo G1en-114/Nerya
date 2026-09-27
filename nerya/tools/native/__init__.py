@@ -22,9 +22,9 @@ Modules:
   ``journal_search`` (compatibility for long-term recall).
 * :mod:`agents`        — ``subagent_list`` / ``subagent_run`` (parent
   kernel summons child runtimes).
-* :mod:`evolve`        — ``evolve_reflect`` / ``evolve_skill_proposal`` /
-  ``evolve_proposals`` (self-improvement reflection and workflow-to-skill
-  proposals).
+* :mod:`evolve`        — ``evolve_reflect`` / ``skill_manage`` /
+  ``evolve_proposals`` (self-improvement reflection, direct reusable Skill
+  saves, and legacy proposal inspection).
 * :mod:`recipes`       — ``recipe_list`` / ``recipe_view`` (operator-curated
   named runbooks, complement to the SKILL.md index).
 * :mod:`connectors`    — ``connector_list`` / ``connector_view``: enumerate

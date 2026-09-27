@@ -1,4 +1,5 @@
 "use client";
+import { Icon as NeryaGlyph } from "../icons";
 
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
@@ -397,7 +398,7 @@ function StepDot({
               : "bg-ink-800 text-ink-400"
         }`}
       >
-        {done ? "✓" : ""}
+        {done ? <NeryaGlyph name="check" size={14} /> : null}
       </span>
       <span className={done || active ? "text-ink-200" : "text-ink-500"}>
         {label}
@@ -407,7 +408,7 @@ function StepDot({
 }
 
 function ArrowDot() {
-  return <span className="text-ink-600">›</span>;
+  return <NeryaGlyph name="chevronRight" size={14} className="text-ink-600" />;
 }
 
 function Field({

@@ -204,7 +204,7 @@ def test_legacy_strategy_remains_visible(paths):
     root.mkdir(parents=True)
     (root / "strategy.yml").write_text(yaml_io.dumps({"id": "legacy", "title": "Legacy", "driver": "prompt", "account_id": "paper_main", "markets": ["BINANCE:BTCUSDT"]}))
     out = view_workflow(paths, "legacy")
-    assert out["legacy"] and not out["can_edit"]
+    assert out["legacy"] and out["can_edit"]
     assert any(n["kind"] == "account" for n in out["strategy"]["nodes"])
 
 

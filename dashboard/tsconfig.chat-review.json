@@ -6,7 +6,8 @@
     "**/*.tsx",
     ".next-chat-review/types/**/*.ts",
     ".next-main-chat-live/types/**/*.ts",
-    ".next-continuous-review/types/**/*.ts"
+    ".next-continuous-review/types/**/*.ts",
+    ".next-learning-qa/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

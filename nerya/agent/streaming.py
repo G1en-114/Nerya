@@ -57,6 +57,28 @@ from typing import Any, Callable, Iterable
 _EventCb = Callable[[dict[str, Any]], None]
 
 
+def thinking_event_fields(block: dict[str, Any]) -> dict[str, Any]:
+    """Keep reasoning delta/snapshot identity across the durable event boundary."""
+    kind = block.get("kind")
+    snapshot = kind == "thinking" and bool(block.get("stream_id"))
+    return {
+        "stream_id": block.get("stream_id"),
+        "stream_mode": block.get("stream_mode"),
+        "completed": snapshot,
+        "mode": "replace" if snapshot else "append" if kind == "thinking_delta" else "legacy",
+        "step": {
+            "kind": "thinking",
+            "status": "ok" if kind == "thinking" else "running",
+            "wall_ms": block.get("elapsed_ms", 0),
+            "detail": {
+                "text": str(block.get("text") or ""),
+                "summary": str(block.get("summary") or ""),
+                **({"retry": block["retry"]} if isinstance(block.get("retry"), dict) else {}),
+            },
+        },
+    }
+
+
 @dataclass
 class StreamingEventBus:
     """Process-local pub/sub.
@@ -74,6 +96,7 @@ class StreamingEventBus:
     _last_events: list[dict[str, Any]] = field(default_factory=list)
     _seq: int = 0
     _max_replay: int = 2000
+    _epoch: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def subscribe(self, callback: _EventCb) -> Callable[[], None]:
         """Register ``callback``. Returns an unsubscribe function."""
@@ -104,21 +127,18 @@ class StreamingEventBus:
         copy carries the same identifiers.
         """
 
+        # Allocation and insertion share one lock: concurrent publishers must
+        # not append seq=12 before seq=11. Caller metadata cannot override IDs.
         with self._lock:
             self._seq += 1
-            seq = self._seq
-        # ``payload`` may legitimately set ``ts`` / ``event_id`` (e.g.
-        # when replaying a persisted event) so we honour those values
-        # but always overwrite ``seq`` with the bus-monotonic counter
-        # to keep ordering invariants in the ring.
-        event: dict[str, Any] = {
-            "kind": kind,
-            "seq": seq,
-            "event_id": payload.pop("event_id", None) or uuid.uuid4().hex,
-            "ts": payload.pop("ts", None) or time.time(),
-            **payload,
-        }
-        with self._lock:
+            event: dict[str, Any] = {
+                **payload,
+                "kind": kind,
+                "seq": self._seq,
+                "epoch": self._epoch,
+                "event_id": payload.get("event_id") or uuid.uuid4().hex,
+                "ts": payload.get("ts") or time.time(),
+            }
             self._last_events.append(event)
             if len(self._last_events) > self._max_replay:
                 self._last_events = self._last_events[-self._max_replay:]
@@ -147,6 +167,29 @@ class StreamingEventBus:
         if after_seq is None:
             return buf
         return [ev for ev in buf if int(ev.get("seq") or 0) > int(after_seq)]
+
+    def page(self, *, after_seq: int | None = None, epoch: str | None = None,
+             session_id: str | None = None, limit: int = 500) -> dict[str, Any]:
+        """Atomic replay page; session filtering is not a sequence gap.
+
+        Expired bases require a snapshot. Never silently skip unread events.
+        """
+        limit = max(1, min(2000, int(limit)))
+        with self._lock:
+            head, generation = self._seq, self._epoch
+            oldest = int(self._last_events[0]["seq"]) if self._last_events else head + 1
+            reset = bool((epoch and epoch != generation) or (after_seq is not None
+                         and (after_seq < oldest - 1 or after_seq > head)))
+            base = oldest - 1 if reset or after_seq is None else after_seq
+            rows = [dict(event) for event in self._last_events
+                    if int(event["seq"]) > base
+                    and (not session_id or event.get("session_id") == session_id)]
+            more = len(rows) > limit
+            rows = rows[:limit]
+            cursor = int(rows[-1]["seq"]) if more else head
+        return {"events": rows, "count": len(rows), "cursor": cursor,
+                "next_cursor": cursor, "latest_seq": head, "has_more": more,
+                "epoch": generation, "reset_required": reset, "oldest_seq": oldest}
 
     def latest_seq(self) -> int:
         """Return the highest ``seq`` ever assigned by this bus.
@@ -190,6 +233,7 @@ class StreamingEventBus:
             self._subscribers.clear()
             self._last_events.clear()
             self._seq = 0
+            self._epoch = uuid.uuid4().hex
 
 
 _default_bus = StreamingEventBus()

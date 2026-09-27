@@ -1,0 +1,47 @@
+.find { position:absolute; top:10px; right:16px; z-index:40; width:min(360px,calc(100% - 24px)); border:1px solid var(--line-hi); border-radius:10px; background:var(--overlay-surface); color:var(--text-base); box-shadow:0 2px 8px #0002; }
+.findRow { display:flex; align-items:center; gap:5px; min-height:38px; padding:3px 6px 3px 11px; }
+.findRow > svg { flex:none; color:var(--text-muted); }
+.findRow input { flex:1; min-width:0; background:transparent; border:0; outline:0; font-size:13px; }
+.findRow input::-webkit-search-cancel-button { display:none; }
+.findCount { font-size:11px; font-variant-numeric:tabular-nums; color:var(--text-muted); min-width:26px; text-align:center; }
+.find button { display:inline-flex; align-items:center; justify-content:center; min-height:28px; min-width:28px; border-radius:5px; color:var(--text-muted); }
+.find button:hover { background:var(--panel-bg); color:var(--text-base); }
+.find button:disabled { opacity:.35; }
+.find button:focus-visible,.tasks button:focus-visible,.task:focus-visible { outline:2px solid var(--violet); outline-offset:1px; }
+.findFooter { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:3px 10px 7px; font-size:11px; color:var(--text-muted); }
+.findFooter button { text-decoration:underline; font-size:11px; }
+.tasks { padding:0 0 24px; }
+.tasksHeader { display:flex; align-items:center; justify-content:space-between; padding:0 8px 4px; min-height:30px; }
+.tasksHeading { font-size:12px; font-weight:500; color:var(--text-muted); }
+.filter { display:flex; align-items:center; gap:4px; height:28px; padding:0 5px; border-radius:5px; color:var(--text-muted); font-size:11px; }
+.filter:hover { background:var(--panel-bg); color:var(--text-base); }
+.taskRow { display:flex; align-items:center; position:relative; border-radius:7px; min-width:0; margin:2px 0; }
+.taskRow:hover { background:var(--panel-bg); }
+.taskRow[data-active=true] { background:var(--pill-bg, var(--panel-bg)); }
+.task { display:flex; align-items:center; gap:8px; min-height:32px; flex:1; min-width:0; padding:6px 7px 6px 10px; font-size:13px; color:var(--text-base); }
+.showMore { min-height:32px; padding:6px 12px; font-size:12px; color:var(--text-muted); border-radius:6px; }
+.showMore:hover { background:var(--panel-bg); color:var(--text-base); }
+.taskRow[data-active=true] .task { color:var(--text-base); }
+.taskText { display:flex; flex-direction:column; gap:2px; flex:1; min-width:0; }
+.taskTitle { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; min-width:0; }
+.taskStatus { font-size:11px; line-height:1.4; color:var(--text-muted); }
+.taskStatus[data-attention=true] { color:var(--warn); }
+.taskIcon { flex:none; width:16px; height:16px; color:inherit; }
+.taskActions { position:absolute; right:3px; background:var(--bg-deep); border-radius:6px; opacity:0; pointer-events:none; }
+.taskRow:hover .taskActions,.taskRow:focus-within .taskActions,.taskActions:has(button[data-state=open]) { opacity:1; pointer-events:auto; }
+.taskRow:hover .task,.taskRow:focus-within .task { padding-right:34px; }
+@media (hover:none) { .taskActions { position:static; opacity:1; pointer-events:auto; } }
+.taskActions button { width:26px; height:26px; min-height:26px; }
+.listHint { padding:8px 10px; font-size:12px; color:var(--text-muted); }
+.contextButton { display:inline-flex; align-items:center; gap:5px; padding:0 5px; min-height:30px; font-size:11px; color:var(--text-muted); white-space:nowrap; border-radius:5px; }
+.contextButton:hover { color:var(--text-base); background:var(--panel-bg); }
+@media(max-width:600px) {
+  .find { right:8px; top:8px; }
+  .findRow { min-height:44px; }
+  .findRow input { font-size:16px; }
+}
+@media (pointer:coarse), (max-width:767px) {
+  .find button,.task,.filter,.showMore,.contextButton,.taskActions button { min-height:44px; min-width:44px; }
+  .taskActions { position:static; opacity:1; pointer-events:auto; }
+  .taskRow:hover .task,.taskRow:focus-within .task { padding-right:7px; }
+}

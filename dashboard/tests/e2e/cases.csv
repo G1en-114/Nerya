@@ -122,7 +122,7 @@ H6,H,P1,NVDA 财报关键指标,data|price|数据|价格|股价|报价|营收|�
 H7,H,P1,所有数据源的同步状态给我看一下,data|数据源|sync|同步|source|状态|stale|fresh|freshness|ledger,,data_source_status_min=5,180000,0,Data Source Sync ledger
 H8,H,P1,把 account:paper_main 立刻同步一次,paper_main|sync|同步|source|数据源|ledger|success|error|not initialised|未初始化|已触发,,data_source_event_source=account:paper_main,180000,0,强制 Sync
 H9,H,P1,配置 Financial Datasets 的 key：[KEY],Financial Datasets|key|vault|ready|status|配置|凭证|KEY|占位|placeholder,,financial_datasets_status=false,180000,0,Financial Datasets keys
-H10,H,P1,每天凌晨把 X 平台关键 KOL 列表同步到本地，写个 skill,skill|proposal|提案|sync|同步|X|KOL,,proposal_kind=skill_proposal,180000,0,用户自定义 Sync Contributor
+H10,H,P1,每天凌晨把 X 平台关键 KOL 列表同步到本地，写个 skill,skill|sync|同步|X|KOL|保存|生效,,tool_used=skill_manage,180000,0,用户自定义 Sync Contributor
 I1,I,P0,创建一个新的自托管 EVM 钱包给我,wallet|provider,,wallet_provider_has=self_custody,120000,0,self_custody（自托管 EVM）
 I2,I,P0,连接 OKX Agentic Wallet，邮箱 xxx@yy.com,wallet|provider,,,120000,0,OKX OS（Onchain OS / Agentic Wallet）
 I3,I,P0,加 Bitget Wallet,wallet|provider,,,120000,0,Bitget Wallet
@@ -143,7 +143,7 @@ K3,K,P0,每当 BTC 24h 涨幅 > 5%，团队复盘一次给我建议,.+,,,900000,
 K4,K,P0,如果策略当日亏损超 5%，停掉策略并通知我,task|schedule|cron|任务|调度|监控|亏损|通知|kill.?switch,,tool_used=task_create:schedule_session_kind=agent:tool_not_used=kill_switch_set,900000,1,风险事件应急
 K5,K,P0,每月底自动复盘 + 生成下月调整建议,.+,,,900000,1,月度自我评估 + 升级
 K6,K,P0,我同时做美股（IBKR paper）+ 加密（Binance paper）+ 链上 meme（OKX wallet），帮我管理,.+,,,900000,1,跨市场配置
-K7,K,P0,把我公司内部的 Slack feed (API: ...) 加进来，每小时让团队基于它判断 ETH 仓位,Slack|team|团队|task|schedule|skill|proposal|提案|任务|调度,,proposal_kind=skill_proposal:team_run_exists=true:tool_used=task_create:schedule_session_kind=agent,900000,1,自定义新闻 + 自定义 venue + 团队
+K7,K,P0,把我公司内部的 Slack feed (API: ...) 加进来，每小时让团队基于它判断 ETH 仓位,Slack|team|团队|task|schedule|skill|保存|任务|调度,,team_run_exists=true:tool_used=skill_manage|task_create:schedule_session_kind=agent,900000,1,自定义新闻 + 自定义 venue + 团队
 K8,K,P0,（某 schedule 连续 3 次失败）这个任务一直挂，自己排查,.+,,,900000,1,自我修复
 K9,K,P0,在 /tasks 创建一个 task，再在 /chat 用同 session_id 继续问,.+,,,900000,1,Tasks 页与 Chat 页一致性
 K10,K,P0,（permission=paper 时）帮我下单买 0.01 BTC → 切到 live → 再问,.+,,,900000,1,Permission Mode 切换

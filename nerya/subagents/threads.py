@@ -125,10 +125,22 @@ class AgentThreadStore:
 
     def begin(self, *, spec: Any, payload: dict[str, Any], session_id: str,
               parent_call_id: str, strategy_id: str | None, turn_id: str | None,
-              context_scope: str, agent_id: str = "") -> dict[str, Any]:
+              context_scope: str, agent_id: str = "", reuse_role: bool = False,
+              permission_ceiling: dict[str, Any] | None = None) -> dict[str, Any]:
         inherited = self.parent_context(session_id) if not agent_id and context_scope != "explicit_payload_only" else []
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            reused = False
+            if not agent_id and reuse_role and session_id:
+                candidates = db.execute("SELECT id FROM child_threads WHERE session_id=? ORDER BY updated DESC", (session_id,)).fetchall()
+                for candidate in candidates:
+                    previous = self._load(db, candidate["id"], session_id)
+                    if (previous["name"] == spec.name and previous.get("strategy_id") == strategy_id
+                            and previous["context_scope"] == context_scope):
+                        if previous["state"] == "running":
+                            raise ValueError("agent is already running in this context")
+                        agent_id, reused = previous["id"], True
+                        break
             if agent_id:
                 row = self._load(db, agent_id, session_id)
                 if parent_call_id and row.get("last_resume_call_id") == parent_call_id:
@@ -136,6 +148,16 @@ class AgentThreadStore:
                 if row["state"] == "running":
                     raise ValueError("agent is already running; send a message instead")
                 row["last_resume_call_id"] = parent_call_id
+                if reused:
+                    # Keep history, but use this run's input and current role rules.
+                    snapshot = asdict(spec)
+                    snapshot["execution_policy"] = spec.execution_policy.asdict()
+                    snapshot["prompt_path"] = str(spec.prompt_path or "")
+                    row.update(payload=_safe(payload), spec=_safe(snapshot), turn_id=turn_id,
+                               title=str(payload.get("__team_task") or payload.get("task") or spec.name),
+                               team_run_id=str(payload.get("team_run_id") or ""),
+                               group_id=str(payload.get("team_run_id") or parent_call_id or agent_id))
+
                 if row["name"] != spec.name or row["context_scope"] != context_scope:
                     raise ValueError("agent identity/context scope cannot change on continuation")
                 db.execute("UPDATE child_messages SET status='queued', attempt=0 WHERE recipient=? AND status='delivered'",
@@ -143,6 +165,7 @@ class AgentThreadStore:
             else:
                 agent_id = "agent_" + uuid.uuid4().hex
                 snapshot = asdict(spec)
+                snapshot["execution_policy"] = spec.execution_policy.asdict()
                 snapshot["prompt_path"] = str(spec.prompt_path or "")
                 row = {
                     "id": agent_id, "session_id": session_id,
@@ -159,15 +182,23 @@ class AgentThreadStore:
             row.update(state="running", attempt=row["attempt"] + 1,
                        owner_pid=os.getpid(), owner_token=_PROCESS_TOKEN,
                        turn_id=turn_id, error="")
+            if permission_ceiling is not None:
+                from .permissions import intersect_ceilings
+                row["permission_ceiling"] = intersect_ceilings(
+                    permission_ceiling, row.get("permission_ceiling") or {})
             self._save(db, row)
         self.event(row, "resumed" if row["attempt"] > 1 else "started", {"attempt": row["attempt"]})
         return row
 
     @staticmethod
     def restore_spec(row: dict[str, Any]) -> Any:
-        from .registry import SubAgentSpec
+        from .registry import SubAgentSpec, SubAgentExecutionPolicy
         data = dict(row["spec"])
         data["prompt_path"] = Path(data["prompt_path"] or ".")
+        policy = data.get("execution_policy") or {}
+        if "native_tool_allow" in policy or "native_tool_deny" in policy:
+            # Existing rows used dataclasses.asdict rather than the policy's wire shape.
+            data["execution_policy"] = SubAgentExecutionPolicy(**policy)
         return SubAgentSpec(**data)
 
     def event(self, row: dict[str, Any], kind: str, data: dict[str, Any]) -> None:

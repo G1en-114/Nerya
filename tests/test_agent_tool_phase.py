@@ -152,3 +152,27 @@ def test_batch_policy_is_a_frozen_capability_snapshot():
     exposed.add("hidden")
     assert policy.allowed_tool_names == frozenset({"probe"})
     assert policy.provider_tool_names == frozenset({"probe"})
+
+
+def test_read_validation_refreshes_after_mutation_without_replaying_the_write():
+    registry = ToolRegistry()
+    calls_seen = []
+    for name, read_only in (("check_file", True), ("change_file", False)):
+        registry.register(ToolDescriptor(name=name, description=name, input_schema={"type":"object"},
+            handler=_result, risk=RiskLevel.READ if read_only else RiskLevel.WRITE,
+            permission_scope=PermissionScope.WORKSPACE, read_only=read_only))
+    def dispatch(calls):
+        calls_seen.extend(calls)
+        return BatchResult(results=[_result(call) for call in calls])
+    phase = ToolBatchPhase(orchestrator=SimpleNamespace(run_batch=dispatch), registry=registry)
+    policy = ToolBatchPolicy(frozenset({"check_file","change_file"}),frozenset({"check_file","change_file"}), repeated_tool_threshold=3)
+    state = _state()
+    def invoke(name, id):
+        return phase.run([ToolCall(name=name,id=id,arguments={"path":"example.txt"})],state=state,policy=policy).batch.results[0]
+    assert not invoke("check_file","read1").is_error
+    assert not invoke("check_file","read2").is_error
+    assert invoke("check_file","blocked").error.kind == ToolErrorKind.DEDUPED
+    assert not invoke("change_file","edit1").is_error
+    assert not invoke("check_file","fresh-read").is_error
+    assert invoke("change_file","edit-duplicate").error.kind == ToolErrorKind.DEDUPED
+    assert [call.id for call in calls_seen] == ["read1","read2","edit1","fresh-read"]

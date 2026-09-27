@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: equity_research
+metadata:
+  nerya:
+    catalog_group: professional
 description: "Use for deep research on a US-listed stock: financials, filings, estimates, news, valuation, and memo output; includes Financial Datasets setup and fallback guidance."
 version: 0.1.0
 license: MIT
@@ -21,6 +24,13 @@ LOAD `sec_filings` for 10-K, 10-Q, 8-K, MD&A, and risk factors.
 LOAD `dcf_valuation` when valuation or price target is needed.
 COMPARE thesis, catalysts, risks, and disconfirming evidence.
 WRITE a memo only after sources are gathered.
+
+For an existing company/sector coverage workflow, load
+`Skill(skill="finance.equity_research")` and only its matching method:
+earnings preview/results, model update, catalysts, thesis tracking, screening,
+morning note or sector review. `dcf_valuation` and `sec_filings` are optional
+methods of this workflow; their exact input requirements and scripts remain
+separate. If a method is not enabled, report the limitation, not an implied grant.
 
 ## Scripts
 

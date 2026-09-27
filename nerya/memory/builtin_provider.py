@@ -1,19 +1,7 @@
-"""Built-in (always-on) memory provider for Nerya.
+"""Compatibility adapter over the built-in notebook and scoped SQLite memory.
 
-This provider combines the curated AGENT.md / OPERATOR.md notebook
-with the local fact log. It ships with the codebase, requires no API
-key, and becomes the default as soon as the agent boots. External
-providers (Mem0, Honcho, Hindsight, …) layer on top of this one —
-they never replace it.
-
-Composition (so we don't grow yet another god-class):
-
-* :class:`MemoryNotebook` for the bounded curated stores.
-* :class:`MemoryRuntime` for scoped, rule-driven captures.
-* ``memsearch_index`` for vector recall (when enabled by the operator).
-
-Each delegate already knows how to do its own thing safely; the
-provider just glues them onto the :class:`MemoryProvider` lifecycle.
+The native agent uses MemoryRuntime directly. This adapter keeps the historical
+provider API available without external recall or a second index.
 """
 
 from __future__ import annotations
@@ -23,8 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.config import Config
-from . import memsearch_index
-from .notebook import MemoryNotebook, NotebookResult, VALID_TARGETS, load_notebook
+from .notebook import MemoryNotebook, VALID_TARGETS, load_notebook
 from .provider import (
     MemoryProvider,
     MemoryProviderInfo,
@@ -42,22 +29,22 @@ _log = logging.getLogger("nerya.memory.builtin")
 
 _BUILTIN_INFO = MemoryProviderInfo(
     id="builtin",
-    name="Built-in (notebook + memsearch)",
+    name="Built-in memory",
     family="builtin",
     description=(
         "Curated AGENT.md / OPERATOR.md notebook injected verbatim into "
-        "the system prompt, plus the optional memsearch vector index "
-        "over markdown memory. Always available — no remote calls."
+        "the system prompt, plus canonical scoped SQLite recall "
+        "over versioned facts. Always available — no remote calls."
     ),
     requires_api_key=False,
     env_key=None,
-    cost_hint="free (local files + optional embedding cost)",
+    cost_hint="free (local storage)",
 )
 
 
 @dataclass
 class BuiltinMemoryProvider(MemoryProvider):
-    """Always-on provider backed by the curated notebook + memsearch."""
+    """Always-on compatibility provider backed by built-in memory."""
 
     config: Config
     info: MemoryProviderInfo = field(default=_BUILTIN_INFO, init=False)
@@ -69,8 +56,7 @@ class BuiltinMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         # Always available: the notebook is on-disk only and the
-        # writer never fails to construct (memsearch is optional and
-        # checked separately by the dashboard).
+        # runtime requires no external service.
         return True
 
     def initialize(self) -> None:
@@ -95,55 +81,16 @@ class BuiltinMemoryProvider(MemoryProvider):
     # ----------------------------------------------------- system prompt
 
     def system_prompt_block(self) -> str:
-        return self._system_prompt_snapshot
+        return self._system_prompt_snapshot if self._memory and self._memory.use_enabled else ""
 
     # -------------------------------------------------------------- recall
 
     def prefetch(self, query: str, *, limit: int = 5) -> list[MemoryRecallChunk]:
-        """Run memsearch over the workspace markdown if it's enabled."""
-
-        try:
-            res = memsearch_index.search(
-                self.config,
-                query=str(query or ""),
-                top_k=int(limit or 5),
-            )
-        except Exception as exc:  # noqa: BLE001 — recall is best-effort
-            _log.warning("builtin memory recall failed: %s", exc)
-            return []
-        if not isinstance(res, dict):
-            return []
-        rows = res.get("results")
-        if not isinstance(rows, list):
-            return []
-        chunks: list[MemoryRecallChunk] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            text = str(
-                row.get("content")
-                or row.get("text")
-                or row.get("chunk")
-                or "",
-            ).strip()
-            if not text:
-                continue
-            try:
-                score = float(row.get("score") or 0.0)
-            except (TypeError, ValueError):
-                score = 0.0
-            chunks.append(MemoryRecallChunk(
-                text=text,
-                score=score,
-                source=str(
-                    row.get("source")
-                    or row.get("path")
-                    or row.get("file")
-                    or "memory",
-                ),
-                metadata={k: v for k, v in row.items() if k not in {"content", "text", "chunk"}},
-            ))
-        return chunks
+        """Compatibility provider uses canonical global recall, never a file index."""
+        memory = self._memory or MemoryRuntime(self.config)
+        return [MemoryRecallChunk(text=hit.content, score=hit.score, source=hit.source_ref,
+                                  metadata={"memory_id": hit.memory_id, "scope": hit.scope})
+                for hit in memory.recall(query, limit=limit)]
 
     # --------------------------------------------------------------- tools
 
@@ -175,6 +122,7 @@ class BuiltinMemoryProvider(MemoryProvider):
                             "type": "string",
                             "description": "New entry (for add) or replacement text (for replace).",
                         },
+                        "expected_revision": {"type": "string", "description": "Revision from read, required for replace/remove."},
                         "old_text": {
                             "type": "string",
                             "description": "Substring identifying the entry to replace / remove.",
@@ -206,45 +154,25 @@ class BuiltinMemoryProvider(MemoryProvider):
                 ok=False,
                 error=f"builtin: invalid target {target!r}; want one of {list(VALID_TARGETS)}",
             )
+        runtime = self._memory
+        state = runtime.notebook_state()
+        if not state.get("ok"):
+            return MemoryToolResult(ok=False, error=state.get("error", "notebook_unreadable"))
         if action == "read":
-            entries = nb.entries(target)
-            return MemoryToolResult(
-                ok=True,
-                content="\n§\n".join(entries),
-                extra={
-                    "target": target,
-                    "entries": list(entries),
-                    "used_chars": nb.used_chars(target),
-                    "char_limit": nb.char_limit(target),
-                },
-            )
-        if action == "add":
-            res: NotebookResult = nb.add(target, str(arguments.get("content") or ""))
-        elif action == "replace":
-            res = nb.replace(
-                target,
-                str(arguments.get("old_text") or ""),
-                str(arguments.get("content") or ""),
-            )
-        elif action == "remove":
-            res = nb.remove(target, str(arguments.get("old_text") or ""))
-        else:
-            return MemoryToolResult(
-                ok=False,
-                error=f"builtin: unknown action {action!r}",
-            )
-        return MemoryToolResult(
-            ok=res.ok,
-            content=res.message,
-            error=res.error,
-            extra={
-                "target": res.target,
-                "used_chars": res.used_chars,
-                "char_limit": res.char_limit,
-                "entries": list(res.entries),
-                **res.extra,
-            },
-        )
+            if not runtime.use_enabled:
+                return MemoryToolResult(ok=False, error="use_disabled")
+            return MemoryToolResult(ok=True, content="\n§\n".join(state[target]["entries"]), extra=state[target])
+        try:
+            result = runtime.notebook_mutate(target=target, action=action,
+                content=str(arguments.get("content") or ""), old_text=str(arguments.get("old_text") or ""),
+                expected_revision=arguments.get("expected_revision", state[target]["revision"] if action == "add" else None))
+        except (ValueError, OSError) as exc:
+            return MemoryToolResult(ok=False, error=str(exc))
+        error = result.get("error", "")
+        if error == "unsafe_content":
+            from .content_scanner import scan_memory_content
+            error = scan_memory_content(str(arguments.get("content") or "")) or error
+        return MemoryToolResult(ok=result["ok"], error=error, extra=result)
 
     # ----------------------------------------------------- session hooks
 
@@ -263,6 +191,7 @@ class BuiltinMemoryProvider(MemoryProvider):
                 content=summary,
                 title="session summary",
                 source="builtin:on_session_end",
+                automatic=True,
             )
         except Exception:  # noqa: BLE001 — best-effort
             _log.exception("builtin memory: session_summary capture failed")

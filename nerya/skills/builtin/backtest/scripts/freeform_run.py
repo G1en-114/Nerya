@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -34,6 +35,16 @@ from .backtest_run import (
 
 class NoFreeformBacktestScript(TradingError):
     """Raised when a strategy package has no freeform backtest entrypoint."""
+
+
+class FreeformDependencyError(TradingError):
+    """An actionable environment failure, not invalid strategy parameters."""
+
+    def __init__(self, module: str, script: Path) -> None:
+        self.module = module
+        super().__init__(f"Freeform replay {script.name} requires unavailable module {module!r} in the Nerya interpreter. "
+            "Do not repeat the unchanged backtest. Use engine='native' only when the saved main entrypoint implements the same strategy, "
+            "or repair the custom replay to use available providers/dependencies. Do not delete the strategy or weaken its trading rules.")
 
 
 SCRIPT_CANDIDATES = (
@@ -97,9 +108,9 @@ def run_freeform_backtest(
             f"no freeform backtest script found under {package.root}"
         )
 
-    ts_name = time.strftime("freeform_%Y%m%d_%H%M%S", time.gmtime())
-    out_dir = package.root / "backtests" / ts_name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    from .writers import create_run_dir
+    out_dir = create_run_dir(package.root, kind="freeform")
+    ts_name = out_dir.name
 
     env = dict(os.environ)
     env["NERYA_BACKTEST_OUT_DIR"] = str(out_dir)
@@ -123,6 +134,9 @@ def run_freeform_backtest(
         check=False,
     )
     if proc.returncode != 0:
+        missing = re.search(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]", proc.stderr or "")
+        if missing:
+            raise FreeformDependencyError(missing.group(1), script_path)
         raise TradingError(
             "freeform backtest script failed "
             f"({script_path}, exit={proc.returncode}): "

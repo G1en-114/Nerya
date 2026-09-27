@@ -247,6 +247,11 @@ def submit_trade_intent(
 ) -> dict[str, Any]:
     """Validate an intent and submit it through the one guarded plan executor."""
     payload = dict(spec or {})
+    meta = dict(payload.get("meta") or {})
+    for key in ("plan_action", "protection"):
+        if key in payload:
+            meta[key] = payload.pop(key)
+    payload["meta"] = meta
     if "intent_id" in payload:
         intent = TradeIntent(**payload)
     else:
@@ -294,7 +299,9 @@ def _intent_to_plan(intent: TradeIntent) -> TradePlan:
     # Side: the intent is already a CEX-native buy/sell. Map back to the
     # directional long/short the plan expects based on the action.
     if action == "open_position":
-        side = "long" if intent.side == "buy" else "short"
+        side = {"open_short": "short", "open_long": "long"}.get(
+            plan_action, "long" if intent.side == "buy" else "short",
+        )
     else:  # close/reduce — the strategy's position direction is inferred
         side = "short" if intent.side == "buy" else "long"
 
@@ -324,7 +331,24 @@ def _intent_to_plan(intent: TradeIntent) -> TradePlan:
     )
 
     # Thread the intent_id back so the resume path and dedupe stay stable.
-    plan_meta = {k: v for k, v in meta.items() if k not in ("plan_action",)}
+    from ..sdk.trading_api import _coerce_protection
+    from .protection_store import validate_supported_specs
+
+    protection = None
+    if action in ("open_position", "attach_protection"):
+        protection = _coerce_protection(meta.get("protection"), defaults={
+            "side": side, "account_id": intent.account_id,
+            "market": intent.market, "strategy_id": intent.strategy_id,
+        })
+    if protection is not None:
+        validate_supported_specs(protection)
+    if action == "reduce_position" and isinstance(meta.get("protection"), dict):
+        reduce_pct = meta["protection"].get("reduce_pct")
+        if reduce_pct is not None:
+            sizing = SizingPolicy(method="reduce_pct", reduce_pct=float(reduce_pct))
+    if action == "close_position":
+        sizing = SizingPolicy(method="close_all")
+    plan_meta = {k: v for k, v in meta.items() if k not in ("plan_action", "protection")}
     plan_meta["bridged_from_intent"] = True
     # Preserve the original intent source verbatim (e.g. ``agent:native``)
     # so the approval record and audit trail show exactly what the caller
@@ -347,6 +371,7 @@ def _intent_to_plan(intent: TradeIntent) -> TradePlan:
         side=side,  # type: ignore[arg-type]
         sizing=sizing,
         entry=entry,
+        protection=protection if action in ("open_position", "attach_protection") else None,
         confidence=intent.confidence,
         reasoning_ref=intent.reasoning,
         trigger_event_id=intent.trigger_event_id,
@@ -562,6 +587,19 @@ def submit_trade_plan(
     """
 
     paths = config.paths
+    from ..wallet.strategy_execution import is_wallet_account, submit_plan as submit_wallet_plan
+    if is_wallet_account(config,plan.account_id):
+        return submit_wallet_plan(config,plan)
+    prediction_account=get_account_profile(paths,plan.account_id)
+    from ..connectors.provider_spec import get_registry
+    prediction_spec=get_registry().find(prediction_account.venue)
+    is_prediction=prediction_account.kind=='prediction_market' or bool(prediction_spec and prediction_spec.kind=='prediction_market')
+    if is_prediction:
+        if plan.side!='long' or plan.entry.order_type not in ('market','limit') or plan.protection is not None:
+            raise IntentValidationError('prediction outcome shares support long market/limit entry and owned-share exits; native short/TP/SL is unsupported')
+    if plan.protection is not None:
+        from .protection_store import validate_supported_specs
+        validate_supported_specs(plan.protection)
     if plan.action == "attach_protection":
         # R3T5: an ``attach_protection`` plan must never reach the
         # MarketOrderExecutor. It used to fall through as a real BUY
@@ -610,6 +648,12 @@ def submit_trade_plan(
     snapshot = _resolve_market_snapshot(
         config, intent, supplied=market_snapshot if isinstance(market_snapshot, dict) else None,
     )
+    if is_prediction and isinstance(snapshot,dict):
+        snapshot=dict(snapshot)
+        executable=snapshot.get('ask' if plan.buy_or_sell=='buy' else 'bid')
+        if executable:snapshot['price']=executable
+        if plan.entry.order_type=='limit' and plan.entry.limit_price:
+            snapshot['price']=plan.entry.limit_price
 
     risk = RiskGate(config).evaluate(intent, market_snapshot=snapshot, resume=resume)
     history_store.record_risk(
@@ -759,6 +803,9 @@ def submit_trade_plan(
         log.exception("reservation expire_due sweep failed")
     checker = BudgetChecker(profile=profile, snapshot=snap, store=store)
     mark_price = (snapshot or {}).get("price") or plan.entry.limit_price
+    if is_prediction and plan.buy_or_sell=='buy' and plan.entry.order_type=='market' and mark_price:
+        cap=int((profile.raw.get('provider_config') or {}).get('max_slippage_bps',50))
+        mark_price=float(mark_price)*(1+cap/10000)
     # R3T5: ``attach_protection`` plans are intercepted above, so every
     # plan reaching this line is directional and ``buy_or_sell`` is
     # always defined.
@@ -774,6 +821,7 @@ def submit_trade_plan(
         stop_price=plan.entry.stop_price,
         order_type=plan.entry.order_type,
         reduce_only=risk_reducing,
+        leverage=float((plan.meta or {}).get("leverage") or 1.0),
         time_in_force=plan.entry.time_in_force,
         intent_id=intent.intent_id,
         plan_id=plan.plan_id,
@@ -853,6 +901,24 @@ def submit_trade_plan(
                     }
 
     candidate = decision.candidate
+    if is_prediction and candidate.size_base is not None:
+        from decimal import Decimal,ROUND_FLOOR
+        original_size=float(candidate.size_base)
+        candidate.size_base=float(Decimal(str(original_size)).quantize(Decimal('.01'),rounding=ROUND_FLOOR))
+        if candidate.size_base<=0:
+            return {'status':'rejected','execution_blocker':'prediction_share_size_below_precision','plan_id':plan.plan_id}
+        candidate.notional_usd*=candidate.size_base/original_size
+        candidate.meta['mark_price']=float((snapshot or {}).get('price') or mark_price or 0)
+    if risk_reducing:
+        from contextlib import closing
+        with closing(PositionBook(paths)) as book:
+            share = book.get_share(strategy_id=plan.strategy_id, account_id=plan.account_id, market=plan.market)
+        size = float(candidate.size_base or 0.0)
+        if (share is None or not share.is_open or share.side != plan.side
+                or size <= 0 or size > abs(share.size_share_base) + 1e-12):
+            return {"status": "rejected", "plan_id": plan.plan_id, "session_id": session_id,
+                    "execution_blocker": "close_exceeds_strategy_position_or_wrong_side",
+                    "intent": redact_dict(intent.asdict()), "risk_decision": risk.asdict()}
     candidate.meta.update({
         "plan_action": plan.action,
         **dict(plan.meta or {}),
@@ -955,8 +1021,6 @@ def _attach_protection_for_plan(config: Config, plan: TradePlan) -> dict[str, An
     wanting an arbitrary position should use
     ``TradingAPI.attach_protection`` with an explicit ``position_id``.
     """
-    from .protection_store import ProtectionStore
-
     paths = config.paths
     position = PositionBook(paths).get_open(
         account_id=plan.account_id,
@@ -978,12 +1042,14 @@ def _attach_protection_for_plan(config: Config, plan: TradePlan) -> dict[str, An
             "stop_loss / take_profit / trailing_stop / partial_exits / "
             "time_limit_sec on plan.protection"
         )
+    if src.mode == "hard_exchange":
+        raise IntentValidationError("standalone hard_exchange attachment is unsupported; use soft_runtime or an entry with native protection")
     rule = ProtectionRule(
         position_id=position.position_id,
         strategy_id=plan.strategy_id,
         account_id=plan.account_id,
         market=plan.market,
-        side=position.side,
+        side=PositionBook(paths).get_share(account_id=plan.account_id, strategy_id=plan.strategy_id, market=plan.market).side,
         mode=src.mode,
         stop_loss=src.stop_loss,
         take_profit=src.take_profit,
@@ -994,20 +1060,8 @@ def _attach_protection_for_plan(config: Config, plan: TradePlan) -> dict[str, An
         status="armed",
         notes=src.notes or "attached_via_plan",
     )
-    ProtectionStore(paths).upsert(rule)
-    PositionBook(paths).attach_protection(position.position_id, rule.protection_id)
-    try:
-        orch = ExecutorOrchestrator(config)
-        orch.create_position_protection(rule=rule, position_id=position.position_id)
-        orch.close()
-    except Exception:
-        # The rule is already persisted and armed — a missing executor
-        # row must not fail the attachment; the orchestrator's resume
-        # path can recreate it from the rule.
-        log.exception(
-            "could not persist protection executor for position %s",
-            position.position_id,
-        )
+    from .protection_store import activate_protection
+    rule = activate_protection(config, rule)
     jsonl.append(paths.journal("trading"), {
         "kind": "protection.attached",
         "ts": now_iso(),
@@ -1083,9 +1137,8 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
     is handled by the new BudgetChecker downstream — we feed RiskGate
     a notional estimate so the dedupe + cap checks still bite.
 
-    We also stamp ``protection_present`` into ``intent.meta`` so the
-    canary risk hook can reject opens that ship without
-    a protection rule.
+    Stamp actual protection presence for strategies that explicitly require
+    it. Caller metadata cannot claim a rule that was never supplied.
     """
     side = plan.buy_or_sell if plan.action in (
         "open_position", "close_position", "reduce_position"
@@ -1147,10 +1200,11 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
         ),
         "trigger_event_id": plan.trigger_event_id,
         "meta": {
+            **dict(plan.meta or {}),
             "plan_id": plan.plan_id,
             "plan_action": plan.action,
             "protection_present": protection_present,
-            **dict(plan.meta or {}),
+            "plan_protection_attached": protection_present,
         },
     }
     if plan.intent_id:

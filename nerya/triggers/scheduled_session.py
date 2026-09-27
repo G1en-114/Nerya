@@ -15,21 +15,16 @@ Flow per tick
 -------------
 1. Build a synthetic trigger dict keyed by ``source='scheduled_session'``
    so the planner / router / journaling all tag it consistently.
-2. Mint a fresh ``session_id`` of the form ``sched:<schedule_id>:<ts>``
-   so each cadence firing is a clean context window (no accidental
-   carry-over from the last run unless the caller also wires a
-   persistent session manually).
+2. Select the configured ephemeral/reuse/fanout session and mint a
+   fixed turn_id before invoking the kernel.
 3. Call :meth:`AgentKernel.run_turn` with ``attached_skills=`` taken
    verbatim from the schedule entry. The kernel enforces the
    strategy-level / global skill deny-list on top.
-4. If ``session_ttl_seconds`` is set we wrap the call in a best-effort
-   soft-deadline thread-wait; an exceeded deadline is logged but we
-   don't hard-kill the turn because there's no safe interruption point
-   in the kernel. The deadline is advisory.
-5. Journal the full outcome under
-   ``journals/scheduled_session.jsonl`` (one row per tick, success or
-   failure) so operators can replay exactly which turn each cadence
-   firing produced.
+4. At TTL request cooperative cancellation; after grace report an
+   unconfirmed running turn. The worker still owns terminal writeback.
+5. Journal lifecycle receipts under ``journals/scheduled_session.jsonl``
+   keyed by the fixed turn_id. The latest row is the observed state,
+   including late results; no deadline implies a confirmed stop.
 6. Hand the :class:`AgentTurnResult` to the injected ``delivery_fn``
    (default: :mod:`nerya.messaging.scheduled_delivery`) for fan-out to
    ``delivery_targets``. Delivery failures are logged but never swallow
@@ -42,12 +37,17 @@ import re
 import threading
 import time
 import traceback
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..core import jsonl
 from ..core.config import Config
+from ..core.ids import turn_id as new_turn_id
+from ..core.redaction import redact_display_dict
 from ..core.time import now_iso
+from ..harness.cancellation import CancelToken, CancelledError
+from .execution_receipt import turn_execution_status
 from .schedule import ScheduleEntry
 
 
@@ -76,9 +76,17 @@ class ScheduledSessionResult:
     delivery: list[dict[str, Any]] = field(default_factory=list)
     ttl_exceeded: bool = False
     wall_ms: int = 0
+    execution_status: str = "running"
+    delivery_status: str = "not_requested"
+    cancellation_requested: bool = False
+    late_outcome: bool = False
+    final_text: str = ""
 
     def asdict(self) -> dict[str, Any]:
-        return {
+        return redact_display_dict({
+            "receipt_id": self.turn_id,
+            "command_id": None,
+            "source": "scheduled_session",
             "schedule_id": self.schedule_id,
             "session_id": self.session_id,
             "ok": self.ok,
@@ -91,7 +99,12 @@ class ScheduledSessionResult:
             "delivery": list(self.delivery),
             "ttl_exceeded": self.ttl_exceeded,
             "wall_ms": self.wall_ms,
-        }
+            "execution_status": self.execution_status,
+            "delivery_status": self.delivery_status,
+            "cancellation_requested": self.cancellation_requested,
+            "late_outcome": self.late_outcome,
+            "final_text": self.final_text,
+        })
 
 
 @dataclass
@@ -162,11 +175,19 @@ class ScheduledSessionRunner:
             session_id=session_id,
             ok=False,
             trigger_event_id=trigger_event_id,
+            turn_id=new_turn_id(),
+            delivery_status="pending" if entry.delivery_targets else "not_requested",
         )
+        token = CancelToken()
+        result_lock = threading.Lock()
+        self._journal(entry, result, now_ts)
 
         try:
             kernel = self.kernel_factory(self.config)
         except Exception as exc:
+            result.execution_status = "failed"
+            if entry.delivery_targets:
+                result.delivery_status = "not_sent"
             result.error = {
                 "code": "kernel_boot_failed",
                 "message": f"{type(exc).__name__}: {exc}",
@@ -174,96 +195,90 @@ class ScheduledSessionRunner:
             self._journal(entry, result, now_ts)
             return result
 
-        turn_result: Any = None
-        turn_error: BaseException | None = None
-
         def _invoke() -> None:
-            nonlocal turn_result, turn_error
+            turn_result: Any = None
+            turn_error: BaseException | None = None
             try:
                 turn_result = kernel.run_turn(
                     trigger=trigger,
                     strategy_id=entry.strategy_id,
                     session_id=session_id,
+                    turn_id=result.turn_id,
+                    cancel_token=token,
                     attached_skills=list(entry.attached_skills or []) or None,
                 )
             except BaseException as exc:  # noqa: BLE001
                 turn_error = exc
+            # The worker owns finalization even after run_once returns. Serialize
+            # it with the deadline receipt so a late result cannot be overwritten.
+            with result_lock:
+                result.late_outcome = result.ttl_exceeded
+                result.wall_ms = int((time.monotonic() - t0) * 1000)
+                result.error = None
+                if turn_error is not None:
+                    result.execution_status = "cancelled" if isinstance(turn_error, CancelledError) else "failed"
+                    result.error = {
+                        "code": "run_turn_failed",
+                        "message": f"{type(turn_error).__name__}: {turn_error}",
+                        "trace": traceback.format_exception(type(turn_error), turn_error, turn_error.__traceback__)[-6:],
+                    }
+                elif turn_result is None:
+                    result.execution_status = "failed"
+                    result.error = {"code": "run_turn_empty", "message": "kernel.run_turn returned None"}
+                else:
+                    result.decision = getattr(turn_result, "decision", None)
+                    result.actions = list(getattr(turn_result, "actions", []) or [])
+                    result.stopped_reason = getattr(turn_result, "stopped_reason", None)
+                    result.final_text = getattr(turn_result, "final_text", "") or ""
+                    result.execution_status = turn_execution_status(result.stopped_reason)
+                    result.ok = result.execution_status not in {"failed", "cancelled"}
+                if result.error and entry.delivery_targets:
+                    result.delivery_status = "not_sent"
+                elif entry.delivery_targets and self.delivery_fn is None:
+                    result.delivery_status = "unavailable"
+                self._journal(entry, result, now_ts)
+
+            # Persist execution before delivery: a slow notifier must never make
+            # an already finished turn look alive, nor erase its final outcome.
+            if turn_result is not None and entry.delivery_targets and self.delivery_fn is not None:
+                try:
+                    delivery = list(self.delivery_fn(self.config, entry, turn_result) or [])
+                except Exception as exc:
+                    delivery = [{"ok": False, "kind": "delivery_dispatch_failed",
+                                 "error": f"{type(exc).__name__}: {exc}"}]
+                with result_lock:
+                    result.delivery = delivery
+                    result.delivery_status = ("delivered" if len(delivery) == len(entry.delivery_targets)
+                                              and all(row.get("ok") is True for row in delivery) else "failed")
+                    self._journal(entry, result, now_ts)
 
         if entry.session_ttl_seconds and entry.session_ttl_seconds > 0:
-            # Soft deadline. We cannot interrupt a running LLM call
-            # mid-flight safely, so this is advisory: if the turn
-            # overshoots we record ttl_exceeded=True and still return
-            # whatever came back when the thread finally joined.
             th = threading.Thread(target=_invoke, name=f"sched-{entry.id}",
                                   daemon=True)
             th.start()
             th.join(timeout=float(entry.session_ttl_seconds))
             if th.is_alive():
-                result.ttl_exceeded = True
-                # Give the turn a generous additional grace window to
-                # finish cleanly before we give up on it. This is still
-                # bounded so a wedged turn can't hold the cron loop.
+                with result_lock:
+                    if result.execution_status == "running":
+                        result.ttl_exceeded = True
+                        result.cancellation_requested = True
+                        result.execution_status = "stopping"
+                        token.cancel("session_ttl_exceeded")
+                        self._journal(entry, result, now_ts)
                 th.join(timeout=min(30.0, float(entry.session_ttl_seconds)))
-                if th.is_alive():
-                    result.error = {
-                        "code": "session_ttl_exceeded",
-                        "message": (
-                            f"scheduled session exceeded "
-                            f"{entry.session_ttl_seconds}s TTL and did not "
-                            f"return within the grace window; result dropped"
-                        ),
-                    }
-                    result.wall_ms = int((time.monotonic() - t0) * 1000)
-                    self._journal(entry, result, now_ts)
-                    return result
+                with result_lock:
+                    if result.execution_status == "stopping":
+                        result.execution_status = "running_unconfirmed"
+                        result.error = {
+                            "code": "session_ttl_exceeded",
+                            "message": "Cancellation requested; execution has not returned. Check this turn's receipt before taking further action.",
+                        }
+                        result.wall_ms = int((time.monotonic() - t0) * 1000)
+                        self._journal(entry, result, now_ts)
         else:
             _invoke()
-
-        result.wall_ms = int((time.monotonic() - t0) * 1000)
-
-        if turn_error is not None:
-            result.error = {
-                "code": "run_turn_failed",
-                "message": f"{type(turn_error).__name__}: {turn_error}",
-                "trace": traceback.format_exception(
-                    type(turn_error), turn_error,
-                    turn_error.__traceback__,
-                )[-6:],
-            }
-            self._journal(entry, result, now_ts)
-            return result
-
-        if turn_result is None:
-            result.error = {
-                "code": "run_turn_empty",
-                "message": "kernel.run_turn returned None",
-            }
-            self._journal(entry, result, now_ts)
-            return result
-
-        result.ok = True
-        result.turn_id = getattr(turn_result, "turn_id", None)
-        result.decision = getattr(turn_result, "decision", None)
-        result.actions = list(getattr(turn_result, "actions", []) or [])
-        result.stopped_reason = getattr(turn_result, "stopped_reason", None)
-
-        # Delivery fan-out. Failures are logged per-target but never
-        # turn an otherwise-successful turn into a failure.
-        if entry.delivery_targets and self.delivery_fn is not None:
-            try:
-                delivery_report = self.delivery_fn(
-                    self.config, entry, turn_result,
-                ) or []
-                result.delivery = list(delivery_report)
-            except Exception as exc:  # pragma: no cover - defensive
-                result.delivery = [{
-                    "ok": False,
-                    "kind": "delivery_dispatch_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }]
-
-        self._journal(entry, result, now_ts)
-        return result
+        with result_lock:
+            return deepcopy(result)
 
     # -------------------------------------------------------- helpers
     @staticmethod
@@ -300,30 +315,22 @@ class ScheduledSessionRunner:
     def _journal(self, entry: ScheduleEntry,
                  result: ScheduledSessionResult, now_ts: float) -> None:
         row = {
+            **result.asdict(),
             "kind": "scheduled_session.tick",
             "ts": now_iso(),
             "ts_epoch": float(now_ts),
-            "schedule_id": entry.id,
-            "session_id": result.session_id,
             "session_kind": entry.session_kind,
             "target": entry.target,
             "strategy_id": entry.strategy_id,
             "attached_skills": list(entry.attached_skills or []),
             "delivery_targets": [
-                {"kind": t.get("kind")} for t in (entry.delivery_targets or [])
+                {key: t[key] for key in ("kind", "channel", "platform") if key in t}
+                for t in (entry.delivery_targets or [])
             ],
-            "ok": result.ok,
-            "turn_id": result.turn_id,
-            "trigger_event_id": result.trigger_event_id,
-            "ttl_exceeded": result.ttl_exceeded,
-            "wall_ms": result.wall_ms,
-            "stopped_reason": result.stopped_reason,
-            "error": result.error,
-            "delivery": result.delivery,
         }
         try:
             jsonl.append(
-                self.config.paths.journal("scheduled_session"), row,
+                self.config.paths.journal("scheduled_session"), redact_display_dict(row),
             )
         except Exception:  # pragma: no cover - best-effort journaling
             pass

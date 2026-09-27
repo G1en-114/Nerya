@@ -135,7 +135,8 @@ def _resolve_cex_creds(
             return _resolve_ref(
                 ref, workspace, vault_passphrase, scope="exchange",
             ) or ""
-        if live_account and venue != "mock":
+        public_fields = {"uid", "account_id", "login", "wallet_address", "address"}
+        if live_account and venue != "mock" and field not in public_fields:
             return ""
         # Legacy fixtures still occasionally embed non-vault values for
         # local mock runs. Treat them as already-resolved.
@@ -184,6 +185,9 @@ def _resolve_ref(
         return None
     if not ref.startswith("vault://"):
         return None
+    if ref.startswith("vault://probe_"):
+        from ..security.credential_probe import resolve_probe
+        return resolve_probe(ref, workspace, scope)
     try:
         from ..security.secrets import SecretVault
         vp = workspace / "vault" / "secrets.enc"

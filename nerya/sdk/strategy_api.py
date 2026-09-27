@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from ..core.config import Config
+from ..core import jsonl
 from ..core.errors import NeryaError, TradingError
 from ..evolution.patch_proposal import list_proposals, set_state
 from ..evolution.promotion import apply_proposal
@@ -45,6 +46,7 @@ from ..evolution.strategy_tuning_generator import (
 )
 from ..skills.kernel import SkillKernel
 from ..strategies.evolution import StrategyEvolutionRunner
+from ..strategies.agent_execution import agent_task_receipt
 from ..strategies.package import load_package, load_packages
 from ..strategies.performance import build_snapshot
 from ..strategies.proposal_files import read_proposal_strategy_files
@@ -125,6 +127,7 @@ class StrategyAPI:
                     "prompt_chars": task.get("prompt_chars"),
                     "metadata": dict(task.get("metadata") or {}),
                     "task": task,
+                    "receipt": agent_task_receipt(strategy_id, task, row.get("session_id")),
                 }
             )
         return {"strategy_id": strategy_id, "count": len(latest), "event_count": len(rows), "tasks": entries}
@@ -158,6 +161,7 @@ class StrategyAPI:
             "task_id": task_id,
             "entry": match,
             "task": task,
+            "receipt": agent_task_receipt(strategy_id, task, match.get("session_id")),
         }
         session_id = match.get("session_id") or task.get("session_id")
         if session_id:
@@ -181,7 +185,12 @@ class StrategyAPI:
             if path == root or root not in path.parents:
                 out["prompt_error"] = "prompt_artifact_outside_strategy_root"
             elif path.is_file():
-                out["prompt"] = path.read_text(encoding="utf-8")
+                with path.open("rb") as stream:
+                    prompt_bytes = stream.read(262145)
+                if len(prompt_bytes) > 262144:
+                    out["prompt_error"] = "prompt_artifact_oversized"
+                else:
+                    out["prompt"] = prompt_bytes.decode("utf-8", errors="replace")
                 out["prompt_path"] = str(path)
             else:
                 out["prompt_error"] = "prompt_artifact_missing"
@@ -204,7 +213,12 @@ class StrategyAPI:
                         out[key] = redact_display_dict({"value": json.loads(artifact.read_text(encoding="utf-8"))}).get("value")
                 except (OSError, ValueError) as exc:
                     out[f"{key}_error"] = str(exc)
-        return out
+        from ..core.redaction import redact_display_dict
+        if include_prompt:
+            from ..strategies.recorded_turn import recorded_turn
+            out["recorded_turn"] = recorded_turn(self.config.paths, str(session_id or ""),
+                str(task.get("turn_id") or match.get("turn_id") or ""))
+        return redact_display_dict(out)
 
     def explain_trade(self, strategy_id: str, order_id: str) -> dict[str, Any]:
         """Locate an order row + the surrounding decision/risk rows.
@@ -399,6 +413,9 @@ class StrategyAPI:
                 "proposal_id": proposal_id,
                 "strategy_id": sid,
                 "validation": validation.asdict(),
+                "application": {"status": "not_applied"},
+                "schedule_sync": {"status": "not_attempted"},
+                "service": {"state": "not_checked", "start_requested": False},
             }
         set_state(
             self.config.paths,
@@ -407,20 +424,44 @@ class StrategyAPI:
             note=note or "approved via SDK",
         )
         outcome = apply_proposal(self.config.paths, proposal_id)
-        # Sync schedules so the freshly-promoted package starts firing.
-        try:
-            pkg = load_package(self.config.paths, sid) if sid else None
-            if pkg is not None:
-                apply_strategy_schedules(self.config.paths, pkg)
-        except Exception:
-            outcome.setdefault("warnings", []).append("schedule_sync_failed")
-        return {
+        sync: dict[str, Any] = {"status": "not_attempted"}
+        service: dict[str, Any] = {"state": "not_checked", "start_requested": False}
+        pkg = None
+        if outcome.get("ok") and sid:
+            try:
+                pkg = load_package(self.config.paths, sid)
+                applied = apply_strategy_schedules(self.config.paths, pkg)
+                sync = {"status": "synced", **vars(applied)}
+            except Exception:
+                outcome.setdefault("warnings", []).append("schedule_sync_failed")
+                sync = {"status": "failed", "error": "schedule_sync_failed",
+                        "next_action": "retry_schedule_sync"}
+            service = self._promotion_service_status(sid, pkg)
+        receipt = {
             "ok": bool(outcome.get("ok")),
             "proposal_id": proposal_id,
             "strategy_id": sid,
             "validation": validation.asdict(),
             "promotion": outcome,
+            "application": {"status": "applied" if outcome.get("ok") else "failed"},
+            "schedule_sync": sync,
+            "service": service,
         }
+        try:
+            jsonl.append(self.config.paths.journal("strategy_activation"), receipt)
+        except OSError:
+            outcome.setdefault("warnings", []).append("activation_receipt_persist_failed")
+        return receipt
+
+    def _promotion_service_status(self, strategy_id: str, package: Any = None) -> dict[str, Any]:
+        try:
+            package = package or load_package(self.config.paths, strategy_id)
+            from ..strategies.continuous_config import is_continuous
+            if not is_continuous(package.manifest):
+                return {"state": "not_applicable", "start_requested": False}
+            return {**self.service_status(strategy_id), "start_requested": False}
+        except Exception:
+            return {"state": "unconfirmed", "start_requested": False}
 
     def run_tick(
         self,
@@ -462,7 +503,8 @@ class StrategyAPI:
 
         package = load_package(self.config.paths, strategy_id)
         result = apply_strategy_schedules(self.config.paths, package)
-        return {
+        receipt = {
+            "status": "synced",
             "strategy_id": strategy_id,
             "trading_id": result.trading_id,
             "tuning_id": result.tuning_id,
@@ -470,6 +512,13 @@ class StrategyAPI:
             "updated": result.updated,
             "removed": result.removed,
         }
+        try:
+            jsonl.append(self.config.paths.journal("strategy_activation"), {
+                "strategy_id": strategy_id, "schedule_sync": dict(receipt),
+            })
+        except OSError:
+            receipt["warnings"] = ["activation_receipt_persist_failed"]
+        return receipt
 
     def schedule_status(self, strategy_id: str) -> dict[str, Any]:
         existing = list(load_schedules(self.config.paths))
@@ -485,6 +534,13 @@ class StrategyAPI:
                 out["trading"] = _entry_to_dict(entry)
             elif entry.id == tuning_id:
                 out["tuning"] = _entry_to_dict(entry)
+        receipt: dict[str, Any] = {}
+        for row in jsonl.read_all(self.config.paths.journal("strategy_activation")):
+            if row.get("strategy_id") == strategy_id:
+                receipt = {**receipt, **row}
+        if receipt:
+            out["promotion_receipt"] = receipt
+        out["service"] = self._promotion_service_status(strategy_id)
         return out
 
     def pause(self, strategy_id: str) -> dict[str, Any]:

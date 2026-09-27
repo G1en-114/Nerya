@@ -78,6 +78,30 @@ def _first_live_candles(cfg: Config, *, count: int) -> tuple[str, list[dict]]:
     return REAL_MARKET_CANDIDATES[0], []
 
 
+def test_ranked_universe_defaults_to_binance(monkeypatch) -> None:
+    from nerya.skills.builtin.markets.scripts import ranked_universe as module
+
+    seen: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return {
+            "ok": True,
+            "market_ids": ["BINANCE:BTCUSDT"],
+            "venue_mapping_complete": True,
+            "needs_symbol_validation": False,
+        }
+
+    monkeypatch.setattr(module, "run", fake_run)
+    payload = _json_payload(market_data_handler(ToolCall(
+        name="market_data",
+        arguments={"action": "ranked_universe", "count": 1,
+                   "rank_by": "market_cap", "quote": "USDT"},
+    )))
+    assert seen["venue"] == "binance"
+    assert payload["venue_mapping_complete"] is True
+
+
 def test_mock_exchange_provides_paper_ohlcv_klines() -> None:
     rows = MockExchange().get_klines("mock:BTC/USDT", interval="5m", limit=12)
 
@@ -549,6 +573,46 @@ def test_native_market_data_requires_explicit_market(tmp_path) -> None:
 
     assert result.is_error
     assert "market or symbol is required" in result.asdict()["content"][0]["text"]
+
+
+def test_native_market_data_lists_venue_symbols_in_one_call(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(
+        "nerya.skills.builtin.markets.scripts.list_symbols.run",
+        lambda *, venue: {
+            "venue": venue,
+            "count": 2,
+            "symbols": [
+                {"symbol": "BTC/USDT", "base": "BTC", "quote": "USDT", "active": True, "type": "spot"},
+                {"symbol": "ETH/USDT", "base": "ETH", "quote": "USDT", "active": True, "type": "spot"},
+            ],
+            "error": None,
+        },
+    )
+    data = _json_payload(
+        market_data_handler(
+            ToolCall(name="market_data", arguments={"action": "list_symbols", "venue": "binance"}),
+            config_like=cfg,
+        )
+    )
+    assert data["venue"] == "binance"
+    assert data["count"] == 2
+    assert [row["base"] for row in data["symbols"]] == ["BTC", "ETH"]
+
+    shorthand = _json_payload(
+        market_data_handler(
+            ToolCall(name="market_data", arguments={"action": "list_symbols", "market": "BINANCE"}),
+            config_like=cfg,
+        )
+    )
+    assert shorthand["venue"] == "binance"
+
+    missing = market_data_handler(
+        ToolCall(name="market_data", arguments={"action": "list_symbols"}),
+        config_like=cfg,
+    )
+    assert missing.is_error
+    assert "venue is required" in missing.asdict()["content"][0]["text"]
 
 
 def test_native_market_data_passes_bounded_timeout_to_public_connector(
@@ -1763,6 +1827,7 @@ def test_wallet_swap_journals_approval_request_and_one_shot_result(
                 tx_hash="tx-123",
                 amount_in=kwargs["amount_in"],
                 amount_out=99,
+                extra={'confirmed':True,'amount_out_source':'transaction_meta'},
             )
 
     provider = FakeProvider()

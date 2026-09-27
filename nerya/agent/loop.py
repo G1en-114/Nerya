@@ -40,7 +40,7 @@ from typing import Any, Callable, Optional
 
 from ..core.redaction import redact_text
 from ..core.errors import LLMError
-from ..harness.cancellation import CancelToken, SteerInbox
+from ..harness.cancellation import CancelToken, CancelledError, SteerInbox
 from ..llm.attempt_budget import (
     AttemptBudget,
     attempt_budget_scope,
@@ -1587,7 +1587,7 @@ class WorkspaceNativeAgentLoop:
 
         max_rounds = min(
             max(1, int(getattr(completion_gate, "max_rounds", 2) or 2)),
-            max(1, int(self.config.max_iterations or 1)),
+            self.config.iteration_limit,
         )
         shared = AgentRuntime[LoopOutcome]()
         result = shared.run(
@@ -1751,6 +1751,8 @@ class WorkspaceNativeAgentLoop:
             1,
             int(self.config.repeated_tool_stop_after or 2),
         )
+        stream_id = ""
+        streamed_text = []
         def stop_for_cancel() -> bool:
             nonlocal aborted_reason, stop_reason, transition_reason
             if cancel_token is None or not cancel_token.is_set:
@@ -1759,11 +1761,10 @@ class WorkspaceNativeAgentLoop:
             stop_reason = transition_reason = "cancelled"
             return True
 
-        while iterations < self.config.max_iterations:
+        while iterations < self.config.iteration_limit:
             iterations += 1
-            # Cooperative cancel: lets HTTP/SDK callers stop a runaway
-            # turn between iterations. We can't kill the in-flight
-            # gateway call, but no further round-trip starts.
+            # Check again between calls; managed HTTP also observes this
+            # token while a provider response is in flight.
             if stop_for_cancel():
                 break
             # Re-render after mcp_describe promotes a lazy MCP namespace.
@@ -1853,11 +1854,11 @@ class WorkspaceNativeAgentLoop:
                     f"token_pressure:{usage.prompt_tokens_last}"
                     f"/{usage.context_window}"
                 )
-            _len_before_compact = len(transcript)
+            _transcript_before_compact = transcript
             transcript = self._maybe_compact(
-                transcript, force_reason=force_compact_reason
+                transcript, force_reason=force_compact_reason, emit=emit,
             )
-            if len(transcript) != _len_before_compact:
+            if transcript != _transcript_before_compact:
                 usage.compaction_count += 1
                 if force_compact_reason:
                     # Stale until the next response reports fresh usage;
@@ -2079,6 +2080,18 @@ class WorkspaceNativeAgentLoop:
                         transition_reason = "wall_time_final_synthesis"
                         break
                 llm_attempt += 1
+                stream_id = f"{turn_id}:{iterations}:{llm_attempt}"
+                streamed_text = []
+
+                def on_model_event(event):
+                    kind = str(event.get("type") or "")
+                    if kind == "text_delta":
+                        streamed_text.append(str(event.get("text") or ""))
+                    emit("assistant", {
+                        **{key: value for key, value in event.items() if key != "type"},
+                        "kind": "model_transport" if kind == "transport" else kind,
+                        "stream_id": stream_id,
+                    })
                 if retry_state is not None:
                     emit("assistant", {
                         **ThinkingBlock(text="").as_dict(),
@@ -2134,6 +2147,7 @@ class WorkspaceNativeAgentLoop:
                         tools=tools_for_iteration,
                         tool_choice=tool_choice_for_iteration,
                         deadline=request_deadline,
+                        cancel_token=cancel_token, stream=True, on_event=on_model_event,
                         metadata={
                             "session_id": self.config.session_id,
                             "turn_id": turn_id,
@@ -2174,6 +2188,22 @@ class WorkspaceNativeAgentLoop:
                     break
                 except Exception as exc:  # noqa: BLE001 — bounded by guard below
                     if stop_for_cancel():
+                        final_text = "".join(streamed_text)
+                        break
+                    if isinstance(exc, CancelledError):
+                        final_text = "".join(streamed_text)
+                        aborted_reason = stop_reason = transition_reason = "timeout"
+                        break
+                    if getattr(exc, "stream_interrupted", False):
+                        # The request may already have performed upstream
+                        # work. Preserve partial text but never replay it or
+                        # execute a tool assembled from an incomplete stream.
+                        aborted_reason = transition_reason = "stream_interrupted"
+                        final_text = "".join(streamed_text)
+                        response = MessagesResponse(content=[], stop_reason="stream_interrupted")
+                        emit("assistant", {"kind": "model_transport", "stream_id": stream_id,
+                                           "stream_mode": "stream", "status": "interrupted",
+                                           "retryable": False})
                         break
                     if total_tool_calls == 0 and _is_llm_safety_rejection(exc):
                         final_text = _build_llm_initial_safety_rejection_text(
@@ -2390,19 +2420,48 @@ class WorkspaceNativeAgentLoop:
                             reactive_compact_attempts += 1
                             _before_msgs = len(transcript)
                             _before_chars = _transcript_char_size(transcript)
+                            emit("system", {
+                                "kind": "system", "kind_detail": "compact.start",
+                                "cause": "context_overflow", "status": "running",
+                                "before_message_count": _before_msgs,
+                                "before_chars": _before_chars,
+                                "attempt": reactive_compact_attempts,
+                            })
+                            _preservation: dict[str, Any] = {}
                             _compacted = self._reactive_compact(
                                 transcript,
                                 attempt=reactive_compact_attempts,
+                                preservation_report=_preservation,
                             )
                             _after_chars = _transcript_char_size(_compacted)
-                            if (
+                            _shrunk = (
                                 len(_compacted) < _before_msgs
                                 or _after_chars < _before_chars
-                            ):
-                                if not attempt_budget.claim(
-                                    "context_overflow_recovery"
-                                ):
-                                    break
+                            )
+                            _claimed = _shrunk and attempt_budget.claim(
+                                "context_overflow_recovery"
+                            )
+                            if _claimed:
+                                _compact_status = (
+                                    "context_degraded" if _preservation.get("status") == "failed"
+                                    else "applied"
+                                )
+                            else:
+                                _compact_status = "budget_exhausted" if _shrunk else "unchanged"
+                            emit("system", {
+                                "kind": "system", "kind_detail": "compact.complete",
+                                "cause": "context_overflow",
+                                "status": _compact_status,
+                                "preservation_status": _preservation.get("status"),
+                                "before_message_count": _before_msgs,
+                                "after_message_count": len(_compacted) if _claimed else _before_msgs,
+                                "before_chars": _before_chars,
+                                "after_chars": _after_chars if _claimed else _before_chars,
+                                "attempt": reactive_compact_attempts,
+                            })
+                            if _shrunk and not _claimed:
+                                break
+                            if _claimed:
                                 # In-place so messages_for_iteration (an
                                 # alias of transcript) sees the shrink.
                                 transcript[:] = _compacted
@@ -2737,7 +2796,7 @@ class WorkspaceNativeAgentLoop:
                             cancel_token.wait(delay)
                         else:
                             time.sleep(delay)
-            if response is None and stop_reason == "cancelled":
+            if response is None and stop_reason in {"cancelled", "timeout"}:
                 break
             assert response is not None  # for type-checkers
             # One recorder owns usage, model attribution, cost and context
@@ -2759,6 +2818,16 @@ class WorkspaceNativeAgentLoop:
                 )
                 if name
             }
+            # Some providers emit the legacy skill_load spelling. Normalize
+            # only when the canonical capability was actually offered; its
+            # schema and permission checks still execute under the Skill name.
+            if "Skill" in allowed_iteration_tool_names and "skill_load" not in allowed_iteration_tool_names:
+                assistant_blocks = [
+                    dict(block, name="Skill")
+                    if block.get("type") == "tool_use" and block.get("name") == "skill_load"
+                    else block
+                    for block in assistant_blocks
+                ]
             tool_selection = ProviderToolSelection.from_blocks(
                 assistant_blocks,
                 allowed_tool_names=allowed_iteration_tool_names,
@@ -2949,6 +3018,7 @@ class WorkspaceNativeAgentLoop:
                                 tools=[],
                                 tool_choice=None,
                                 deadline=deadline,
+                                cancel_token=cancel_token,
                                 metadata={
                                     "session_id": self.config.session_id,
                                     "turn_id": turn_id,
@@ -3046,7 +3116,7 @@ class WorkspaceNativeAgentLoop:
                 if missing_required_action:
                     retry_key = tuple(sorted(pending_required_action_tools))
                     skipped_tool_names = sorted(tool_names_in_response)
-                    if iterations < self.config.max_iterations:
+                    if iterations < self.config.iteration_limit:
                         retry_prompt = (
                             _required_action_read_only_retry_prompt(
                                 retry_key,
@@ -3127,14 +3197,17 @@ class WorkspaceNativeAgentLoop:
                 btype = block.get("type")
                 if btype == "text":
                     tb = TextBlock(text=str(block.get("text") or ""))
-                    emit("assistant", tb.as_dict())
+                    emit("assistant", {**tb.as_dict(), "stream_mode": response.stream_mode,
+                                       **({"stream_id": stream_id} if response.stream_mode == "stream" else {})})
                     final_text = tb.text
                 elif btype == "thinking":
                     th = ThinkingBlock(
                         text=str(block.get("thinking") or block.get("text") or ""),
                         summary=str(block.get("summary") or ""),
                     )
-                    emit("assistant", th.as_dict())
+                    # 完成快照与流式思考使用同一身份，前端替换原行，不重复追加整段思考。
+                    emit("assistant", {**th.as_dict(), "stream_mode": response.stream_mode,
+                                       **({"stream_id": stream_id} if response.stream_mode == "stream" else {})})
                 elif btype == "tool_use":
                     tu = ToolUseBlock(
                         action=str(block.get("name") or ""),
@@ -3187,7 +3260,7 @@ class WorkspaceNativeAgentLoop:
                 ):
                     recovery = next((key for key in (("empty_response", "1"), ("empty_response", "2"))
                                      if key not in next_action_nudges), None)
-                    if recovery is not None and iterations < self.config.max_iterations and (deadline is None or deadline - time.time() > 5):
+                    if recovery is not None and iterations < self.config.iteration_limit and (deadline is None or deadline - time.time() > 5):
                         next_action_nudges.add(recovery)
                         transcript.append({"role": "user", "content": (
                             "Your previous response contained neither an answer nor a tool call. "
@@ -3227,7 +3300,7 @@ class WorkspaceNativeAgentLoop:
                     and pending_required_after_text
                     and pending_required_after_text not in next_action_nudges
                 ):
-                    if iterations < self.config.max_iterations:
+                    if iterations < self.config.iteration_limit:
                         next_action_nudges.add(pending_required_after_text)
                         transcript.append({
                             "role": "user",
@@ -3261,7 +3334,7 @@ class WorkspaceNativeAgentLoop:
                     final_text
                     and missing_artifact_tools
                     and missing_artifact_tools not in next_action_nudges
-                    and iterations < self.config.max_iterations
+                    and iterations < self.config.iteration_limit
                 ):
                     next_action_nudges.add(missing_artifact_tools)
                     required_next_tool_names.update(missing_artifact_tools)
@@ -3278,7 +3351,7 @@ class WorkspaceNativeAgentLoop:
                 if (
                     stop_reason in {"max_tokens", "length"}
                     and not truncated_no_tool_retry_used
-                    and iterations < self.config.max_iterations
+                    and iterations < self.config.iteration_limit
                 ):
                     truncated_no_tool_retry_used = True
                     transcript.append({
@@ -3382,7 +3455,7 @@ class WorkspaceNativeAgentLoop:
                 if (
                     interrupted_required_tools
                     and interrupted_required_tools not in interrupted_required_tool_retry_keys
-                    and iterations < self.config.max_iterations
+                    and iterations < self.config.iteration_limit
                     and _required_action_retry_window_available(
                         deadline, set(interrupted_required_tools), self.config,
                     )
@@ -3552,8 +3625,11 @@ class WorkspaceNativeAgentLoop:
                     transition_reason = "required_action_repeated_error_blocked"
                     break
                 stop_reason = "tool_loop"
-                aborted_reason = "repeated_tool_call"
-                transition_reason = "repeated_tool_call"
+                aborted_reason = ("task_poll_no_progress" if any(
+                    result.metadata.get("poll_stop_reason") == "task_poll_no_progress"
+                    for result in batch.results
+                ) else "repeated_tool_call")
+                transition_reason = aborted_reason
                 break
             protected_rejections = [
                 item
@@ -3597,7 +3673,7 @@ class WorkspaceNativeAgentLoop:
         waiting_for_approval = stop_reason in (APPROVAL_PENDING_REASON, "user_input_pending")
         was_aborted = bool(aborted_reason) or (
             not waiting_for_approval
-            and iterations >= self.config.max_iterations
+            and iterations >= self.config.iteration_limit
             and (stop_reason in {"tool_use", "tool_calls"} or ended_after_tool_result)
         )
         if was_aborted and not aborted_reason:
@@ -3605,7 +3681,7 @@ class WorkspaceNativeAgentLoop:
         if not transition_reason:
             if was_aborted and aborted_reason:
                 transition_reason = aborted_reason.split(":", 1)[0] or "aborted"
-            elif iterations >= self.config.max_iterations:
+            elif iterations >= self.config.iteration_limit:
                 transition_reason = "max_iterations"
             elif stop_reason in {"tool_use", "tool_calls"}:
                 transition_reason = "tool_use_continue"
@@ -3678,17 +3754,19 @@ class WorkspaceNativeAgentLoop:
             )
             final_text = (
                 f"{existing_text}\n\n{summary}"
-                if len(existing_text) >= 32
+                if len(existing_text) >= 32 or (stream_id and streamed_text)
                 else summary
             )
             transcript.append({
                 "role": "assistant",
                 "content": [{"type": "text", "text": final_text}],
             })
-            emit("assistant", TextBlock(text=summary).as_dict())
+            emit("assistant", {**TextBlock(text=final_text if streamed_text else summary).as_dict(),
+                               **({"stream_id": stream_id, "stream_mode": "stream"}
+                                  if streamed_text else {})})
         effective_stop_reason = stop_reason or (
             "max_iterations"
-            if iterations >= self.config.max_iterations
+            if iterations >= self.config.iteration_limit
             else "end_turn"
         )
         # Mutable ledgers and emitted events already belong to state; only
@@ -4063,6 +4141,7 @@ class WorkspaceNativeAgentLoop:
         transcript: list[dict[str, Any]],
         *,
         force_reason: str = "",
+        emit: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """Macro-compaction gate, message-count or token-pressure driven.
 
@@ -4095,6 +4174,15 @@ class WorkspaceNativeAgentLoop:
         else:
             keep_tail = self.config.keep_tail_messages
             max_messages = self.config.compact_threshold
+        before_chars = _transcript_char_size(transcript)
+        event = {
+            "kind": "system",
+            "cause": "token_pressure" if forced else "message_count",
+            "before_message_count": len(transcript),
+            "before_chars": before_chars,
+        }
+        if emit is not None:
+            emit("system", {**event, "kind_detail": "compact.start", "status": "running"})
         compacted, report = compact_transcript(
             transcript,
             keep_tail_messages=keep_tail,
@@ -4112,11 +4200,24 @@ class WorkspaceNativeAgentLoop:
         # tool_use/tool_result pairs. The callback is responsible for
         # idempotency; we just hand it the compacted transcript and
         # accept whatever it returns.
+        preservation_status = "not_configured"
         if self.config.compact_preservation_cb is not None:
             try:
                 compacted = self.config.compact_preservation_cb(compacted)
+                preservation_status = "applied"
             except Exception:
+                preservation_status = "failed"
                 _LOG.exception("compact_preservation_cb failed")
+        if emit is not None:
+            emit("system", {
+                **event, "kind_detail": "compact.complete",
+                "status": "context_degraded" if preservation_status == "failed" else ("applied" if compacted != transcript else "unchanged"),
+                "after_message_count": len(compacted),
+                "after_chars": _transcript_char_size(compacted),
+                "preservation_status": preservation_status,
+                "dropped_message_count": report.dropped,
+                "dropped_pair_count": report.pairs_dropped,
+            })
         return compacted
 
     def _reactive_compact(
@@ -4124,6 +4225,7 @@ class WorkspaceNativeAgentLoop:
         transcript: list[dict[str, Any]],
         *,
         attempt: int,
+        preservation_report: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Emergency shrink after a provider context-overflow rejection.
 
@@ -4165,10 +4267,16 @@ class WorkspaceNativeAgentLoop:
             keep_recent_results=1 if attempt == 1 else 0,
             treat_all_tools_as_bulk=True,
         )
+        if preservation_report is not None:
+            preservation_report["status"] = "not_configured"
         if self.config.compact_preservation_cb is not None:
             try:
                 compacted = self.config.compact_preservation_cb(compacted)
+                if preservation_report is not None:
+                    preservation_report["status"] = "applied"
             except Exception:
+                if preservation_report is not None:
+                    preservation_report["status"] = "failed"
                 _LOG.exception("compact_preservation_cb failed")
         _LOG.info(
             "reactive compact (attempt %d): kept=%d dropped=%d "

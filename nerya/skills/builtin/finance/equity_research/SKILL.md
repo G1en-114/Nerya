@@ -1,5 +1,8 @@
 ---
 name: finance.equity_research
+metadata:
+  nerya:
+    catalog_parent: equity_research
 description: "Equity coverage lifecycle: earnings previews and results, model updates, catalysts, thesis tracking, idea generation, morning notes and sector reviews."
 version: 0.2.0
 license: MIT

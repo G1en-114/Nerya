@@ -28,9 +28,8 @@ export type TimezonePreference =
   | "utc+9"
   | "utc-8";
 
-export type LanguagePreference = "en" | "zh" | "ja";
+export type LanguagePreference = "en" | "zh";
 
-export type MarketStreamPreference = "basic" | "standard" | "pro";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -44,10 +43,8 @@ export type UiSettings = {
   refreshSeconds: number; // dashboard auto-refresh cadence
   showVolume: boolean;
   chartType: "candlestick" | "line" | "area";
-  compact: boolean;
   timezone: TimezonePreference;
   language: LanguagePreference;
-  marketStream: MarketStreamPreference;
   darkMode: ThemeMode;
 };
 
@@ -61,15 +58,28 @@ export const DEFAULT_SETTINGS: UiSettings = {
   refreshSeconds: 30,
   showVolume: true,
   chartType: "candlestick",
-  compact: false,
   timezone: "auto",
   language: "en",
-  marketStream: "standard",
   darkMode: "dark",
 };
 
 const KEY = "nerya.ui_settings.v1";
 const EVT = "nerya:ui_settings_changed";
+
+/** Use the browser only until the operator chooses and saves a language. */
+export function detectBrowserLanguage(): LanguagePreference {
+  if (typeof navigator === "undefined") return DEFAULT_SETTINGS.language;
+  const languages = navigator.languages?.length ? navigator.languages : [navigator.language];
+  for (const language of languages) {
+    if (/^zh(?:-|$)/i.test(language)) return "zh";
+    if (/^en(?:-|$)/i.test(language)) return "en";
+  }
+  return DEFAULT_SETTINGS.language;
+}
+
+export function getDefaultSettings(): UiSettings {
+  return { ...DEFAULT_SETTINGS, language: detectBrowserLanguage(), kline: { ...DEFAULT_SETTINGS.kline } };
+}
 
 let cachedRaw: string | null | undefined;
 let cachedSettings: UiSettings = DEFAULT_SETTINGS;
@@ -95,14 +105,17 @@ export function isDarkThemeMode(mode: ThemeMode): boolean {
 }
 
 function merge(stored: unknown): UiSettings {
-  if (!stored || typeof stored !== "object") return DEFAULT_SETTINGS;
-  const s = stored as Partial<UiSettings> & { darkMode?: unknown };
+  const defaults = getDefaultSettings();
+  if (!stored || typeof stored !== "object") return defaults;
+  const { compact: _compact, marketStream: _stream, ...s } = stored as Partial<UiSettings> & { compact?: unknown; marketStream?: unknown };
   const darkMode = resolveThemeMode(s.darkMode);
+  const language = s.language === "zh" || s.language === "en" ? s.language : defaults.language;
   return {
-    ...DEFAULT_SETTINGS,
+    ...defaults,
     ...s,
+    language,
     darkMode,
-    kline: { ...DEFAULT_SETTINGS.kline, ...(s.kline ?? {}) },
+    kline: { ...defaults.kline, ...(s.kline ?? {}) },
   };
 }
 
@@ -112,7 +125,7 @@ export function loadSettings(): UiSettings {
     const raw = window.localStorage.getItem(KEY);
     if (raw === cachedRaw) return cachedSettings;
     cachedRaw = raw;
-    cachedSettings = raw ? merge(JSON.parse(raw)) : DEFAULT_SETTINGS;
+    cachedSettings = raw ? merge(JSON.parse(raw)) : getDefaultSettings();
     return cachedSettings;
   } catch {
     cachedSettings = DEFAULT_SETTINGS;

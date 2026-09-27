@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -128,6 +129,9 @@ def tier_list(config: Config) -> dict[str, Any]:
             "base_url": tier_cfg.get("base_url"),
             "has_key_ref": bool(tier_cfg.get("provider_key_ref")),
             "reasoning_effort": tier_cfg.get("reasoning_effort") or "",
+            "context_window": _normalise_model_context_window(
+                tier_cfg.get("context_window"), label=str(tier_name)
+            ),
             "routes": routes,
             "provider_native_web_search": normalise_provider_native_web_search(
                 tier_cfg.get("provider_native_web_search")
@@ -151,6 +155,30 @@ def catalog(config: Config) -> dict[str, Any]:  # noqa: ARG001 — keep client s
 
 _TIER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
 _PROVIDER_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
+DEFAULT_MODEL_CONTEXT_WINDOW = 1_048_576
+_MIN_MODEL_CONTEXT_WINDOW = 4_096
+_MAX_MODEL_CONTEXT_WINDOW = 16_777_216
+
+
+def _normalise_model_context_window(value: Any, *, label: str) -> int:
+    if value in (None, ""):
+        return DEFAULT_MODEL_CONTEXT_WINDOW
+    raw = str(value).strip().lower().replace("_", "")
+    try:
+        if raw.endswith("k"):
+            window = int(float(raw[:-1]) * 1_000)
+        elif raw.endswith("m"):
+            window = int(float(raw[:-1]) * 1_000_000)
+        else:
+            window = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}: context_window must be a token count") from None
+    if not (_MIN_MODEL_CONTEXT_WINDOW <= window <= _MAX_MODEL_CONTEXT_WINDOW):
+        raise ValueError(
+            f"{label}: context_window must be between "
+            f"{_MIN_MODEL_CONTEXT_WINDOW} and {_MAX_MODEL_CONTEXT_WINDOW} tokens"
+        )
+    return window
 
 
 def _looks_like_local_url(raw: str) -> bool:
@@ -385,7 +413,8 @@ def effective_tiers(config: Config) -> dict[str, dict[str, Any]]:
                 first = routes[0]
                 for key in (
                     "provider", "model", "base_url", "provider_key_ref",
-                    "provider_key_env", "kind", "provider_native_web_search",
+                    "provider_key_env", "kind",
+                    "provider_native_web_search",
                 ):
                     if key in first:
                         cfg[key] = first[key]
@@ -426,7 +455,7 @@ def _normalise_model_tier_row(
         first = routes[0]
         for key in (
             "provider", "model", "base_url", "provider_key_ref", "kind",
-            "provider_native_web_search",
+            "context_window", "provider_native_web_search",
         ):
             if key in first:
                 out[key] = first[key]
@@ -488,6 +517,9 @@ def _normalise_model_tier_row(
     out: dict[str, Any] = {
         "provider": provider,
         "model": model,
+        "context_window": _normalise_model_context_window(
+            raw.get("context_window"), label=tier
+        ),
     }
     if base_url:
         if not (base_url.startswith("http://") or base_url.startswith("https://")):
@@ -573,11 +605,28 @@ def _normalise_route_row(
             value=one_time_key,
             vault_passphrase=vault_passphrase,
         )
-    out: dict[str, Any] = {"provider": provider, "model": model}
+    out: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "context_window": _normalise_model_context_window(
+            raw_route.get("context_window"),
+            label=f"{tier}: route {route_index + 1}",
+        ),
+    }
     if base_url:
         out["base_url"] = base_url
     if provider_key_ref:
         out["provider_key_ref"] = provider_key_ref
+    raw_effort = raw_route.get("reasoning_effort")
+    if raw_effort is not None:
+        eff = norm_key(str(raw_effort))
+        if eff and eff not in REASONING_EFFORT_LEVELS:
+            raise ValueError(
+                f"{tier}: route {route_index + 1} invalid reasoning_effort "
+                f"{raw_effort!r}; must be one of {list(REASONING_EFFORT_LEVELS)}"
+            )
+        if eff:
+            out["reasoning_effort"] = eff
     raw_kind = str(raw_route.get("kind") or "").strip().lower()
     if raw_kind:
         if raw_kind not in {"chat_completions", "anthropic_messages"}:
@@ -605,6 +654,15 @@ def _route_config_to_row(
         "provider": provider,
         "model": route_cfg.get("model") or "",
         "models": split_csv_values(route_cfg.get("model")),
+        "reasoning_effort": str(
+            route_cfg.get("reasoning_effort")
+            or inherited.get("reasoning_effort")
+            or ""
+        ).strip().lower(),
+        "context_window": _normalise_model_context_window(
+            route_cfg.get("context_window", inherited.get("context_window")),
+            label=f"{provider or 'model'} route",
+        ),
         "base_url": route_cfg.get("base_url") or inherited.get("base_url") or "",
         "provider_key_ref": key_ref,
         "provider_key_refs": key_refs,
@@ -621,6 +679,7 @@ def _route_config_to_row(
 
 def llm_config(config: Config) -> dict[str, Any]:
     tiers = effective_tiers(config)
+    declared_tiers = _get_cfg(config, "llm.tiers", {}) or {}
     profiles = _provider_profiles(config)
     rows = []
     for tier_name, tier_cfg in sorted(tiers.items()):
@@ -633,6 +692,28 @@ def llm_config(config: Config) -> dict[str, Any]:
             )
             for route in configured_routes(tier_cfg)
         ]
+        declared_tier = declared_tiers.get(tier_name) or {}
+        raw_routes = declared_tier.get("routes")
+        declared_routes = ([route for route in (raw_routes if isinstance(raw_routes, list) else [raw_routes]) if isinstance(route, dict) and route] if raw_routes else []) or [declared_tier]
+        for index, route in enumerate(routes):
+            declared = _declared_fields(declared_routes[index])
+            route_provider = route["provider"]
+            profile = profiles.get(route_provider) or {}
+            entry = _catalog_lookup(route_provider)
+            effective = dict(route)
+            effective["base_url"] = route["base_url"] or _catalog_default_base_url(route_provider) or DEFAULT_BASE_URLS.get(route_provider) or ""
+            effective["kind"] = route["kind"] or (entry.api_mode if entry else "chat_completions")
+            source = {}
+            for key in _DECLARED_MODEL_FIELDS:
+                if key in declared and declared[key] not in (None, ""):
+                    source[key] = "route" if declared_tier.get("routes") else "tier"
+                elif key in {"reasoning_effort", "context_window", "provider_native_web_search"} and key in declared_tier:
+                    source[key] = "tier"
+                elif key in {"base_url", "provider_key_ref", "provider_key_env", "kind", "provider_native_web_search"} and profile.get(key) not in (None, ""):
+                    source[key] = "provider"
+                else:
+                    source[key] = "catalog" if key in {"base_url", "kind"} and entry else "default"
+            route.update(declared=declared, effective=effective, source=source)
         rows.append({
             "tier": tier_name,
             "provider": provider,
@@ -642,7 +723,11 @@ def llm_config(config: Config) -> dict[str, Any]:
             "provider_key_ref": tier_cfg.get("provider_key_ref") or inherited.get("provider_key_ref") or "",
             "has_key_ref": bool(tier_cfg.get("provider_key_ref") or inherited.get("provider_key_ref")),
             "reasoning_effort": str(tier_cfg.get("reasoning_effort") or "").strip().lower(),
+            "context_window": _normalise_model_context_window(
+                tier_cfg.get("context_window"), label=str(tier_name)
+            ),
             "routes": routes,
+            "declared": _declared_fields(declared_tier),
             "provider_native_web_search": normalise_provider_native_web_search(
                 tier_cfg.get(
                     "provider_native_web_search",
@@ -655,6 +740,8 @@ def llm_config(config: Config) -> dict[str, Any]:
         catalog_entry = _catalog_lookup(provider)
         profile_rows.append({
             "provider": provider,
+            "declared": _declared_fields(profile),
+            "source": {key: "provider" if profile.get(key) not in (None, "") else ("catalog" if key != "provider_key_ref" and catalog_entry else "default") for key in ("base_url", "kind", "provider_key_ref")},
             "base_url": profile.get("base_url") or _catalog_default_base_url(provider) or DEFAULT_BASE_URLS.get(provider) or "",
             "provider_key_ref": profile.get("provider_key_ref") or "",
             "has_key_ref": bool(profile.get("provider_key_ref")),
@@ -670,14 +757,39 @@ def llm_config(config: Config) -> dict[str, Any]:
                 profile.get("provider_native_web_search")
             ),
         })
+    for profile in profile_rows:
+        profile["effective"] = {key: value for key, value in profile.items() if key not in {"declared", "source"}}
     return {
         "ok": True,
+        "revision": config_revision(config),
         "default_tier": _get_cfg(config, "llm.default_tier", "medium"),
         "intent_tier": _get_cfg(config, "llm.intent_tier", "light"),
         "provider_profiles": profile_rows,
         "tiers": rows,
         "reasoning_levels": list(REASONING_EFFORT_LEVELS),
     }
+
+
+_DECLARED_MODEL_FIELDS = (
+    "provider", "model", "models", "base_url", "provider_key_ref",
+    "provider_key_env", "kind", "name", "reasoning_effort", "context_window",
+    "provider_native_web_search",
+)
+
+
+def _declared_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    fields = {key: raw[key] for key in _DECLARED_MODEL_FIELDS if key in raw}
+    if "provider_key_ref" in fields:
+        fields["provider_key_ref"] = ", ".join(
+            ref for ref in split_csv_values(fields["provider_key_ref"]) if ref.startswith("vault://")
+        )
+    return fields
+
+
+def config_revision(config: Config) -> str:
+    """Opaque revision of saved routing policy; never expose key material."""
+    data = json.dumps(_get_cfg(config, "llm", {}) or {}, sort_keys=True, default=str)
+    return hashlib.sha256(data.encode()).hexdigest()[:20]
 
 
 def llm_config_set(
@@ -688,6 +800,7 @@ def llm_config_set(
     providers: list[Any] | None = None,
     tiers: list[Any] | None = None,
     vault_passphrase: str | None = None,
+    explicit_overrides: bool = False,
 ) -> dict[str, Any]:
     """Persist operator-selected LLM tier/provider/model assignments.
 
@@ -707,11 +820,11 @@ def llm_config_set(
 
     current_tiers = dict(config.get("llm.tiers") or {})
     current_profiles = _provider_profiles(config)
-    yaml_profiles = llm.setdefault("providers", {})
+    yaml_profiles = llm.setdefault("providers", dict(current_profiles))
     if not isinstance(yaml_profiles, dict):
         yaml_profiles = {}
         llm["providers"] = yaml_profiles
-    yaml_tiers = llm.setdefault("tiers", {})
+    yaml_tiers = llm.setdefault("tiers", dict(current_tiers) if tiers is None or explicit_overrides else {})
     if not isinstance(yaml_tiers, dict):
         yaml_tiers = {}
         llm["tiers"] = yaml_tiers
@@ -729,6 +842,8 @@ def llm_config_set(
             ):
                 if key in patch:
                     merged_profile[key] = patch[key]
+                elif key in raw and raw[key] in (None, ""):
+                    merged_profile.pop(key, None)
             yaml_profiles[provider] = merged_profile
 
     if tiers is not None:
@@ -737,6 +852,19 @@ def llm_config_set(
             tier, patch = _normalise_model_tier_row(
                 config, raw, vault_passphrase=vault_passphrase,
             )
+            if explicit_overrides:
+                # The settings editor sends declarations, not resolved values.
+                for route, raw_route in zip(patch.get("routes", []), raw.get("routes", [])):
+                    if "context_window" not in raw_route:
+                        route.pop("context_window", None)
+                    if raw_route.get("provider_key_env"):
+                        route["provider_key_env"] = str(raw_route["provider_key_env"])
+                for key in ("context_window", "reasoning_effort", "provider_native_web_search"):
+                    if key in raw:
+                        if key == "context_window":
+                            patch[key] = _normalise_model_context_window(raw[key], label=tier)
+                    else:
+                        patch.pop(key, None)
             seen.add(tier)
             merged = dict(current_tiers.get(tier) or {})
             merged.update(dict(yaml_tiers.get(tier) or {}))
@@ -744,7 +872,7 @@ def llm_config_set(
                 merged.setdefault(key, value)
             for key in (
                 "provider", "model", "base_url", "provider_key_ref",
-                "reasoning_effort", "routes",
+                "reasoning_effort", "context_window", "routes",
             ):
                 if key in patch:
                     merged[key] = patch[key]
@@ -752,15 +880,22 @@ def llm_config_set(
                     merged.pop(key, None)
             if "routes" in patch:
                 first = patch["routes"][0] if patch["routes"] else {}
-                for key in ("provider", "model", "base_url", "provider_key_ref", "kind"):
+                for key in (
+                    "provider", "model", "base_url", "provider_key_ref", "kind",
+                    "context_window", "provider_key_env",
+                ):
+                    if explicit_overrides and key == "context_window":
+                        continue
                     if key in first:
                         merged[key] = first[key]
-                    elif key in {"base_url", "provider_key_ref", "kind"}:
+                    elif key in {"base_url", "provider_key_ref", "provider_key_env", "kind"}:
                         merged.pop(key, None)
             if "provider_native_web_search" in patch:
                 merged["provider_native_web_search"] = patch[
                     "provider_native_web_search"
                 ]
+            elif explicit_overrides:
+                merged.pop("provider_native_web_search", None)
             yaml_tiers[tier] = merged
         if default_tier and default_tier not in seen and default_tier not in current_tiers:
             raise ValueError(f"default_tier {default_tier!r} is not configured")
@@ -916,33 +1051,20 @@ def models_discover(
     provider_id = (provider or "").strip().lower()
     if not provider_id or not _PROVIDER_RE.fullmatch(provider_id):
         raise ValueError("valid provider is required")
-    target_base_url = str(base_url or DEFAULT_BASE_URLS.get(provider_id) or "").strip()
+    profile = _provider_profiles(config).get(provider_id) or {}
+    target_base_url = str(base_url or profile.get("base_url") or _catalog_default_base_url(provider_id) or DEFAULT_BASE_URLS.get(provider_id) or "").strip()
     if target_base_url and not (
         target_base_url.startswith("http://") or target_base_url.startswith("https://")
     ):
         raise ValueError("base_url must start with http:// or https://")
 
-    key_ref = str(provider_key_ref or "").strip()
+    key_ref = str(provider_key_ref or profile.get("provider_key_ref") or "").strip()
     one_time_key = str(provider_key or "").strip()
-    if one_time_key:
-        key_ref = _store_llm_key(
-            config,
-            provider=provider_id,
-            slot="provider",
-            value=one_time_key,
-            vault_passphrase=vault_passphrase,
-        )
-    elif key_ref and not key_ref.startswith("vault://"):
-        key_ref = _store_llm_key(
-            config,
-            provider=provider_id,
-            slot="provider",
-            value=key_ref,
-            vault_passphrase=vault_passphrase,
-        )
-
-    api_key = ""
-    if key_ref:
+    if key_ref and not key_ref.startswith("vault://"):
+        one_time_key = one_time_key or key_ref
+        key_ref = ""
+    api_key = one_time_key
+    if not api_key and key_ref:
         api_key = _resolve_llm_key(
             config, key_ref, vault_passphrase=vault_passphrase,
         )
@@ -963,7 +1085,7 @@ def models_discover(
         # The "compat" entry is always an OpenAICompatAdapter; the
         # anthropic compat is the same instance used for Anthropic
         # itself. Both speak `list_models` against the supplied URL.
-        mode = (api_mode or "").strip().lower() or "chat_completions"
+        mode = (api_mode or profile.get("kind") or "").strip().lower() or "chat_completions"
         if mode == "anthropic_messages":
             adapter = providers.get("anthropic-compat") or providers.get("anthropic")
         else:
@@ -984,7 +1106,8 @@ def models_discover(
         return {
             "ok": False,
             "error": "discover_failed",
-            "detail": f"{type(exc).__name__}: {exc}",
+            "detail": f"{type(exc).__name__}: model discovery failed; connection was not saved",
+            "connection_saved": False,
             "provider": provider_id,
             "base_url": target_base_url,
             "provider_key_ref": key_ref,
@@ -994,17 +1117,26 @@ def models_discover(
         row for row in (_model_info_to_dict(m, provider_id) for m in models)
         if row.get("id")
     ]
-    _persist_provider_profile(
+    saved = llm_config_set(
         config,
-        provider=provider_id,
-        base_url=target_base_url,
-        provider_key_ref=key_ref,
+        providers=[{
+            "provider": provider_id,
+            "base_url": target_base_url,
+            "provider_key_ref": key_ref,
+            **({"provider_key": one_time_key} if one_time_key else {}),
+            **({"kind": api_mode} if api_mode else {}),
+        }],
+        vault_passphrase=vault_passphrase,
     )
+    saved_profile = next(row for row in saved["provider_profiles"] if row["provider"] == provider_id)
     return {
         "ok": True,
         "provider": provider_id,
         "base_url": target_base_url,
-        "provider_key_ref": key_ref,
+        "provider_key_ref": saved_profile["provider_key_ref"],
+        "provider_profile": saved_profile,
+        "connection_saved": True,
+        "revision": saved["revision"],
         "models": rows,
         "count": len(rows),
     }

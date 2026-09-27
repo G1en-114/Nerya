@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+import math
 from pathlib import Path
 from typing import Any
 
 from .....core import yaml_io
+from .....data.history_store import timeframe_seconds
 
 
 class BacktestConfigError(ValueError):
@@ -74,7 +76,7 @@ class BacktestConfig:
     initial_capital_usd: float = 10000.0
     warmup_bars: int = 50
     min_backtest_days: int = 0
-    window_days: int = 180
+    window_days: float = 180
     short_lived_window_days: int = 7
     tf: str = "1h"
     timeframes: list[str] = field(default_factory=list)
@@ -122,10 +124,24 @@ class BacktestConfig:
     benchmark_mode: str = "buy_hold_equal_weight"
     cache_root: str | None = None
     evaluation_mode: str = "trading"
+    start_utc: str | None = None
+    end_utc: str | None = None
+    data_mode: str = "download"
+    coverage_policy: str = "strict"
+    allow_timeframe_fallback: bool = False
+    download_timeout_seconds: float = 300.0
+    max_run_seconds: float = 600.0
+    max_bars: int = 2_000_000
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any] | None) -> "BacktestConfig":
         raw = dict(raw or {})
+        unknown = sorted(set(raw) - {f.name for f in fields(cls)})
+        if unknown:
+            raise BacktestConfigError("unknown backtest setting(s): " + ", ".join(unknown))
+        for name in ("allow_short", "kill_switch", "allow_timeframe_fallback"):
+            if name in raw and not isinstance(raw[name], bool):
+                raise BacktestConfigError(f"{name} must be a boolean, not a quoted string")
         mock_raw = raw.get("mock_surfaces") or {}
         if not isinstance(mock_raw, dict):
             raise BacktestConfigError("mock_surfaces must be a mapping")
@@ -133,7 +149,7 @@ class BacktestConfig:
             initial_capital_usd=float(raw.get("initial_capital_usd", 10000.0)),
             warmup_bars=int(raw.get("warmup_bars", 50)),
             min_backtest_days=int(raw.get("min_backtest_days", 0)),
-            window_days=int(raw.get("window_days", 180)),
+            window_days=float(raw.get("window_days", 180)),
             short_lived_window_days=int(raw.get("short_lived_window_days", 7)),
             tf=str(raw.get("tf", "1h")),
             timeframes=_str_list(raw.get("timeframes")),
@@ -159,19 +175,50 @@ class BacktestConfig:
             benchmark_mode=str(raw.get("benchmark_mode", "buy_hold_equal_weight")),
             cache_root=(str(raw.get("cache_root")) if raw.get("cache_root") else None),
             evaluation_mode=str(raw.get("evaluation_mode", "trading")),
+            start_utc=str(raw["start_utc"]) if raw.get("start_utc") is not None else None,
+            end_utc=str(raw["end_utc"]) if raw.get("end_utc") is not None else None,
+            data_mode=str(raw.get("data_mode", "download")),
+            coverage_policy=str(raw.get("coverage_policy", "strict")),
+            allow_timeframe_fallback=raw.get("allow_timeframe_fallback", False),
+            download_timeout_seconds=float(raw.get("download_timeout_seconds", 300)),
+            max_run_seconds=float(raw.get("max_run_seconds", 600)),
+            max_bars=int(raw.get("max_bars", 2_000_000)),
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
+        if self.data_mode not in {"download", "local"}:
+            raise BacktestConfigError("data_mode must be download or local")
+        if self.coverage_policy not in {"strict", "allow_partial"}:
+            raise BacktestConfigError("coverage_policy must be strict or allow_partial")
+        for name in ("initial_capital_usd", "max_drawdown_pct", "download_timeout_seconds", "max_run_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise BacktestConfigError(f"{name} must be finite and positive")
+        if self.max_bars <= 0:
+            raise BacktestConfigError("max_bars must be positive")
+        if not math.isfinite(self.risk_free_daily):
+            raise BacktestConfigError("risk_free_daily must be finite")
+        for values in (self.fee_bps_by_venue, self.slip_bps_by_venue):
+            if any(not math.isfinite(v) or v < 0 for v in values.values()):
+                raise BacktestConfigError("fees and slippage must be finite and non-negative")
+        if self.max_slippage_bps is not None and (not math.isfinite(self.max_slippage_bps) or self.max_slippage_bps < 0):
+            raise BacktestConfigError("max_slippage_bps must be finite and non-negative")
+        if any(period <= 0 for periods in self.indicators.values() for period in periods):
+            raise BacktestConfigError("indicator periods must be positive")
+        if set(self.indicators) - {"sma", "ema", "rsi", "atr"}:
+            raise BacktestConfigError("unsupported indicator in backtest config")
+        for tf in [self.tf, *self.timeframes]:
+            timeframe_seconds(tf)
         if self.evaluation_mode not in {"trading", "observation"}:
             raise BacktestConfigError("evaluation_mode must be trading or observation")
         if self.initial_capital_usd <= 0:
             raise BacktestConfigError("initial_capital_usd must be positive")
         if self.min_backtest_days < 0:
             raise BacktestConfigError("min_backtest_days must be >= 0")
-        if self.window_days <= 0:
-            raise BacktestConfigError("window_days must be positive")
+        if not math.isfinite(self.window_days) or self.window_days <= 0:
+            raise BacktestConfigError("window_days must be finite and positive")
         if self.short_lived_window_days <= 0:
             raise BacktestConfigError("short_lived_window_days must be positive")
         if self.warmup_bars < 0:
@@ -203,6 +250,7 @@ def load_config(
     *,
     preset: str = "default",
     markets: list[str] | tuple[str, ...] | None = None,
+    defaults: dict[str, Any] | None = None,
     config_path: str | Path | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> BacktestConfig:
@@ -214,6 +262,8 @@ def load_config(
             if not isinstance(loaded, dict):
                 raise BacktestConfigError(f"{path}: preset must be a mapping")
             raw = _deep_merge(raw, loaded)
+    if defaults:
+        raw = _deep_merge(raw, dict(defaults))
     if config_path:
         if not Path(config_path).is_file():
             raise BacktestConfigError(f"backtest config not found: {config_path}")

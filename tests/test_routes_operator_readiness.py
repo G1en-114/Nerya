@@ -172,3 +172,52 @@ def test_accounts_probe_finds_configured_paper_account(tmp_path) -> None:
     checks = {c["name"]: c for c in envelope["data"]["checks"]}
     assert checks["Trading account"]["status"] == "ok"
     assert "account" not in envelope["data"]["blocking"]
+
+
+def test_setup_only_requires_three_saved_configurations(tmp_path, monkeypatch) -> None:
+    """Setup is not a runtime health check; keyless local models are valid."""
+    client = _client(tmp_path, {
+        "default_tier": "medium",
+        "providers": {},
+        "tiers": {"medium": {"provider": "local", "model": "fixture-model"}},
+    })
+    client.config.data.setdefault("runtime", {}).setdefault("auth", {})["admin_password_hash"] = "fixture-hash"
+    monkeypatch.setattr(routes_operator, "_accounts", lambda _: [{"id": "paper-fixture"}])
+
+    def forbidden_probe(*args, **kwargs):
+        pytest.fail("Setup must not probe strategies, wallet providers or live connectors")
+
+    for name in ("_strategy_package_count", "_trading_strategy_count", "_wallet_providers"):
+        monkeypatch.setattr(routes_operator, name, forbidden_probe, raising=False)
+    envelope = routes_operator._readiness_handler(client, {})
+    assert envelope["status"] == "ok"
+    assert envelope["data"]["blocking"] == []
+    assert [check["name"] for check in envelope["data"]["checks"]] == [
+        "LLM provider", "Trading account", "Admin password",
+    ]
+
+
+def test_setup_missing_configuration_has_only_three_blockers(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, {
+        "default_tier": "medium", "providers": {},
+        "tiers": {"medium": {"provider": "mock", "model": ""}},
+    })
+    client.config.data.setdefault("runtime", {}).setdefault("auth", {})["admin_password_hash"] = ""
+    monkeypatch.setattr(routes_operator, "_accounts", lambda _: [])
+    envelope = routes_operator._readiness_handler(client, {})
+    assert set(envelope["data"]["blocking"]) == {"llm", "account", "password"}
+    assert len(envelope["data"]["checks"]) == 3
+
+
+def test_setup_checks_selected_primary_tier_not_an_unused_tier(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, {
+        "default_tier": "medium", "providers": {},
+        "tiers": {
+            "medium": {"provider": "mock", "model": ""},
+            "high": {"provider": "local", "model": "fixture-model"},
+        },
+    })
+    monkeypatch.setattr(routes_operator, "_accounts", lambda _: [])
+    envelope = routes_operator._readiness_handler(client, {})
+    assert "llm" in envelope["data"]["blocking"]
+

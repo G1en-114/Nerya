@@ -83,9 +83,8 @@ class WorkspaceManager:
             paths,
             bundle=load_bundle(DEFAULT_BUNDLE_ID),
         )
-        # seed example strategies
-        from .bootstrap import seed_example_strategies
-        seed_example_strategies(paths)
+        # New workspaces deliberately contain no strategies. Only explicit user
+        # creation/import may add one; repeated init never restores demo data.
         return cls.load(paths.root)
 
     # ---------- accessors ----------
@@ -105,7 +104,7 @@ _DEFAULT_ENABLED_SKILLS = [
     "markets", "memory", "news_social", "notify", "quant-strategy-loop",
     "quant_research",
     "research", "research_report", "strategy_author", "tasks", "team",
-    "trading", "triggers", "self_modify", "plugin_author",
+    "trading", "triggers", "self_modify", "plugin_author", "adapter",
     # Integration-gated: listed here but loaded only after configuration.
     "dcf_valuation", "equity_research", "sec_filings",
     # Canonical hubs expose specialist methods only on demand.
@@ -115,44 +114,8 @@ _DEFAULT_ENABLED_SKILLS = [
 ]
 
 
-_DEFAULT_ROUTES = [
-    {"id": "btc_breakout_to_market_analyst",
-     "match": {"kind": "price.breakout", "payload.symbol": "BTC"},
-     "target": "subagent:market_analyst",
-     "strategy_id": "btc_momentum",
-     "cooldown_seconds": 60,
-     "max_per_minute": 30,
-     "max_payload_bytes": 4096},
-    {"id": "news_alpha_to_main",
-     "match": {"kind": "news.alpha"},
-     "target": "main",
-     "strategy_id": "btc_momentum",
-     "cooldown_seconds": 15,
-     "max_per_minute": 30},
-    {"id": "news_keyword_to_news_interpreter",
-     "match": {"kind": "news.keyword"},
-     "target": "subagent:news_interpreter",
-     "strategy_id": "btc_momentum",
-     "cooldown_seconds": 0,
-     "max_per_minute": 10,
-     "max_payload_bytes": 8192},
-    {"id": "funding_spike_to_main",
-     "match": {"kind": "funding.spike"},
-     "target": "main",
-     "strategy_id": "btc_momentum",
-     "cooldown_seconds": 30,
-     "max_per_minute": 20},
-    {"id": "whale_transfer_to_onchain_watcher",
-     "match": {"kind": "whale.transfer"},
-     "target": "subagent:onchain_watcher",
-     "strategy_id": "btc_momentum",
-     "cooldown_seconds": 10,
-     "max_per_minute": 60},
-    {"id": "sdk_order_to_trading",
-     "match": {"kind": "sdk.trade_intent"},
-     "target": "skill:trading.submit_trade_intent",
-     "cooldown_seconds": 0},
-]
+# No implicit demo routes or strategy-bound automation on a fresh installation.
+_DEFAULT_ROUTES: list[dict[str, Any]] = []
 
 
 def _seed_yaml(path: Path, data: dict[str, Any]) -> None:

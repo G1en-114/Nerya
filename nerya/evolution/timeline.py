@@ -1769,14 +1769,48 @@ def _inline_json_artifact(
 ) -> dict[str, Any]:
     safe = redact_display_dict(data)
     text = json.dumps(safe, ensure_ascii=False, indent=2, default=str)
+    metadata: dict[str, Any] = {"redacted": True}
+    if kind == "output" and isinstance(safe, dict):
+        # Keep human-readable fields outside the raw preview, which can be
+        # truncated in the middle of a large replacement source file.
+        metadata["review_explanation"] = _review_explanation(safe)
     return _inline_artifact(
         aid,
         title,
         text,
         kind=kind,
         language="json",
-        metadata={"redacted": True},
+        metadata=metadata,
     )
+
+
+def _review_explanation(output: dict[str, Any]) -> dict[str, Any]:
+    def prose(value: Any) -> str:
+        return value[:2000] if isinstance(value, str) else ""
+
+    def texts(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [prose(value)]
+        return [prose(item) for item in value[:30] if isinstance(item, str)] if isinstance(value, list) else []
+
+    result: dict[str, Any] = {
+        key: prose(output.get(key)) for key in ("summary", "rationale")
+    }
+    for key in ("scope", "risk_flags", "validation_plan"):
+        result[key] = texts(output.get(key))
+    changes = output.get("proposed_changes")
+    if isinstance(changes, list):
+        result["proposed_changes"] = [
+            {**{key: prose(change.get(key)) for key in ("file", "target", "kind", "summary", "rationale", "before_summary", "after_summary")}, "scope": texts(change.get("scope"))}
+            for change in changes[:30] if isinstance(change, dict)
+        ]
+        result["changes_truncated"] = len(changes) > 30
+    evidence = output.get("evidence")
+    if isinstance(evidence, list):
+        result["evidence"] = [{key: prose(row.get(key)) for key in ("source", "finding", "summary")} for row in evidence[:30] if isinstance(row, dict)]
+    effect = output.get("expected_effect")
+    result["expected_effect"] = ({prose(key): prose(value) if isinstance(value, str) else value for key, value in list(effect.items())[:30] if isinstance(value, (str, int, float, bool))} if isinstance(effect, dict) else prose(effect))
+    return result
 
 
 def _read_text_file(path: Path) -> str:

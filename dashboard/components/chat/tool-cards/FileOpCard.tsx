@@ -5,51 +5,13 @@ import { ReactNode, useState } from "react";
 import type { NativeBlock } from "../../../lib/chat";
 import { CopyButton, Tag, ToolRowCard } from "./atoms";
 import { arrayOfRecords, recordOf } from "./helpers";
+import { Icon as NeryaGlyph, type IconName } from "../../icons";
 
 function fileIconFor(action: string): ReactNode {
-  switch (action) {
-    case "edit_file":
-      return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <path d="M14 2v6h6" />
-          <path d="M10 13l-2 2 2 2" />
-          <path d="M14 13l2 2-2 2" />
-        </svg>
-      );
-    case "write_file":
-      return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-          <path d="M17 21v-8H7v8" />
-          <path d="M7 3v5h8" />
-        </svg>
-      );
-    case "list_dir":
-    case "glob":
-      return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        </svg>
-      );
-    case "grep":
-      return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="11" cy="11" r="7" />
-          <path d="M21 21l-4.3-4.3" />
-        </svg>
-      );
-    case "read_file":
-    default:
-      return (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <path d="M14 2v6h6" />
-          <line x1="8" y1="13" x2="16" y2="13" />
-          <line x1="8" y1="17" x2="14" y2="17" />
-        </svg>
-      );
-  }
+  const names: Record<string, IconName> = {
+    edit_file: 'scripts', write_file: 'save', list_dir: 'folder', glob: 'folder', grep: 'search',
+  };
+  return <NeryaGlyph name={names[action] || 'document'} size={16} />;
 }
 
 const FILE_LABELS: Record<string, string> = {
@@ -140,10 +102,12 @@ export function FileOpCard({
   block,
   variant,
   pending = false,
+  defaultOpen = false,
 }: {
   block: NativeBlock;
   variant: "use" | "result";
   pending?: boolean;
+  defaultOpen?: boolean;
 }) {
   const t = useTranslations("fileOpCard");
   const [expanded, setExpanded] = useState(false);
@@ -158,12 +122,11 @@ export function FileOpCard({
   const { kind: bodyKind, body } = isResult
     ? pickDiffOrText(block)
     : { kind: "" as const, body: "" };
-  const lineRange =
-    typeof payload.line_offset === "number" || typeof payload.line_limit === "number"
-      ? `lines ${payload.line_offset ?? 1}\u2013${
-          (Number(payload.line_offset) || 1) + (Number(payload.line_limit) || 0)
-        }`
-      : "";
+  const offset = typeof result.offset === 'number' ? result.offset : typeof payload.offset === 'number' ? payload.offset : null;
+  const limit = typeof result.limit === 'number' ? result.limit : typeof payload.limit === 'number' ? payload.limit : null;
+  const lineRange = offset !== null && offset >= 0
+    ? `lines ${offset + 1}${limit !== null && limit > 0 ? `–${offset + limit}` : '+'}${typeof result.total_lines === 'number' ? ` / ${result.total_lines}` : ''}`
+    : typeof payload.line_offset === 'number' ? `lines ${payload.line_offset}` : '';
   const matches = arrayOfRecords(result.matches);
   const entries = arrayOfRecords(result.entries);
   const truncated = result.truncated === true;
@@ -199,7 +162,7 @@ export function FileOpCard({
         </span>
       }
       tone={ok ? "neutral" : "err"}
-      defaultOpen={pending}
+      defaultOpen={defaultOpen || pending}
       meta={
         <>
           {isResult ? (
@@ -218,11 +181,11 @@ export function FileOpCard({
       }
     >
 
-      {!isResult && lineRange ? (
+      {lineRange ? (
         <div className="text-[11px] text-ink-400 font-mono">{lineRange}</div>
       ) : null}
 
-      {!isResult && action === "grep" && payload.pattern ? (
+      {action === "grep" && payload.pattern ? (
         <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-1.5">
           <div className="text-[11px] text-ink-500 font-medium mb-0.5">
             {t("pattern")}

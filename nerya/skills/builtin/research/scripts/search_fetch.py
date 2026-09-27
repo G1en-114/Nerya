@@ -344,7 +344,6 @@ def run(
     timeout_s: float = DEFAULT_TIMEOUT,
     use_jina_fallback: bool = True,
     prefer_jina: bool = False,
-    use_browser_fallback: bool = True,
     use_scrapling_fallback: bool = True,
     min_content_chars: int = 160,
 ) -> dict[str, Any]:
@@ -415,7 +414,6 @@ def run(
             timeout_s=step_timeout,
             use_jina_fallback=use_jina_fallback,
             prefer_jina=prefer_jina,
-            use_browser_fallback=use_browser_fallback,
             use_scrapling_fallback=use_scrapling_fallback,
             min_content_chars=min_content_chars,
         )
@@ -435,7 +433,6 @@ def run(
                 timeout_s=step_timeout,
                 use_jina_fallback=True,
                 prefer_jina=True,
-                use_browser_fallback=use_browser_fallback,
                 use_scrapling_fallback=use_scrapling_fallback,
                 min_content_chars=min_content_chars,
             )
@@ -589,7 +586,6 @@ def main() -> None:
             timeout_s=float(payload.get("timeout_s") or DEFAULT_TIMEOUT),
             use_jina_fallback=_payload_bool(payload, "use_jina_fallback", True),
             prefer_jina=_payload_bool(payload, "prefer_jina", False),
-            use_browser_fallback=_payload_bool(payload, "use_browser_fallback", True),
             use_scrapling_fallback=_payload_bool(payload, "use_scrapling_fallback", True),
             min_content_chars=int(payload.get("min_content_chars") or 160),
         )

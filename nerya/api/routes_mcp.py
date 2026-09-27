@@ -36,15 +36,12 @@ def status(client, payload=None):
             "admin_password_configured": has_admin_password(config),
             "public_url": mcp.get("public_url", ""), "endpoint": origin + "/mcp",
             "oauth_issuer": origin + "/mcp/oauth", "detected_public_urls": tunnel_origins(config),
-            "allow_mutating": mcp.get("allow_mutating", False),
-            "native_allow_mutating": config.get("mcp.native_tools.allow_mutating", False),
-            "allow_tools": mcp.get("allow_tools"), "deny_tools": mcp.get("deny_tools", []),
+            "trust_mode": "workspace",
             "openai_tunnel": openai_tunnel.status(config)}
 
 
 def save(client, payload):
-    allowed = {"revision", "enabled", "public_url", "allow_mutating", "native_allow_mutating",
-               "allow_tools", "deny_tools", "openai_tunnel"}
+    allowed = {"revision", "enabled", "public_url", "openai_tunnel"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         return {"ok": False, "error": "unsupported_settings", "_status": 400}
     with _LOCK:
@@ -53,15 +50,17 @@ def save(client, payload):
             return {"ok": False, "error": "stale_revision", "_status": 409}
         block = deepcopy(config.get("mcp", {}))
         try:
-            for key in ("enabled", "allow_mutating", "native_allow_mutating"):
+            for key in ("enabled",):
                 if key in payload and type(payload[key]) is not bool:
                     raise ValueError(f"{key} must be a boolean")
-            for key in ("enabled", "allow_mutating", "allow_tools", "deny_tools"):
+            for key in ("enabled",):
                 if key in payload:
                     block[key] = payload[key]
-            if "native_allow_mutating" in payload:
-                block.setdefault("native_tools", {})["allow_mutating"] = payload["native_allow_mutating"]
-                block["native_tools"]["mode"] = "auto" if payload["native_allow_mutating"] else "default"
+            # Retired per-transport permission controls must not survive new saves.
+            for key in ("allow_mutating", "allow_tools", "deny_tools"):
+                block.pop(key, None)
+            block["native_tools"] = {"enabled": True}
+            block["dynamic_tools"] = {"enabled": True, "include_unimplemented": False}
             # Settings UI only opens OAuth2, never an unauthenticated or static-token public server.
             block["auth_mode"] = "oauth2"
             if "public_url" in payload:
@@ -100,12 +99,15 @@ def save(client, payload):
             if tunnel.get("enabled") and not (api_key or tunnel.get("api_key_ref")):
                 raise ValueError("OpenAI Tunnel requires a runtime API key")
             if api_key:
+                from ..core.errors import SecretAccessDenied
                 from ..security.secrets import SecretVault
                 try:
                     meta = SecretVault.open(config.paths.vault_enc).put(name="mcp_openai_runtime_key",
                         value=api_key, kind="openai_tunnel", scope=["mcp_tunnel"], owner="mcp")
+                except SecretAccessDenied as exc:
+                    raise ValueError(f"Vault cannot store the API key: {exc}") from exc
                 except Exception as exc:
-                    raise ValueError("Vault cannot store the API key; configure the Vault passphrase first") from exc
+                    raise ValueError("Vault cannot store the API key; check Vault storage permissions and integrity") from exc
                 tunnel["api_key_ref"] = meta.ref()
             # Changing exposure invalidates existing grants; clients must consent again.
             block["oauth_epoch"] = secrets.token_hex(16)
@@ -133,6 +135,12 @@ def revoke(client, payload):
     return status(client)
 
 
+def tunnel_install(client, payload):
+    if not isinstance(payload, dict) or payload:
+        return {"ok": False, "error": "unsupported_settings", "_status": 400}
+    return openai_tunnel.install(_config(client))
+
+
 def tunnel_start(client, payload):
     return openai_tunnel.start(_config(client))
 
@@ -151,5 +159,6 @@ def roles(client, payload):
 def routes():
     return [("GET", "/mcp-settings", status), ("POST", "/mcp-settings", save),
             ("POST", "/mcp-settings/revoke", revoke), ("GET", "/mcp-settings/roles", roles),
+            ("POST", "/mcp-settings/tunnel/install", tunnel_install),
             ("POST", "/mcp-settings/tunnel/start", tunnel_start),
             ("POST", "/mcp-settings/tunnel/stop", tunnel_stop)]

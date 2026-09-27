@@ -145,6 +145,23 @@ def routes():
         except (NeryaError, OSError, ValueError, TypeError) as exc:
             return _error(str(exc))
 
+    def workflow_export(client, query):
+        from ..strategies.workflow_transfer import export_workflow
+        try:
+            query = query or {}
+            return export_workflow(client.config.paths, query.get("strategy_id") or "",
+                                   query.get("proposal_id") or None,
+                                   base_revision=query.get("base_revision") or None)
+        except (NeryaError, OSError, ValueError, TypeError, RecursionError) as exc:
+            return _error(str(exc))
+
+    def workflow_import(client, payload):
+        from ..strategies.workflow_transfer import import_workflow
+        try:
+            return import_workflow(client.config.paths, payload or {})
+        except (NeryaError, OSError, ValueError, TypeError, RecursionError) as exc:
+            return _error(str(exc))
+
     def workflow_template(client, payload):
         from ..strategies.workflow_templates import create_workflow_template
         try:
@@ -444,6 +461,23 @@ def routes():
         except NeryaError as exc:
             return _error(str(exc))
 
+    def tuning_history(client, query):
+        from ..strategies.tuning_history import tuning_history as history
+        query = query or {}
+        try:
+            return history(client.config.paths, str(query.get("strategy_id") or ""),
+                           limit=int(query.get("limit") or 100), offset=int(query.get("offset") or 0))
+        except (ValueError, OSError) as exc:
+            return _error(str(exc))
+
+    def tuning_record(client, query):
+        from ..strategies.tuning_history import tuning_record as record
+        query = query or {}
+        try:
+            return record(client.config.paths, str(query.get("strategy_id") or ""), str(query.get("run_id") or ""))
+        except (ValueError, OSError) as exc:
+            return _error(str(exc))
+
     def tuning_snapshot(client, query):
         sid = (query or {}).get("strategy_id") or ""
         if not sid:
@@ -464,6 +498,8 @@ def routes():
         ("GET", "/strategies/runtime/workflow/check", workflow_check),
         ("POST", "/strategies/runtime/workflow/propose", workflow_propose),
         ("POST", "/strategies/runtime/workflow/template", workflow_template),
+        ("GET", "/strategies/runtime/workflow/export", workflow_export),
+        ("POST", "/strategies/runtime/workflow/import", workflow_import),
         ("GET", "/strategies/runtime/list", list_packages),
         ("GET", "/strategies/runtime/get", get_package),
         ("POST", "/strategies/runtime/generate", generate),
@@ -490,6 +526,8 @@ def routes():
         ("POST", "/strategies/runtime/tuning/resume", tuning_resume),
         ("POST", "/strategies/runtime/tuning/run", tuning_run),
         ("GET", "/strategies/runtime/tuning/status", tuning_status),
+        ("GET", "/strategies/runtime/tuning/history", tuning_history),
+        ("GET", "/strategies/runtime/tuning/record", tuning_record),
         ("GET", "/strategies/runtime/tuning/snapshot", tuning_snapshot),
     ]
 

@@ -29,6 +29,7 @@ from ...evolution.events import EvolutionSignal
 from ...evolution.event_store import append_signal
 from ...evolution.quality import evaluate_learning_candidate
 from ...memory.runtime import MemoryRuntime, MemoryScopeError
+from ...memory.store import MemoryConflictError
 from ..tool_errors import schema_validation_result as _usage_error
 from ..types import (
     ToolCall,
@@ -48,7 +49,7 @@ MEMORY_RECALL_SCHEMA: dict[str, Any] = {
     "properties": {
         "scope": {
             "type": "string",
-            "enum": ["visible", "global", "strategy", "session"],
+            "enum": ["visible", "global", "strategy", "workflow", "session"],
             "default": "visible",
             "description": "Recall only memory visible to the trusted active turn.",
         },
@@ -79,8 +80,9 @@ MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
     "properties": {
         "scope": {
             "type": "string",
-            "enum": ["global", "strategy", "session"],
-            "description": "Memory partition.",
+            "enum": ["auto", "global", "strategy", "workflow", "session"],
+            "default": "auto",
+            "description": "Use auto to save in the active workflow or strategy. Scoped runs cannot write to a parent scope.",
         },
         "name": {
             "type": "string",
@@ -99,11 +101,12 @@ MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
         },
         "key": {
             "type": "string",
-            "description": "Stable key used to update an existing fact.",
+            "description": "Recall first and reuse the existing key when correcting a fact; pass expected_memory_id for safe updates.",
         },
         "title": {
             "type": "string",
         },
+        "expected_memory_id": {"type": "string", "description": "For an update, pass the recalled memory id to prevent overwriting a newer correction."},
         "tags": {
             "type": "array",
             "items": {"type": "string"},
@@ -113,7 +116,7 @@ MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
             "description": "Plain-text note to append; will be timestamped.",
         },
     },
-    "required": ["scope", "note"],
+    "required": ["note"],
 }
 
 JOURNAL_SEARCH_SCHEMA: dict[str, Any] = {
@@ -185,7 +188,7 @@ def memory_recall_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolResu
     query = str(args.get("query") or "").strip()
     try:
         hits = runtime.recall(query, scope=scope, limit=limit)
-    except MemoryScopeError as exc:
+    except (MemoryScopeError, MemoryConflictError) as exc:
         return _usage_error(call, str(exc))
     rows: list[dict[str, Any]] = []
     used = 0
@@ -201,6 +204,7 @@ def memory_recall_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolResu
             "scope": hit.scope,
             "strategy_id": hit.strategy_id,
             "session_id": hit.session_id,
+            "workflow_id": hit.workflow_id,
             "category": hit.category,
             "key": hit.stable_key,
             "content": content,
@@ -226,16 +230,19 @@ def memory_recall_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolResu
 
 def memory_remember_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolResult:
     args = call.arguments or {}
-    scope = str(args.get("scope") or "").strip().lower()
+    try:
+        scope = runtime.write_scope(str(args.get("scope") or "auto"))
+    except (MemoryScopeError, MemoryConflictError) as exc:
+        return _usage_error(call, str(exc))
     note = (args.get("note") or "").strip()
     if not note:
         return _usage_error(call, "note must be non-empty")
     mismatch = _validate_requested_strategy(call, runtime=runtime, scope=scope)
     if mismatch is not None:
         return mismatch
-    if scope not in {"global", "strategy", "session"}:
+    if scope not in {"global", "strategy", "workflow", "session"}:
         return _usage_error(
-            call, f"unknown scope {scope!r}; expected global|strategy|session",
+            call, f"unknown scope {scope!r}; expected global|strategy|workflow|session",
         )
     name = str(args.get("name") or "global.md").strip()
     category = str(args.get("category") or "").strip().lower()
@@ -244,11 +251,7 @@ def memory_remember_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolRe
             "mistakes.md": "error",
             "decisions.md": "decision",
         }.get(name, "learning")
-    evidence_ref = (
-        f"strategy:{runtime.strategy_id}"
-        if scope == "strategy"
-        else f"memory:{scope}"
-    )
+    evidence_ref = f"turn:{call.turn_id or call.id}"
     quality = evaluate_learning_candidate(note, evidence_refs=[evidence_ref])
     if not quality.ok:
         try:
@@ -292,8 +295,9 @@ def memory_remember_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolRe
             evidence_refs=[evidence_ref],
             writer_id="native_tool",
             confidence=quality.score,
+            expected_memory_id=args.get("expected_memory_id"),
         )
-    except MemoryScopeError as exc:
+    except (MemoryScopeError, MemoryConflictError) as exc:
         return _usage_error(call, str(exc))
     record = result.record
     return ToolResult.from_json(
@@ -304,14 +308,16 @@ def memory_remember_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolRe
             "skipped": result.skipped,
             "skip_reason": result.skip_reason,
             "scope": scope,
-            "strategy_id": runtime.strategy_id if scope == "strategy" else "",
+            "workflow_id": runtime.workflow_id,
+            "strategy_id": runtime.strategy_id if scope in {"strategy", "workflow", "session"} else "",
             "session_id": runtime.session_id if scope == "session" else "",
             "memory_id": record.memory_id if record else "",
         },
     )
 
 
-def journal_search_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResult:
+def journal_search_handler(call: ToolCall, *, paths: WorkspacePaths, strategy_id: str | None = None,
+                           session_id: str | None = None) -> ToolResult:
     args = call.arguments or {}
     name = (args.get("journal") or "agent").strip()
     contains = (args.get("contains") or "").strip().lower()
@@ -329,6 +335,10 @@ def journal_search_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResu
     rows: list[dict[str, Any]] = []
     try:
         for row in jsonl.tail(journal_path, n=max(limit * 4, limit)):
+            if strategy_id and row.get("strategy_id") != strategy_id:
+                continue
+            if session_id and row.get("session_id") != session_id:
+                continue
             if kind and str(row.get("kind") or "") != kind:
                 continue
             if contains:

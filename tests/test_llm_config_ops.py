@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nerya.agent.loop_contracts import LoopConfig
 from nerya.api import routes_llm
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.errors import LLMError
@@ -53,6 +54,71 @@ def test_llm_config_set_persists_model_assignments_without_plaintext_secret(tmp_
     assert cfg.get("llm.tiers")["light"]["model"] == "gpt-5.4-mini"
     saved = yaml_io.load(tmp_path / "nerya.yml", default={})
     assert saved["llm"]["tiers"]["light"]["provider_key_ref"] == "vault://openai_key"
+    assert out["tiers"][0]["context_window"] == 1_048_576
+    assert saved["llm"]["tiers"]["light"]["context_window"] == 1_048_576
+
+
+def test_llm_config_set_persists_per_route_context_windows(tmp_path):
+    cfg = _config(tmp_path)
+
+    out = ops.llm_config_set(
+        cfg,
+        default_tier="medium",
+        tiers=[
+            {
+                "tier": "medium",
+                "routes": [
+                    {
+                        "provider": "openai",
+                        "model": "primary-model",
+                        "context_window": 200_000,
+                    },
+                    {
+                        "provider": "anthropic",
+                        "model": "fallback-model",
+                    },
+                ],
+            }
+        ],
+    )
+
+    row = next(t for t in out["tiers"] if t["tier"] == "medium")
+    assert row["context_window"] == 200_000
+    assert row["routes"][0]["context_window"] == 200_000
+    assert row["routes"][1]["context_window"] == 1_048_576
+
+    saved = yaml_io.load(tmp_path / "nerya.yml", default={})
+    saved_tier = saved["llm"]["tiers"]["medium"]
+    assert saved_tier["context_window"] == 200_000
+    assert saved_tier["routes"][0]["context_window"] == 200_000
+    assert saved_tier["routes"][1]["context_window"] == 1_048_576
+
+
+def test_loop_config_inherits_context_window_from_selected_model_tier(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.data["llm"]["tiers"]["medium"] = {
+        "provider": "openai",
+        "model": "primary-model",
+        "context_window": 320_000,
+    }
+
+    configured = LoopConfig.from_config(cfg, tier="medium")
+    assert configured.model_context_window == 320_000
+
+    cfg.data["llm"]["tiers"]["medium"].pop("context_window")
+    cfg.data["llm"]["tiers"]["medium"]["routes"] = [
+        {
+            "provider": "openai",
+            "model": "primary-model",
+            "context_window": 400_000,
+        }
+    ]
+    route_configured = LoopConfig.from_config(cfg, tier="medium")
+    assert route_configured.model_context_window == 400_000
+
+    cfg.data["llm"]["tiers"]["medium"]["routes"][0].pop("context_window")
+    defaulted = LoopConfig.from_config(cfg, tier="medium")
+    assert defaulted.model_context_window == 0  # Unknown capability stays automatic.
 
 
 def test_llm_config_set_converts_plaintext_key_refs_to_vault(tmp_path):
@@ -121,6 +187,7 @@ def test_llm_config_set_accepts_multiple_provider_routes_per_tier_without_plaint
                     {
                         "provider": "agnes",
                         "model": "agnes-2.0-flash",
+                        "reasoning_effort": "low",
                         "base_url": "https://apihub.agnes-ai.com/v1",
                         "provider_key": "sk-route-a",
                         "kind": "chat_completions",
@@ -128,6 +195,7 @@ def test_llm_config_set_accepts_multiple_provider_routes_per_tier_without_plaint
                     {
                         "provider": "stepfun",
                         "models": ["step-3.5-flash", "step-3.7-flash"],
+                        "reasoning_effort": "high",
                         "base_url": "https://api.stepfun.com/step_plan/v1",
                         "provider_keys": ["sk-route-b", "sk-route-c"],
                     },
@@ -144,10 +212,13 @@ def test_llm_config_set_accepts_multiple_provider_routes_per_tier_without_plaint
     assert row["routes"][1]["provider_key_ref"].startswith("vault://")
     assert row["routes"][1]["provider_key_refs"] == [row["routes"][1]["provider_key_ref"]]
     assert row["routes"][1]["models"] == ["step-3.5-flash", "step-3.7-flash"]
+    assert row["routes"][0]["reasoning_effort"] == "low"
+    assert row["routes"][1]["reasoning_effort"] == "high"
 
     saved = yaml_io.load(tmp_path / "nerya.yml", default={})
     assert saved["llm"]["tiers"]["medium"]["routes"][0]["provider"] == "agnes"
     assert saved["llm"]["tiers"]["medium"]["routes"][1]["provider"] == "stepfun"
+    assert saved["llm"]["tiers"]["medium"]["routes"][1]["reasoning_effort"] == "high"
     assert "sk-route-a" not in str(saved)
     assert "sk-route-b" not in str(saved)
     vault = SecretVault.open(tmp_path / "vault" / "secrets.enc")

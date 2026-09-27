@@ -412,6 +412,7 @@ def _vaultify_plaintext_credentials(
 
 
 def routes():
+    from .account_connection import connect, test_connection
     def list_accounts(client, _payload):
         profiles = accounts_mod.load_account_profiles(client.config.paths)
         return {
@@ -1054,7 +1055,8 @@ def routes():
         ("POST", "/accounts/list", list_accounts),
         ("POST", "/accounts/get", get_account),
         ("POST", "/accounts/upsert", upsert_account),
-        ("POST", "/accounts/test_balance", test_balance),
+        ("POST", "/accounts/test_balance", test_connection),
+        ("POST", "/accounts/connect", connect),
         ("POST", "/accounts/delete", delete_account),
         ("POST", "/accounts/quarantine", quarantine_account),
         ("POST", "/accounts/reset_paper", reset_paper),
