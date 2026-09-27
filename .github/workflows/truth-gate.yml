@@ -13,8 +13,7 @@
 #   bash scripts/run_truth_gate.sh          # full gate
 #   bash scripts/run_truth_gate.sh --quick  # truth-gates only
 #
-# Any green CI run on this workflow proves that, as of that commit, the
-# outward-facing surfaces still match the runtime they describe.
+# This validates the checked contracts, not live market/provider behavior.
 
 name: truth-gate
 
@@ -24,22 +23,29 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: truth-gate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   truth-gate:
     name: truth gates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          python-version: "3.11"
-          cache: pip
+          persist-credentials: false
+
+      - uses: ./.github/actions/python
 
       - name: Install runtime + dev deps
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          uv pip install --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
+          python scripts/release_version.py
 
       - name: Check agent runtime imports and names
         run: >-
@@ -56,13 +62,16 @@ jobs:
 
   dashboard:
     name: dashboard typecheck + lint + build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          node-version: 20
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -72,6 +81,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck --workspace @nerya/dashboard
 
+      - name: Translation contracts
+        run: npm run check:i18n --workspace @nerya/dashboard
+
       - name: Lint
         run: npm run lint --workspace @nerya/dashboard
 
@@ -80,19 +92,18 @@ jobs:
 
   regression:
     name: full regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          python-version: "3.11"
-          cache: pip
+          persist-credentials: false
+
+      - uses: ./.github/actions/python
 
       - name: Install runtime + dev + trading extras
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev,trading]'
+          uv pip install --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
 
       - name: Run full regression
         run: bash scripts/run_truth_gate.sh

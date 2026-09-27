@@ -19,6 +19,12 @@ The workflow exercises installer payloads with temporary data and fake credentia
 before making a release available. SHA-256 checksums and build metadata accompany
 each platform's installers.
 
+The release build resolves Python's private Linux shared libraries explicitly,
+retains detailed failure logs, and checks exclusive listener ownership on Windows.
+Runtime regression also covers late HTTP rate-limit responses, workspace-specific
+approval resumption and durable duplicate-dispatch prevention. These fixes do not
+remove trading authorization or introduce hard-coded Agent-loop budgets.
+
 ## Beta limitations
 
 These default beta artifacts are ad-hoc signed on macOS, not notarized, and unsigned

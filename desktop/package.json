@@ -4,10 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build --features custom-protocol",
+    "build": "node scripts/build.mjs",
     "prepare:runtime": "node scripts/prepare.mjs",
     "installer:mac": "npm run build -- --bundles app && node scripts/installer.mjs",
-    "test": "python -m unittest discover -s tests -v"
+    "test": "node --test tests/build.test.mjs && python -m unittest discover -s tests -v"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

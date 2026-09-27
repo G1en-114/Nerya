@@ -65,6 +65,7 @@ store. Protect the app-data directory and back up its key with the encrypted dat
 
 Build on the **target operating system and architecture**. Do not cross-compile the
 Rust shell while accidentally shipping Python/Node/Chromium from the build host.
+`build.mjs` checks the Rust host target before downloading any runtime;
 `prepare.mjs` rejects mismatched Tauri targets, and payload verification checks the
 actual native platform as well as the runtime manifest.
 
@@ -113,8 +114,14 @@ npm --prefix desktop run build -- --ci --bundles nsis,msi -- --locked
 npm --prefix desktop run build -- --ci --bundles deb,appimage -- --locked
 ```
 
-`beforeBuildCommand` prepares the portable runtime, builds the actual standalone
-web server, and generates icons from the application's branding. Node archives are
+The npm build command prepares the portable runtime once, builds the actual
+standalone web server, generates icons, and then invokes Tauri with its duplicate
+preparation hook disabled. On Linux the build wrapper exposes the portable Python
+distribution's private library directory to `linuxdeploy`; this resolves the bundled
+Tcl/Tk libraries without deleting Python modules or relying on the builder's Python.
+The installer payload is subsequently tested without this build-time environment.
+Direct Tauri invocation retains its preparation hook, but use the npm commands above
+for complete native installer packaging. Node archives are
 checked against the official published SHA-256 list. Python installs are hash-checked
 against the committed lock. Runtime resources contain the product license and lock
 file. Build output lives in ignored `runtime/`, `.runtime-build-*` and
@@ -127,6 +134,7 @@ to the source checkout and `.venv`; it must never be included in a release bundl
 
 ```bash
 python scripts/release_version.py
+node --test desktop/tests/build.test.mjs
 python -m unittest discover -s desktop/tests -v
 npm run typecheck --workspace @nerya/dashboard
 npm run check:i18n --workspace @nerya/dashboard
