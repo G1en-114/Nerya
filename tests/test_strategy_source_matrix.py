@@ -1,4 +1,3 @@
-from copy import deepcopy
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 import pytest

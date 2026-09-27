@@ -207,7 +207,9 @@ def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> N
     assert "proposal_paths" in draft_desc
     assert "next_steps" in draft_desc
     assert "return this scaffold result and stop" in draft_desc
-    assert "does NOT enter the pending-review queue and writes NO inline code" in draft_desc
+    assert "does NOT enter the pending-review queue" in draft_desc
+    assert "pass complete main.py, strategy.yml, strategy.md and tests in files" in draft_desc
+    assert "Successful inline validation needs no redundant read/edit/validate calls" in draft_desc
     assert "editing the staged files with read_file + edit_file / write_file" in draft_desc
     assert "run strategy_validate" in draft_desc
     assert "finish with strategy_submit_proposal" in draft_desc

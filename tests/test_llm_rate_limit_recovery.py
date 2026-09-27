@@ -183,6 +183,28 @@ def test_late_rate_limit_after_tool_is_not_a_fake_success(monkeypatch, elapsed):
     assert len(transport.requests) == 2
 
 
+def test_operator_cancel_wins_over_a_late_http_failure(monkeypatch):
+    now = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    token = CancelToken()
+    transport = Transport([200, 429], tool_first=True)
+    post = transport.post_json_with_headers
+
+    def cancelled_post(*args, **kwargs):
+        if transport.requests:
+            now[0] += 121
+            token.cancel("operator stopped")
+        return post(*args, **kwargs)
+
+    transport.post_json_with_headers = cancelled_post
+    result = make_loop(transport, max_wall_seconds=120).run(
+        system="s", user_message="read status then summarise", cancel_token=token,
+    )
+    assert result.stop_reason == "cancelled"
+    assert result.tool_calls == 1
+    assert len(transport.requests) == 2
+
+
 def test_cancel_during_backoff_sends_no_more_requests():
     token = CancelToken()
     waits = []

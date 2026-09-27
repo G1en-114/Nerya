@@ -26,13 +26,15 @@ def config(tmp_path, monkeypatch):
 
 def test_management_and_runtime_share_groups_and_exact_methods(config):
     registry = SkillRegistry.load_builtin()
-    assert len(registry.list()) == 96
+    # New playbooks may be added without changing the presentation contract.
+    assert {"adapter", "strategy_author", "research", "backtest"} <= set(registry.by_id)
     all_rows = management.catalog(config, limit=200)["skills"]
     assert {row["id"] for row in all_rows} == set(registry.by_id)
-    for group, count in (("core", 13), ("professional", 7)):
+    for group in ("core", "professional"):
         result = management.catalog(config, view=group)
         expected = {e.manifest.id for e in registry.catalog() if catalog_group(e.manifest.metadata) == group}
-        assert result["total"] == count
+        assert result["total"] == len(expected)
+        assert expected
         assert {row["id"] for row in result["skills"]} == expected
         for root in result["skills"]:
             children = management.catalog(config, parent=root["id"], limit=200)["skills"]

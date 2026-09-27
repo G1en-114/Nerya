@@ -8,10 +8,10 @@ import math
 import time
 
 from ..connectors.provider_spec import get_registry
-from ..core.errors import SecretAccessDenied, SecretNotFoundError, TradingError
+from ..core.errors import SecretAccessDenied, SecretNotFoundError
 from ..security.credential_probe import credential_probe
 from ..security.secrets import SecretVault
-from ..trading import accounts, account_intake, account_snapshots
+from ..trading import accounts, account_snapshots
 from ..trading.locks import trading_lock
 
 

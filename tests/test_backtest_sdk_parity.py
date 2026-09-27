@@ -1,5 +1,4 @@
 """Isolated SDK replay regressions; fixture prices are not market evidence."""
-from pathlib import Path
 
 import pytest
 

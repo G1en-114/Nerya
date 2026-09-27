@@ -12,16 +12,20 @@ pytestmark = pytest.mark.smoke
 def test_builtin_script_runs_as_module_and_custom_script_stays_file(tmp_path, monkeypatch):
     package = Path(skill.__file__).resolve().parents[2]
     builtin = package / 'skills/builtin/markets/scripts/get_candles.py'
+    custom_root = tmp_path / 'skills/custom'
+    (custom_root / 'scripts').mkdir(parents=True)
+    (custom_root / 'SKILL.md').write_text('---\nname: custom\ndescription: Script execution fixture\n---\n')
+    custom = custom_root / 'scripts/custom.py'
+    custom.write_text('print(1)\n')
+    index = skill.SkillIndex([package / 'skills/builtin', tmp_path / 'skills'])
     commands = []
     monkeypatch.setattr(skill, 'sandbox_exec', lambda cmd, **kw: commands.append(cmd) or SimpleNamespace(returncode=0, stdout='{}', stderr=''))
-    monkeypatch.setattr(skill, '_script_path', lambda *a: builtin)
-    result = skill.script_run_handler(ToolCall(name='script_run', arguments={'skill_id':'markets','name':'get_candles.py','args':['--limit','2']}), skill_index=None, cwd=tmp_path)
+    assert builtin.exists()
+    result = skill.script_run_handler(ToolCall(name='script_run', arguments={'skill_id':'markets','name':'get_candles.py','args':['--limit','2']}), skill_index=index, cwd=tmp_path)
     assert not result.is_error
     assert commands[-1][1:] == ['-m','nerya.skills.builtin.markets.scripts.get_candles','--limit','2']
-    custom = tmp_path / 'custom.py'
-    custom.write_text('print(1)\n')
-    monkeypatch.setattr(skill, '_script_path', lambda *a: custom)
-    skill.script_run_handler(ToolCall(name='script_run', arguments={'skill_id':'custom','name':'custom.py'}), skill_index=None, cwd=tmp_path)
+    result = skill.script_run_handler(ToolCall(name='script_run', arguments={'skill_id':'custom','name':'custom.py'}), skill_index=index, cwd=tmp_path)
+    assert not result.is_error
     assert commands[-1][1:] == [str(custom)]
 
 

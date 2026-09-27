@@ -2,6 +2,8 @@
 import shlex
 import sys
 import threading
+import os
+from pathlib import Path
 from copy import deepcopy
 
 import httpx
@@ -101,7 +103,7 @@ def test_openai_tunnel_uses_stdio_without_public_oauth_origin(tmp_path, monkeypa
     assert key not in " ".join(command)
     assert kwargs["env"]["CONTROL_PLANE_API_KEY"] == key
     assert kwargs["env"]["CONTROL_PLANE_TUNNEL_ID"] == "tunnel_test12345678"
-    assert kwargs["env"]["PYTHONPATH"].endswith("/agent") or kwargs["env"]["PYTHONPATH"].endswith("\\agent")
+    assert str(Path(openai_tunnel.__file__).resolve().parents[2]) in kwargs["env"]["PYTHONPATH"].split(os.pathsep)
     assert "MCP_OAUTH_TRUSTED_ORIGINS" not in kwargs["env"]
     assert not any("AUTHORIZATION" in k or "ADMIN" in k for k in kwargs["env"])
     assert openai_tunnel.start(cfg)["running"] and len(calls) == 1

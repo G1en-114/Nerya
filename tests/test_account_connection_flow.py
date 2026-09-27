@@ -6,7 +6,7 @@ import json
 import pytest
 
 from nerya.api import routes_accounts
-from nerya.api.account_connection import connect, test_connection as check_connection
+from nerya.api.account_connection import connect
 from nerya.connectors.registry import _resolve_cex_creds, _resolve_ref
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.security.credential_probe import credential_probe
@@ -113,7 +113,7 @@ def test_retry_is_idempotent_and_new_create_cannot_overwrite(client, payload, mo
 
 def test_edit_preserves_hidden_configuration_and_security_policy(client, payload, monkeypatch):
     install_probe(monkeypatch)
-    first = connect(client, payload)
+    connect(client, payload)
     row = accounts.get_account_profile(client.config.paths, payload["id"]).raw
     row.update(status="quarantined", limits={"max_leverage": 3, "max_order_notional_usd": 0},
                provider_config={"options": {"defaultType": "swap"}, "headers": {"X-Example": "vault://header"}})

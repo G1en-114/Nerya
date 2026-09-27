@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-import json
 import threading
 import time
 

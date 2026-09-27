@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from skill_fixtures import EmptySkillKernel
 
 from nerya.api import routes_evolution
 from nerya.core import jsonl
@@ -411,7 +412,7 @@ def test_strategy_tuning_proposal_writes_after_files(tmp_path):
 
     proposal = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     )._create_tuning_proposal(
         pkg=pkg,
         run_id="tune_test",
@@ -547,7 +548,7 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
     )
     envelope = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     )._dispatch_tuner(
         pkg=pkg,
         snapshot=snapshot,
@@ -683,7 +684,7 @@ def test_strategy_tuner_payload_uses_market_regime_selection_signals(tmp_path, m
     )
     envelope = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     )._dispatch_tuner(
         pkg=pkg,
         snapshot=snapshot,
@@ -989,7 +990,7 @@ def test_strategy_tuning_selects_best_multi_candidate_and_persists_optimizer_rep
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1130,7 +1131,7 @@ def test_strategy_tuning_candidate_validation_preview_penalizes_static_failures(
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1242,7 +1243,7 @@ def test_strategy_tuning_candidate_backtest_preview_penalizes_failed_replay(
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1378,7 +1379,7 @@ def test_strategy_tuning_candidate_backtest_preview_ignores_unfrozen_workspace_b
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1521,7 +1522,7 @@ def test_strategy_tuning_candidate_scoring_ignores_unfrozen_outcome_feedback(
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1678,7 +1679,7 @@ def test_strategy_tuning_candidate_scoring_ignores_unfrozen_operator_decisions(
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1761,7 +1762,7 @@ def test_promoted_negative_candidate_decision_does_not_enter_live_tuning(
 
     result = StrategyEvolutionRunner(
         config=config,
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
@@ -1988,13 +1989,6 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
     )
     assert recorded["ok"] is True
 
-    class FakeRegistry:
-        def list(self):  # noqa: ANN201
-            return []
-
-    class FakeSkills:
-        registry = FakeRegistry()
-
     class FakeLLM:
         def call_messages(self, **kwargs):
             from nerya.llm.messages import MessagesResponse
@@ -2023,7 +2017,7 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
 
     monkeypatch.setattr("nerya.subagents.dispatcher.SubAgentRuntime.run", fake_runtime)
 
-    result = StrategyEvolutionRunner(config=config, skills=FakeSkills()).run_once(
+    result = StrategyEvolutionRunner(config=config, skills=EmptySkillKernel()).run_once(
         "alpha",
         operator="test",
         note="audit test",

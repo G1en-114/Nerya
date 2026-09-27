@@ -71,6 +71,10 @@ def test_http_initialize_discover_and_call_share_exact_schema(http_client):
     schema["required"].remove("remote_session_id")
     schema["properties"].pop("activity")
     schema["properties"].pop("purpose")
+    acknowledgements = schema["properties"].pop("acknowledge_requests")
+    assert acknowledgements["type"] == "array"
+    assert acknowledgements["items"]["pattern"] == "^opmsg_[0-9a-f]{64}$"
+    assert "acknowledge_requests" not in schema["required"]
     assert schema == catalog.describe("echo")["inputSchema"]
     assert any(t["name"] == "nerya_session" for t in listed.json()["result"]["tools"])
     sid = open_session(client)

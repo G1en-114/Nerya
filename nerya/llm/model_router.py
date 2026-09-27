@@ -175,7 +175,7 @@ class ModelRouter:
         # Reasoning controls. Operator-facing levels normalise via the
         # catalogue (none / minimal / low / medium / high / extra_high)
         # to the wire-format each adapter expects.
-        reasoning_effort = _normalise_reasoning_effort(cfg.get("reasoning_effort"))
+        _normalise_reasoning_effort(cfg.get("reasoning_effort"))
         reasoning_summary = str(cfg.get("reasoning_summary") or "").strip().lower()
 
         routes = expand_tier_route_cfgs(

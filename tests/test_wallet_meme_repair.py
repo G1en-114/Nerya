@@ -10,12 +10,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tests'))
-import nerya.agent
 from nerya.wallet import swap_approval
 from nerya.wallet.providers.byreal import ByrealWallet
 from nerya.wallet.providers.okx_os import OkxOsWallet
 from nerya.wallet.providers.self_custody import SelfCustodyWallet
-from nerya.wallet.protocol import WalletQuote, WalletSwapResult
+from nerya.wallet.protocol import WalletSwapResult
 from nerya.data_api.types import DataApiContext
 from test_wallet_swap_approval import _config, FakeProvider, _payload
 
@@ -64,7 +63,7 @@ def test_approval_freezes_wallet_configuration(tmp_path,monkeypatch):
     monkeypatch.setattr(swap_approval,'build_provider',build)
     request,quote=swap_approval.prepare_swap(cfg,_payload())
     cfg.data['wallet']['byreal']['keypair_path']='fixture-b.json'
-    result=swap_approval.execute_frozen_swap(cfg,request=request,approved_quote=quote,approval_id_value='fixture')
+    swap_approval.execute_frozen_swap(cfg,request=request,approved_quote=quote,approval_id_value='fixture')
     print('wallet_config_before_after',chosen,'swaps',len(provider.swap_calls))
     assert not provider.swap_calls, 'changed wallet should require a fresh approval'
 

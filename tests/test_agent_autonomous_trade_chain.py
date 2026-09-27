@@ -115,6 +115,6 @@ def test_root_configuration_does_not_use_removed_harness_alias(tmp_path):
         "native": {"max_iterations": 7, "max_total_tool_calls": 0},
     }})
     policy = _loop_config_from_config(config, turn_id="real-turn", reasoning_effort="high")
-    assert policy.max_iterations == 7 and policy.tool_call_limit == 0
+    assert policy.max_iterations == 7 and policy.tool_call_limit is None
     assert policy.max_wall_seconds is None
     assert policy.turn_id == "real-turn" and policy.reasoning_effort == "high"

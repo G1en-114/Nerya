@@ -17,7 +17,6 @@ from typing import Callable
 from urllib.parse import urlencode
 
 from ..core.config import Config
-from ..db.sqlite import connect
 from ..harness.cancellation import signal_cancel, signal_steer
 from .command_store import CommandError, CommandStore, command_id, encode, input_context, validate_command_request
 from .history_mutations import _session_id

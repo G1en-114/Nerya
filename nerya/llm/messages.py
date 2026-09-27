@@ -76,7 +76,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from ..agent.prompt_sections import CACHE_BOUNDARY_MARKER
 from ..core.errors import LLMError
-from ..harness.cancellation import raise_if_cancelled
+from ..harness.cancellation import CancelledError, is_cancelled, raise_if_cancelled
 from .adapters._base import (
     Transport,
     UrllibTransport,
@@ -1372,13 +1372,24 @@ class OpenAIMessagesBackend:
                     exc.stream_interrupted = True
                     exc.retryable = False
                     raise
-            with io_control(request.cancel_token, request.deadline):
-                return _post_with_retry(
-                    self.transport, url, headers=headers, body=body,
-                    timeout=self.timeout, provider_name=self.provider_name, api_key=self.api_key,
-                    max_attempts=max_attempts if max_attempts is not None else max(1, int(self.max_attempts or 1)),
-                    deadline=request.deadline,
-                )
+            result = None
+            try:
+                with io_control(request.cancel_token, request.deadline):
+                    result = _post_with_retry(
+                        self.transport, url, headers=headers, body=body,
+                        timeout=self.timeout, provider_name=self.provider_name, api_key=self.api_key,
+                        max_attempts=max_attempts if max_attempts is not None else max(1, int(self.max_attempts or 1)),
+                        deadline=request.deadline,
+                    )
+            except CancelledError:
+                # A completed HTTP failure is stronger evidence than a deadline
+                # noticed while leaving the I/O scope. Preserve its status and
+                # Retry-After for the caller; operator cancellation still wins.
+                if result is not None and result[0] >= 400 and not is_cancelled(request.cancel_token):
+                    raise _make_llm_error(provider=self.provider_name, status=result[0],
+                                          doc=result[1], resp_headers=result[2]) from None
+                raise
+            return result
 
         status, doc, resp_headers = post()
         # Only the observed gpt-5.5 chat-completions rejection justifies

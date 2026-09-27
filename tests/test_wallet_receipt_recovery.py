@@ -1,11 +1,7 @@
-from contextlib import closing
-import json
-import time
 import socket
 from types import SimpleNamespace
 import pytest
 from nerya.wallet import swap_approval,execution_state
-from nerya.wallet.protocol import WalletSwapResult
 from test_wallet_swap_approval import _config,_payload,FakeProvider
 
 pytestmark=pytest.mark.smoke

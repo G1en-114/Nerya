@@ -10,7 +10,7 @@ import pytest
 from nerya.core import yaml_io
 from nerya.data.history_store import HistoryStore
 from nerya.skills.builtin.backtest.scripts.backtest_run import run_strategy_backtest
-from nerya.skills.builtin.backtest.scripts.config import BacktestConfig, BacktestConfigError
+from nerya.skills.builtin.backtest.scripts.config import BacktestConfig
 from nerya.skills.builtin.backtest.scripts.preflight import BacktestPreflightError
 
 pytestmark = pytest.mark.smoke

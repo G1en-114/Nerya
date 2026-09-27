@@ -224,6 +224,8 @@ to describe actual configuration; `execute` is the stable step ID, not a number)
 - Advanced verification: `references/verification.md`; data-only/offline requests:
   `Skill(skill="backtest", file="references/history-data.md")`.
 - Other edge cases: `references/authoring-contract.md`. It is not a mandatory read.
+- Requested research charts (not duplicate backtest cards):
+  `Skill(skill="research", file="references/visual-deliverables.md")`.
 
 An observer declares `evaluation.mode:observation`, real input sources and
 `policy.allow_direct_order:false`. `allowed_tools:[]` means no tools, not market-only

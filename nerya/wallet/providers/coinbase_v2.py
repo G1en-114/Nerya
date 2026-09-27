@@ -3,7 +3,7 @@ import asyncio
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from ..errors import WalletPolicyDenied,WalletDependencyError,WalletQuoteError,WalletTransportError
-from ..protocol import WalletQuote,WalletSwapResult
+from ..protocol import WalletQuote
 from ..amounts import to_base_units,to_base_units_ceil
 
 

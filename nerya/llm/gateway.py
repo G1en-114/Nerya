@@ -18,7 +18,7 @@ from typing import Any
 from ..core import jsonl
 from ..core.config import Config
 from ..core.errors import LLMError
-from ..harness.cancellation import CancelledError, raise_if_cancelled
+from ..harness.cancellation import CancelledError
 from ..core.errors import PromptInjectionDetected
 from ..core.redaction import redact_display_dict
 from ..core.time import now_iso

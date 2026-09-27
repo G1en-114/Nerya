@@ -868,10 +868,10 @@ class CcxtConnector(CEXConnectorBase):
                 params["positionIdx"] = int(position_idx)
         # CCXT's *Price scalars describe standalone closing triggers, not
         # brackets attached to an entry (Bybit even switches endpoints).
-        for field, level in (("stopLoss", stop_loss), ("takeProfit", take_profit)):
-            leg = "stop_loss" if field == "stopLoss" else "take_profit"
+        for protection_field, level in (("stopLoss", stop_loss), ("takeProfit", take_profit)):
+            leg = "stop_loss" if protection_field == "stopLoss" else "take_profit"
             if level is not None and routes.get(leg) == "attached":
-                params[field] = {"triggerPrice": self._price_param(sym, float(level))}
+                params[protection_field] = {"triggerPrice": self._price_param(sym, float(level))}
         if is_deriv and self.exchange_id == "bybit" and (stop_loss is not None or take_profit is not None):
             # Full mode changes the whole symbol position, including other
             # strategies. Partial brackets cover only this entry's filled qty.

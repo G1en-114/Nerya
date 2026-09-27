@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import pytest
 import ccxt
-import nerya.agent
 from nerya.connectors.ccxt_adapter import CcxtConnector
 from nerya.connectors.cex_base import CEXCredentials
 from nerya.sdk.trading_api import TradingAPI
@@ -324,7 +323,7 @@ def test_replacing_protection_does_not_execute_old_or_other_strategy_rule(tmp_pa
     def attach(strategy, stop):
         return api.attach_protection(strategy_id=strategy,account_id='paper_main',position_id=pos.position_id,market=pos.market,side='long',stop_loss={'type':'price','value':stop})
     old=attach('s1',95)
-    other=attach('s2',98)
+    attach('s2',98)
     new=attach('s1',85)
     store=ProtectionStore(cfg.paths)
     assert store.get(old['protection_id']).status == 'released'
@@ -390,7 +389,7 @@ def test_agent_close_executes_against_own_share(tmp_path, monkeypatch, side, clo
 
 def test_background_partial_fill_arms_one_protection_after_restart(tmp_path, monkeypatch):
     from test_round2_trading_fixes import _config as live_config, _account, _VenueStub, _FakeRegistry, _make_partial_ack, _candidate
-    from nerya.trading.order_intents import OrderCandidate, ProtectionRule, StopLossSpec
+    from nerya.trading.order_intents import ProtectionRule, StopLossSpec
     from nerya.trading.order_polling import poll_active_live_orders
     cfg=live_config(tmp_path,accounts=[_account('live_main','live')])
     monkeypatch.setenv('NERYA_VAULT_PASSPHRASE','audit-placeholder-passphrase')

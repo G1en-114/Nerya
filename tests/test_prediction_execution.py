@@ -133,7 +133,8 @@ def test_submission_timeout_persists_hash_and_never_reposts(monkeypatch,tmp_path
 
 
 @pytest.mark.parametrize('entry',['agent','script','sdk'])
-def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,monkeypatch,entry):
+@pytest.mark.parametrize('subscriber_registered', [False, True])
+def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,monkeypatch,entry,subscriber_registered):
     from copy import deepcopy
     from contextlib import closing
     from nerya.core.config import Config,DEFAULT_CONFIG
@@ -145,8 +146,12 @@ def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,mon
     from nerya.trading.position_book import PositionBook
     from nerya.trading.order_tracker import OrderTracker
     from nerya.trading.order_polling import poll_active_live_orders
+    from nerya.trading import approval_resume
     from test_wallet_swap_approval import _approve
     import time
+    # A subscriber in another workspace (or one stopped earlier) must not make
+    # this callback silently skip the durable execution dispatch.
+    monkeypatch.setattr(approval_resume, '_resume_subscriber_registered', subscriber_registered)
     data=deepcopy(DEFAULT_CONFIG);data['runtime']['live_trading_enabled']=True;data['runtime']['mock_mode']=False
     cfg=Config(paths=WorkspacePaths(tmp_path),data=data);yaml_io.dump(tmp_path/'nerya.yml',data)
     market='POLYMARKET:'+TOKEN_ID
@@ -179,7 +184,8 @@ def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,mon
         response=TradingAPI(config=cfg,skills=None).open_position(strategy_id='s',account_id='pm',market=market,
             side='long',sizing={'method':'fixed_usd','fixed_usd':5},entry={'order_type':'limit','limit_price':.5},confidence=1,market_snapshot=snapshot)
     assert response['status']=='pending_approval',response
-    _approve(cfg,response['approval_id'])
+    approved = _approve(cfg,response['approval_id'])
+    assert approved.get('resume', {}).get('ok'), approved.get('resume', approved)
     poll_active_live_orders(cfg)
     with closing(OrderTracker(cfg.paths)) as tracker:
         orders=tracker.active_orders(account_id='pm')
@@ -187,11 +193,13 @@ def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,mon
     with closing(PositionBook(cfg.paths)) as book:
         share=book.get_share(account_id='pm',strategy_id='s',market=market)
         assert share and share.size_share_base==10 and share.avg_entry_share_price==.48
+    repeated = approval_resume.resume_approved(cfg, response['approval_id'])
+    assert repeated['ok'] and repeated['already_resumed']
     assert len([c for c in calls if c[0]=='post'])==1
 
 
 def test_real_v2_sdk_signs_eip712_and_authenticates_post_without_network(monkeypatch,tmp_path):
-    sdk=pytest.importorskip('py_clob_client_v2')
+    pytest.importorskip('py_clob_client_v2')
     from eth_account import Account
     from eth_account.messages import encode_typed_data
     from py_clob_client_v2.config import get_contract_config
@@ -293,7 +301,6 @@ def test_provider_factory_keeps_api_signer_and_funder_separate(tmp_path,monkeypa
 
 def test_prediction_snapshot_counts_pusd_and_outcome_value(tmp_path,monkeypatch):
     from test_wallet_swap_approval import _config
-    from nerya.trading.accounts import get_account_profile
     from nerya.trading.account_snapshots import capture_snapshot
     from nerya.core import yaml_io
     from nerya.connectors.base import Balance

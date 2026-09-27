@@ -119,7 +119,7 @@ def test_task_groups_and_sequences_survive_restart_and_progress_uses_same_sessio
     first = store.call("inspect", {"remote_session_id": sid, "value": 1,
         "activity": {"intent": "Check continuity", "next": "Read state"}})
     store = make_store(tmp_path)
-    second = store.call("inspect", {"remote_session_id": sid, "value": 2,
+    store.call("inspect", {"remote_session_id": sid, "value": 2,
         "activity": {"intent": "Check continuity", "evidence": "First read succeeded", "next": "Verify again"}})
     progress = store.call("nerya_progress", {"remote_session_id": sid,
         "current": "Verification completed", "status": "completed", "result": ["Two reads in one conversation"]})

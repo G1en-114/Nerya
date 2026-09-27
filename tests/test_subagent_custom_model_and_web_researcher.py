@@ -580,6 +580,7 @@ def test_research_run_native_child_can_use_lazy_web_search_fetch(
     tmp_path,
 ):
     class _EmptySkillRegistry:
+        catalog_generation = "empty-fixture"
         def list(self):
             return []
 
@@ -667,7 +668,7 @@ def test_research_run_native_child_can_use_lazy_web_search_fetch(
     ])
     paths = WorkspacePaths(tmp_path)
     config = Config(paths=paths, data={})
-    skills = SimpleNamespace(registry=_EmptySkillRegistry())
+    skills = SimpleNamespace(registry=_EmptySkillRegistry(), reload=lambda: None)
     registry = ToolRegistry()
     deps = build_native_tool_deps(
         workspace_root=tmp_path,

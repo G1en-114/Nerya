@@ -706,14 +706,13 @@ def test_final_synthesis_uses_configured_reserve(
 @pytest.mark.parametrize("retry", [False, True])
 def test_required_tool_keeps_canonical_schema_and_short_budget_recovery(monkeypatch, retry):
     from copy import deepcopy
-    from types import SimpleNamespace
-    from nerya.agent import loop as loop_module
+    import time
     from nerya.core.errors import LLMError
 
-    from nerya.tools import orchestrator as orchestrator_module
-    clock = SimpleNamespace(time=lambda: 1_000.0, sleep=lambda _: None)
-    monkeypatch.setattr(loop_module, "time", clock)
-    monkeypatch.setattr(orchestrator_module, "time", clock)
+    # The executor now checks the inherited deadline immediately before effects.
+    # Every layer must see the same clock, not just the loop and orchestrator.
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
     descriptor = _descriptor("alpha", lambda call: _json_result(call, {"ok": True}))
     descriptor.input_schema.update({
         "$defs": {"payload": {"type": "string", "const": "x" * 300}},

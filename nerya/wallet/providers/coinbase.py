@@ -226,7 +226,7 @@ class CoinbaseWallet(WalletProvider):
         """
         if self._v2():
             try:
-                from cdp import CdpClient
+                from cdp import CdpClient  # noqa: F401 -- probe the required SDK symbol, not just its module
                 missing=[]
             except ImportError:missing=['pip:cdp-sdk>=1']
             if not self._have_creds():missing.append('cred:api_key_name/api_private_key')

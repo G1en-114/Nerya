@@ -5,7 +5,6 @@ import hashlib
 import json
 import time
 import sqlite3
-from pathlib import Path
 
 from ..db.sqlite import connect
 from .history_mutations import _session_id, is_session_deleted

@@ -31,7 +31,7 @@ def test_cmd_run_terminates_dashboard_process_group(monkeypatch):
     monkeypatch.setattr(
         core,
         "_client",
-        lambda workspace, profile=None: SimpleNamespace(config=object()),
+        lambda workspace, profile=None: SimpleNamespace(config={}),
     )
     monkeypatch.setattr(
         core,
@@ -54,7 +54,7 @@ def test_cmd_run_terminates_dashboard_process_group(monkeypatch):
     assert ("killpg", 123) in events
 
 
-def test_spawn_dashboard_uses_direct_next_cli(monkeypatch, tmp_path):
+def test_spawn_dashboard_uses_direct_local_server(monkeypatch, tmp_path):
     fake_repo = tmp_path / "repo"
     dashboard = fake_repo / "dashboard"
     next_cli = fake_repo / "node_modules" / "next" / "dist" / "bin" / "next"
@@ -84,6 +84,8 @@ def test_spawn_dashboard_uses_direct_next_cli(monkeypatch, tmp_path):
     process = core._spawn_dashboard(18380, api_host="127.0.0.1", api_port=18317)
 
     assert process is not None
-    assert captured["argv"][-1] == "dev"
+    assert captured["argv"] == ["/opt/homebrew/bin/node", str(dashboard / "scripts/local-server.cjs")]
+    assert captured["kwargs"]["env"]["PORT"] == "18380"
+    assert captured["kwargs"]["env"]["NERYA_API"] == "http://127.0.0.1:18317"
     assert "npm" not in captured["argv"]
     assert captured["kwargs"]["cwd"].endswith("/dashboard")

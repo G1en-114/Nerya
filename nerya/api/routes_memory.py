@@ -87,7 +87,7 @@ def routes():
 
     def memory_capture(client, payload):
         body = payload or {}
-        from ..memory.runtime import MemoryRuntime, MemoryScopeError
+        from ..memory.runtime import MemoryRuntime
 
         scope = str(body.get("scope") or "global").strip().lower()
         strategy_id = str(body.get("strategy_id") or "").strip()
@@ -174,7 +174,7 @@ def routes():
 
     def memory_forget(client, payload):
         body = payload or {}
-        from ..memory.runtime import MemoryRuntime, MemoryScopeError
+        from ..memory.runtime import MemoryRuntime
 
         scope = str(body.get("scope") or "global").strip().lower()
         strategy_id = str(body.get("strategy_id") or "").strip()

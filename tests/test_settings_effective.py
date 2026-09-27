@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from nerya.api import routes_llm
-from nerya.core import yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.llm import ops

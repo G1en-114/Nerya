@@ -1,12 +1,10 @@
 """Cross-provider acceptance at the public wallet interface; no live sends."""
-import json
 import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 import pytest
-from nerya.wallet.protocol import WalletProvider,WalletQuote,WalletSwapResult
+from nerya.wallet.protocol import WalletSwapResult
 from nerya.wallet.errors import WalletPolicyDenied,WalletQuoteError
 from nerya.wallet.registry import build_provider,register_wallet_provider,list_providers
 
@@ -61,7 +59,6 @@ def test_workspace_plugin_registration_isolated_and_disposable(tmp_path):
 
 
 def test_metamask_and_self_custody_share_configurable_v2_route(tmp_path,monkeypatch):
-    from nerya.wallet.providers.evm_v2 import EvmV2Wallet
     from nerya.connectors.bsc_native import BSCNative
     cfg={'signer_ref':'vault://test','rpc_urls':{'base':'http://base'},'dex_routes':{'base':{
         'type':'evm_v2','router':'0x'+'1'*40,'wrapped_native':'0x'+'2'*40,'native_symbol':'ETH'}}}
@@ -123,7 +120,6 @@ def test_coinbase_v2_executes_checked_quote_and_records_hash(tmp_path,monkeypatc
 
 def test_bitget_current_cli_quote_and_confirm_floor(monkeypatch):
     from nerya.wallet.providers.bitget import BitgetWalletSkill
-    from nerya.wallet.providers import bitget_official
     p=BitgetWalletSkill(config={'wallet_address':'owner','token_symbols':{'mint':'MEME'}})
     calls=[]
     def run(args,**kw):
@@ -143,7 +139,7 @@ def test_common_quote_contract_rejects_invalid_amount(bad):
 
 
 def test_bitget_solana_confirm_build_sign_send_and_recover(monkeypatch):
-    import base64,base58
+    import base58
     from nacl.signing import SigningKey
     from nerya.wallet.providers.bitget import BitgetWalletSkill
     from nerya.wallet.providers import bitget_official
@@ -213,7 +209,7 @@ def test_provider_execution_ref_recovers_without_private_methods(tmp_path,monkey
 
 
 def test_adapter_skill_discovery_scripts_and_references(tmp_path):
-    import importlib.util,re
+    import importlib.util
     from nerya.skills.registry import SkillRegistry
     from nerya.workspace.manager import _DEFAULT_ENABLED_SKILLS
     skill=Path(__file__).parents[1]/'nerya/skills/builtin/adapter'

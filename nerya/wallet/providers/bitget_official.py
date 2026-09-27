@@ -1,7 +1,7 @@
 """Current Bitget quote/confirm/make-order protocol with local standard signing."""
 import base64
 from ..errors import WalletPolicyDenied,WalletQuoteError,WalletTransportError
-from ..protocol import WalletQuote,WalletBalance,WalletSwapResult
+from ..protocol import WalletQuote
 from ..adapter_contract import finite
 
 
@@ -58,7 +58,6 @@ def quote(provider,**request):
 
 
 def balance(provider,chain,address,token):
-    from .bitget import _BITGET_CHAINS
     from .self_custody import SelfCustodyWallet
     # Use public RPC for exact balances (batch-v2 shape may vary by asset class).
     result=SelfCustodyWallet(rpc_urls=provider.config.get('rpc_urls') or {}).get_balance(chain=chain,address=address,token=token)

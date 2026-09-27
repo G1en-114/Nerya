@@ -86,7 +86,6 @@ def test_queued_followup_does_not_hide_previous_failure_or_pending_approval():
   assert execution_view(commands,[])['execution']==state
 
 def test_resuming_queue_then_reading_does_not_pause_it_again(tmp_path):
- from nerya.agent.command_store import CommandStore
  rt=runtime(tmp_path);send(rt,'command-first')
  restarted=CommandRuntime(rt.config,lambda *_:{},epoch='new-process')
  snapshot=restarted.store.snapshot('queue-session');assert snapshot['queue']['paused']

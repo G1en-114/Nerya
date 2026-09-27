@@ -18,7 +18,7 @@ from .....evolution.patch_proposal import list_proposals
 from .....strategies.package import StrategyPackage, load_package, load_package_from_dir
 from .config import BacktestConfig, BacktestConfigError, load_config
 from .data_cache import NoHistoricalDataError, _tf_seconds, get_candles
-from .engine import run_backtest
+from .engine import run_backtest as run_backtest
 from .metrics import assemble_metrics
 from .render_chart import render_chart
 from .report import render_report

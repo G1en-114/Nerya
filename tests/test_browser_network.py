@@ -1,5 +1,4 @@
 """Passive capture contracts; actual Chromium is tested by verify_browser_network.py."""
-import json
 import threading
 import time
 from types import SimpleNamespace

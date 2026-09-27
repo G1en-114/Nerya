@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import runpy
 from unittest.mock import patch
-from types import SimpleNamespace
 
 import pytest
 from nerya.core import yaml_io
@@ -141,7 +140,6 @@ def test_dataset_digest_changes_with_values_and_preserves_zero(tmp_path):
 
 
 def test_real_standard_replay_writes_provenance(tmp_path,monkeypatch):
-    from nerya.strategies.package import load_package
     from nerya.skills.builtin.backtest.scripts import backtest_run as replay
     cfg,pkg=seed(tmp_path)
     raw=yaml_io.load(pkg.root/"strategy.yml"); raw["evaluation"]={"mode":"observation"}

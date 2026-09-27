@@ -2,11 +2,12 @@
 name: adapter
 description: "Use to integrate or repair exchange, prediction-market, wallet, DEX and aggregator adapters; inspect capabilities, validate protocol contracts and connect execution to Nerya's risk and approval flows."
 license: MIT
-metadata:
-  version: 0.1.0
+version: 0.1.0
 ---
 
 # Adapter
+
+For the integration checklist, read [references/full-playbook.md](references/full-playbook.md).
 
 Start with connector_list/connector_describe for venues or wallet capability
 discovery for wallets. Choose the relevant branch below; this is one adapter

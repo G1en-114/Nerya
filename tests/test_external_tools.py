@@ -250,10 +250,12 @@ def test_cli_shared_catalog_json_and_profile_without_sdk(tools, monkeypatch, cap
         return tools
     monkeypatch.setattr(NeryaTools, "boot", boot)
     original_import = builtins.__import__
-    def no_mcp(name, *args, **kwargs):
-        if name == "mcp" or name.startswith("mcp."):
+    def no_mcp(name, globals=None, locals=None, fromlist=(), level=0):
+        # Relative imports such as ``from ..mcp.lazy`` are Nerya's own code,
+        # not an import of the optional third-party MCP SDK.
+        if level == 0 and (name == "mcp" or name.startswith("mcp.")):
             raise ImportError("optional SDK intentionally absent")
-        return original_import(name, *args, **kwargs)
+        return original_import(name, globals, locals, fromlist, level)
     monkeypatch.setattr(builtins, "__import__", no_mcp)
     assert main(["tools", "list", "--workspace", "selected", "--profile", "dev"]) == 0
     captured = capsys.readouterr()

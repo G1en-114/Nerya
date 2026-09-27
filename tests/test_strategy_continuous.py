@@ -17,7 +17,7 @@ from websockets.sync.server import serve
 from nerya.core import jsonl, yaml_io
 from nerya.core.errors import TradingError
 from nerya.strategies.agent_task import StrategyAgentTask
-from nerya.strategies.continuous import ContinuousSupervisor, EventLedger, _Service, _write, assert_event_active
+from nerya.strategies.continuous import ContinuousSupervisor, EventLedger, _Service, assert_event_active
 from nerya.strategies.continuous_config import ContinuousConfig
 from nerya.strategies.package import load_package
 from nerya.strategies.runner import StrategyRunner

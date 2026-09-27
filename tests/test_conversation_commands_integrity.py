@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
 import json
 import threading
 import time
@@ -11,7 +10,6 @@ import urllib.request
 import pytest
 
 from nerya.agent.command_runtime import CommandRuntime
-from nerya.agent.command_store import CommandError
 from nerya.agent.history_branch import fork_session
 from nerya.agent.history_mutations import mutate_message, delete_session, HistoryMutationError
 from nerya.agent.reference_preview import reference_preview

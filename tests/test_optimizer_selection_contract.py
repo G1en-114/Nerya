@@ -1,7 +1,7 @@
 """Failed validation and ambiguous identities are not compensable by scores."""
 from __future__ import annotations
 
-from types import SimpleNamespace
+from skill_fixtures import EmptySkillKernel
 
 import pytest
 
@@ -71,7 +71,7 @@ def test_all_failed_candidates_produce_hold_without_strategy_proposal(tmp_path, 
     })
     result = evolution.StrategyEvolutionRunner(
         config=Config(paths=paths, data={"runtime": {"mock_mode": True}}),
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", dry_run=False, operator="test")
     assert result.status == "hold"
     assert result.proposal_id is None

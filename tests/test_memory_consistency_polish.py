@@ -1,6 +1,5 @@
 """R34–36: real route/runtime operations on isolated memory, with no network."""
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
@@ -253,7 +252,6 @@ def test_builtin_provider_cannot_bypass_use_or_version_policy(env):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_kernel_nudge_and_turn_save_follow_explicit_auto_policy(env, monkeypatch, enabled):
     from nerya.agent import kernel as kernel_module
-    from nerya.memory.activity import MemoryActivityLog
     config, _ = env
     config.data.update({"memory": {"auto_save_enabled": enabled, "use_enabled": False},
                         "agent": {"native": {"memory_write_on_turn": not enabled}}})

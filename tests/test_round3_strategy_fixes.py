@@ -117,11 +117,13 @@ def test_mock_trading_base_size_passes_through_and_close_uses_book() -> None:
     assert reduce_env["order"]["filled_size"] == 0
 
 
-def test_mock_trading_legacy_bare_exit_estimates_book_qty() -> None:
+def test_mock_trading_requires_explicit_quantity_or_close_position() -> None:
     state = MockState()
     state.set(f"position:{MARKET}", {"qty": 2.0, "avg_price": 100.0})
     trading = MockTrading([], "s1", state=state, mark_price=105.0)
-    env = trading.submit_intent(market=MARKET, side="sell", size=0, size_unit="usd", order_type="market")
+    with pytest.raises(ValueError, match="finite positive size"):
+        trading.submit_intent(market=MARKET, side="sell", size=0, size_unit="usd", order_type="market")
+    env = trading.close_position(market=MARKET, side="long")
     assert env["execution_estimate"]["size"] == pytest.approx(2.0)
     assert env["order"]["filled_size"] == 0
 

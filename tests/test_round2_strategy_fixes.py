@@ -440,31 +440,33 @@ def test_backtest_mock_timeframe_lookup_is_case_insensitive() -> None:
     ]
     primary = [dict(rows15[0], close=50.0)]
 
-    # Mixed-case request against lowercase-keyed bars serves the real
-    # 15m bars — the old case-exact lookup silently substituted the
+    # Hours are case-insensitive; M is calendar-month, NOT minute.
+    # A mixed-case hour request serves the actual requested bars, not the
     # primary bars instead of raising.
     provided = MockMarket(
         "MOCK:BTCUSDT",
         {"MOCK:BTCUSDT": primary},
-        {"MOCK:BTCUSDT": {"15m": rows15}},
+        {"MOCK:BTCUSDT": {"4h": rows15}},
         primary_timeframe="1h",
     )
-    assert provided.candles("MOCK:BTCUSDT", timeframe="15M", limit=1)[0]["close"] == 101.0
+    assert provided.candles("MOCK:BTCUSDT", timeframe="4H", limit=1)[0]["close"] == 101.0
+    with pytest.raises(BacktestUnsupportedSurfaceError, match="calendar-month"):
+        provided.candles("MOCK:BTCUSDT", timeframe="15M", limit=1)
 
     # And the reverse: uppercase-keyed bars serve a lowercase request.
     upper_keys = MockMarket(
         "MOCK:BTCUSDT",
         {"MOCK:BTCUSDT": primary},
-        {"MOCK:BTCUSDT": {"15M": rows15}},
+        {"MOCK:BTCUSDT": {"4H": rows15}},
         primary_timeframe="1h",
     )
-    assert upper_keys.candles("MOCK:BTCUSDT", timeframe="15m", limit=2)[0]["close"] == 100.0
+    assert upper_keys.candles("MOCK:BTCUSDT", timeframe="4h", limit=2)[0]["close"] == 100.0
 
     # A genuinely missing foreign timeframe still fails loudly (the
     # message quotes the caller's original casing).
     missing = MockMarket("MOCK:BTCUSDT", {"MOCK:BTCUSDT": primary}, {}, primary_timeframe="1h")
-    with pytest.raises(BacktestUnsupportedSurfaceError, match="15M"):
-        missing.candles("MOCK:BTCUSDT", timeframe="15M", limit=2)
+    with pytest.raises(BacktestUnsupportedSurfaceError, match="4H"):
+        missing.candles("MOCK:BTCUSDT", timeframe="4H", limit=2)
 
 
 # ---------------------------------------------------------------------------

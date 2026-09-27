@@ -1,6 +1,5 @@
 """Deterministic regressions. All prices in this file are labelled test fixtures."""
 from pathlib import Path
-from types import SimpleNamespace
 import json
 import runpy
 

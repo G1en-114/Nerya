@@ -10,7 +10,7 @@ import time
 from unittest.mock import patch
 import pytest
 from nerya.core import yaml_io
-from nerya.strategies.context import build_strategy_context, StrategyClock
+from nerya.strategies.context import build_strategy_context
 from nerya.strategies.input_context import collect_task_context
 from nerya.strategies.package import load_package
 from nerya.strategies.validator import validate_proposal_files

@@ -6,7 +6,9 @@ from nerya.mcp.presentation import result_charts
 from nerya.mcp.registry_bridge import _result_as_mcp_dict
 from nerya.mcp.inbound_sessions import InboundTraceExecutor
 from nerya.tools.types import ToolResult
-from test_mcp_inbound_sessions import store, catalog, session, traces
+from test_mcp_inbound_sessions import store as _store, catalog, session, traces
+
+store = _store  # Register the shared pytest fixture.
 
 pytestmark = pytest.mark.smoke
 CHART = {'kind': 'chart', 'chart_id': 'unit-chart', 'chart_kind': 'line', 'title': 'UNIT ONLY',

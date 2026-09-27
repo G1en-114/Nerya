@@ -5,7 +5,7 @@ import inspect
 import json
 from collections import deque
 from dataclasses import replace
-from types import SimpleNamespace
+from skill_fixtures import EmptySkillKernel
 
 import pytest
 
@@ -68,7 +68,7 @@ def runtime(tmp_path, gateway, descriptors=()):
     return SubAgentRuntime(
         config=Config(paths=WorkspacePaths(tmp_path), data={"agent": {"native": {
             "llm_retry_base_delay": 0, "llm_retry_max_delay": 0,
-        }}}), skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        }}}), skills=EmptySkillKernel(),
         llm=gateway, tool_registry=registry, tool_executor=executor,
     )
 

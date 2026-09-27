@@ -618,7 +618,6 @@ class OkxOsWallet(WalletProvider):
             raise WalletPolicyDenied('OKX executable minimum is missing or below the approved floor')
         try:
             if chain in ('sol','solana'):
-                from ...connectors.solana_native import SolanaNative
                 conn = signer._solana_connector(live=True)
                 import base58,base64
                 # OKX's Solana swap contract returns tx.data in base58.

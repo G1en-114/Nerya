@@ -207,7 +207,6 @@ class PolymarketConnector(CEXConnectorBase):
         rows = doc.get("history") if isinstance(doc, dict) else doc
         if not isinstance(rows, list):
             return []
-        candles: list[list[Any]] = []
         samples={}
         for row in rows:
             ts_ms = int(row.get("t") or row.get("timestamp") or 0)

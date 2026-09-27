@@ -10,7 +10,7 @@ from nerya.core import yaml_io
 from nerya.core.paths import WorkspacePaths
 from nerya.evolution.patch_proposal import list_proposals
 from nerya.evolution.strategy_code_generator import StrategyCodeGenerator, StrategyGenerationRequest
-from nerya.strategies.workflow_graph import WorkflowError, build_workflows, package_revision
+from nerya.strategies.workflow_graph import WorkflowError, build_workflows
 from nerya.strategies.workflow_service import propose_workflow, source_files, view_workflow, workflow_index
 from nerya.strategies.workflow_templates import TEMPLATES, create_workflow_template
 from nerya.strategies.validator import validate_proposal_files

@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from types import SimpleNamespace
+from skill_fixtures import EmptySkillKernel
 import threading
 
 import pytest
@@ -40,7 +41,7 @@ def scope(tmp_path, monkeypatch):
         descriptor("other_read", handler=handler, read_only=True),
         descriptor("write_probe", handler=handler, risk=RiskLevel.WRITE, read_only=False),
     ])
-    skills = SimpleNamespace(registry=SimpleNamespace(list=lambda: []))
+    skills = EmptySkillKernel()
     deps = SimpleNamespace()
     monkeypatch.setattr("nerya.tools.native.bootstrap.build_native_tool_deps", lambda **_: deps)
     monkeypatch.setattr("nerya.tools.native.bootstrap.register_native_tools",

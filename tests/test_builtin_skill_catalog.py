@@ -45,7 +45,11 @@ def test_builtin_skill_md_files_parse_and_stay_compact() -> None:
         assert manifest.description
 
         line_count = len(md.read_text(encoding="utf-8").splitlines())
-        assert line_count <= 80, f"{skill_dir.name} SKILL.md is too large: {line_count}"
+        # Entry playbooks now include finite SDK call shapes to avoid repeated
+        # introspection during authoring. They are lazy-loaded, not injected
+        # into every prompt. Bound selected playbooks separately from metadata.
+        assert line_count <= 500, f"{skill_dir.name} SKILL.md is too large: {line_count}"
+        assert len(manifest.description) <= 1024
         # A nested sub-skill (hub/<expert>/SKILL.md) shares its hub's
         # expanded playbook instead of shipping its own copy.
         has_playbook = (
@@ -60,6 +64,18 @@ def test_builtin_skill_md_files_parse_and_stay_compact() -> None:
         )
         if references and not has_playbook:
             for reference in references:
+                target = (skill_dir / reference).resolve()
+                assert target.is_relative_to(skill_dir.resolve())
+                assert target.is_file(), reference
+            has_playbook = True
+        # Specialized skills can name their actual contract directly instead
+        # of duplicating it into an arbitrarily named full-playbook.md.
+        leaf_references = re.findall(
+            r"(?:`|\]\()(references/[^`\s)]+\.md)(?:`|\))",
+            md.read_text(encoding="utf-8"),
+        )
+        if leaf_references and not has_playbook:
+            for reference in leaf_references:
                 target = (skill_dir / reference).resolve()
                 assert target.is_relative_to(skill_dir.resolve())
                 assert target.is_file(), reference
@@ -81,11 +97,24 @@ def test_builtin_skill_frontmatter_has_no_routing_extensions() -> None:
         assert set(metadata) <= {"nerya"}, md
         grouping = metadata.get("nerya", {})
         assert isinstance(grouping, dict), md
-        assert set(grouping) <= {"catalog_parent"}, md
-        if grouping:
+        assert set(grouping) <= {"catalog_parent", "catalog_group"}, md
+        if "catalog_group" in grouping:
+            assert grouping["catalog_group"] in {"core", "professional"}, md
+        if "catalog_parent" in grouping:
             parent = grouping["catalog_parent"]
             assert isinstance(parent, str) and parent.strip(), md
             assert parent != doc["name"], md
+
+
+def test_skill_discovery_never_inlines_selected_playbook_bodies() -> None:
+    from nerya.tools.native.skill import SkillIndex
+
+    index = SkillIndex([BUILTIN_ROOT])
+    prompt = index.render_for_prompt()
+    for entry in SkillRegistry.load_builtin().catalog():
+        assert entry.manifest.id in prompt
+        # Full instructions, code examples and reference bodies must stay lazy.
+        assert entry.manifest.instructions.strip() not in prompt
 
 
 def test_builtin_skill_tree_has_no_legacy_definition_surfaces() -> None:

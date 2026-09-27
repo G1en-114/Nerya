@@ -181,11 +181,16 @@ def test_position_reversal_uses_the_new_fill_cost_basis():
 
 
 def test_repair_prefix_does_not_make_an_old_report_the_latest(tmp_path):
+    import os
     from nerya.strategies.verification import _read_report
-    for name in ("repair_20260101_000000", "20260927_000000", "run-1_20260927_000000"):
+    for index, name in enumerate(("repair_20260101_000000", "20260927_000000", "run-1_20260927_000000")):
         folder = tmp_path / "backtests" / name
         folder.mkdir(parents=True)
         (folder / "metrics.json").write_text(json.dumps({"verdict":"FAIL"}))
+        # Filesystems can give consecutive writes identical mtimes. Specify
+        # distinct publication times rather than depending on machine speed.
+        modified = 1_790_000_000 + index
+        os.utime(folder, (modified, modified))
     report, warnings = _read_report(tmp_path)
     assert report["id"] == "run-1_20260927_000000"
     assert not warnings

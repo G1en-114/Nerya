@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import time
-from pathlib import Path
 
 from ..agent.command_store import CommandError
 from ..agent.history_mutations import HistoryMutationError

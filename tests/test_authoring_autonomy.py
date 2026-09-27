@@ -1,6 +1,5 @@
 """Budgets, permission boundaries and generic observation replay contracts."""
 from copy import deepcopy
-from pathlib import Path
 import pytest
 from nerya.core import yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
@@ -16,10 +15,10 @@ from nerya.skills.builtin.backtest.scripts.backtest_run import _discover_strateg
 
 pytestmark = pytest.mark.smoke
 
-def test_api_defaults_match_chat_and_allow_bounded_authoring(tmp_path):
+def test_api_defaults_match_chat_without_inventing_operator_budgets(tmp_path):
     cfg = Config(paths=WorkspacePaths(tmp_path), data=deepcopy(DEFAULT_CONFIG))
     loop = LoopConfig.from_config(cfg)
-    assert (loop.max_iterations, loop.max_total_tool_calls, loop.max_wall_seconds) == (120, 400, 1800)
+    assert (loop.max_iterations, loop.max_total_tool_calls, loop.max_wall_seconds) == (0, None, None)
     assert loop.max_tokens == 16384
     assert loop.wall_time_final_synthesis_seconds == 30
     assert loop.action_tool_wall_reserve_seconds == 15
@@ -32,7 +31,7 @@ def test_explicit_lower_operator_budgets_are_not_overridden(tmp_path):
     limited = _with_turn_limit_overrides(cfg, {'max_iterations': 5, 'max_total_tool_calls': 8, 'max_wall_seconds': 90})
     loop = LoopConfig.from_config(limited)
     assert (loop.max_iterations, loop.max_total_tool_calls, loop.max_wall_seconds) == (5, 8, 90)
-    assert cfg.get('agent.native.max_total_tool_calls') == 400
+    assert cfg.get('agent.native.max_total_tool_calls') == 0
 
 @pytest.mark.parametrize('risk,expected', [(RiskLevel.READ,'allow'), (RiskLevel.WRITE,'allow'), (RiskLevel.EXEC,'allow'), (RiskLevel.DANGEROUS,'ask')])
 def test_autonomy_preserves_dangerous_approval(risk, expected):
@@ -68,6 +67,9 @@ def test_typed_manifest_replay_preserves_card_sources(tmp_path):
     from nerya.strategies.package import load_package
     from nerya.skills.builtin.backtest.scripts.engine import _views_from_strategy_config
     raw = manifest('macd_agent')
+    # The generic authoring example need not declare data sources. This test
+    # explicitly exercises extension preservation, independently of its prose.
+    raw['data_sources'] = [{'id': 'bars', 'capability': 'candles', 'timeframe': '15m'}]
     raw['evaluation'] = {'mode':'observation'}
     folder = tmp_path / 'strategies' / raw['strategy_id']
     yaml_io.dump(folder / 'strategy.yml', raw)

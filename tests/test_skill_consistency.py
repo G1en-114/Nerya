@@ -1,5 +1,4 @@
 """R07/R08 offline contracts; all mutable Skill roots live in tmp_path."""
-from pathlib import Path
 
 import pytest
 

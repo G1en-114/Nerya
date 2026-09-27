@@ -12,7 +12,7 @@ from nerya.core.paths import WorkspacePaths
 from nerya.subagents.threads import AgentThreadInbox, AgentThreadStore
 from nerya.subagents.runtime import DEFAULT_CONTEXT_SCOPE
 from nerya.tools.native.agent_collaboration import collaboration_handler
-from nerya.tools.types import ToolCall, ToolResult
+from nerya.tools.types import ToolResult
 from test_subagent_native_runtime import Gateway, call, descriptor, final, run, runtime, spec
 
 pytestmark = pytest.mark.smoke

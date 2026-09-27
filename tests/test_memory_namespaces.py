@@ -88,7 +88,7 @@ def test_upgrade_preserves_lineage_import_refs_and_session_ownership(tmp_path):
             (identity, identity + " content", status))
     con.execute("UPDATE memory_records SET superseded_by='new' WHERE memory_id='old'")
     con.execute("INSERT INTO memory_import_sources VALUES ('alice', 'legacy', 'ref', 'old', 1)")
-    assert apply_migrations(con) == [11]
+    assert apply_migrations(con) == [migration.version for migration in MIGRATIONS[10:]]
     assert apply_migrations(con) == []
     assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     assert con.execute("SELECT superseded_by FROM memory_records WHERE memory_id='old'").fetchone()[0] == "new"

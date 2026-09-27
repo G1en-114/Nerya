@@ -234,8 +234,6 @@ def test_system_prompt_splits_stable_notebook_from_query_recall(tmp_path) -> Non
     seed = MemoryRuntime(
         cfg,
         actor_id="default",
-        session_id="s1",
-        strategy_id="alpha",
     )
     seed.remember(
         category="notebook_operator",

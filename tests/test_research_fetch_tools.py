@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from skill_fixtures import EmptySkillKernel
 
 import pytest
 
@@ -1028,7 +1029,7 @@ def test_native_registry_exposes_web_research_tools(tmp_path) -> None:
         workspace_root=tmp_path,
         skill_roots=[],
         config=SimpleNamespace(),
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     )
     register_native_tools(registry, deps)
 

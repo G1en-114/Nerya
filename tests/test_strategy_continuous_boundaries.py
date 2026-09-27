@@ -3,7 +3,6 @@ from contextlib import closing
 import hashlib
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 from nerya.core import yaml_io

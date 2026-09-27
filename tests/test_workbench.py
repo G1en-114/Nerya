@@ -10,7 +10,6 @@ from nerya.agent.workbench import execution_view, session_view, filter_sessions
 from nerya.agent.interactions import create_interaction, validate_payload
 from nerya.agent.command_store import CommandError
 from nerya.db.sqlite import connect
-from nerya.db.repositories import AgentSessionRepository
 
 
 def config(tmp_path):
@@ -31,7 +30,7 @@ def test_projection_retains_unknown_execution_and_search_escapes(tmp_path):
     from nerya.agent.command_runtime import CommandRuntime
     cfg=config(tmp_path); runtime=CommandRuntime(cfg,lambda *_:{},epoch="test")
     runtime.submit({"command_id":"command-test","session_id":"session-test","request":{"payload":{"text":"100% coverage"}}},start=False)
-    row=runtime.store.claim("session-test","owner")
+    runtime.store.claim("session-test","owner")
     con=connect(cfg.paths.db)
     con.execute("UPDATE agent_command_queues SET lease_until=0 WHERE session_id='session-test'")
     con.close()
@@ -55,7 +54,7 @@ def test_interaction_validation_and_idempotent_creation(tmp_path):
 def test_plan_ceiling_applies_before_full_access():
     from nerya.tools.permissions import PermissionEngine,PermissionContext,PermissionMode,PermissionRequest
     from nerya.tools.registry import make_native_descriptor
-    from nerya.tools.types import RiskLevel, PermissionScope
+    from nerya.tools.types import RiskLevel
     engine=PermissionEngine(); context=PermissionContext(mode=PermissionMode.YOLO,plan_only=True)
     descriptor=make_native_descriptor(name="write",description="write",input_schema={},handler=lambda c:None,risk=RiskLevel.WRITE,read_only=False)
     request=PermissionRequest(descriptor=descriptor,payload={})
@@ -98,7 +97,7 @@ def test_pending_interaction_rejects_direct_command_and_history_edit(tmp_path):
     original={"command_id":"command-before-question","session_id":"session-test","request":{"payload":{"text":"Question"}}}
     runtime.submit(original,start=False)
     row=runtime.store.claim("session-test","owner")
-    item=create_interaction(cfg,sid="session-test",tid=row["turn_id"],call_id="question",kind="question",payload={"title":"Continue?"})
+    create_interaction(cfg,sid="session-test",tid=row["turn_id"],call_id="question",kind="question",payload={"title":"Continue?"})
     runtime.store.finish(row["command_id"],"session-test","owner","awaiting_input",{})
     with pytest.raises(CommandError,match="interaction_response_required"):
         runtime.submit({**original,"command_id":"command-bypass"},start=False)

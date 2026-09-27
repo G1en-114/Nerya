@@ -6,7 +6,9 @@ import pytest
 
 from nerya.integrations import managed_browser as browser
 from nerya.integrations.browser_native import channel, destination, launch_options
-from test_managed_browser import FakeDriver, running_worker  # noqa: F401
+from test_managed_browser import FakeDriver, running_worker as _running_worker
+
+running_worker = _running_worker  # Register the shared pytest fixture.
 
 pytestmark = pytest.mark.smoke
 

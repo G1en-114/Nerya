@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 import pytest
 from nerya.strategies.signal_runner import run_signal_strategy
 from nerya.strategies.indicators import alphatrend

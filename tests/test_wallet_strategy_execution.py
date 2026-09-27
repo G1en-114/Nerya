@@ -3,7 +3,6 @@ from copy import deepcopy
 from contextlib import closing
 import time
 import socket
-from types import SimpleNamespace
 import pytest
 from nerya.core import yaml_io
 from nerya.core.config import Config,DEFAULT_CONFIG
@@ -67,7 +66,7 @@ def test_live_wallet_strategy_approval_executes_and_books_once(tmp_path,monkeypa
     with closing(PositionBook(cfg.paths)) as book:
         share=book.get_share(account_id='meme',strategy_id='s1',market=market)
         assert share.size_share_base==50
-    repeat=swap_approval.resume_approved(cfg,out['approval_id'])
+    swap_approval.resume_approved(cfg,out['approval_id'])
     assert len(calls)==1
     close=TradePlan(strategy_id='s1',account_id='meme',market=market,action='close_position',side='long',
         sizing=SizingPolicy(method='close_all'),confidence=1,source='strategy_runtime')

@@ -897,7 +897,7 @@ def _safe_backtest_dir(strategy_root: Path, ts: str) -> Path:
 def _safe_backtest_dir_for_payload(paths, payload: dict[str, Any]) -> Path:
     sid = str(payload.get("strategy_id") or "").strip()
     ts = str(payload.get("ts") or "").strip()
-    proposal_id = str(payload.get("proposal_id") or "").strip()
+    str(payload.get("proposal_id") or "").strip()
     if not sid or not ts:
         raise TradingError("strategy_id and ts are required")
     return _safe_backtest_dir(_strategy_root_for_backtest_payload(paths, payload), ts)

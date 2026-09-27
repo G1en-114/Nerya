@@ -37,7 +37,7 @@ from .errors import (
     WalletQuoteError,
     WalletTransportError,
 )
-from .registry import build_provider, list_configured_providers
+from .registry import build_provider
 
 log = logging.getLogger(__name__)
 
@@ -564,7 +564,6 @@ def _reconcile_locked(config,execution_id):
 
 
 def reconcile_pending(config: Config) -> int:
-    from . import execution_state
     count=0
     for path in (config.paths.state/'wallet_swaps').glob('*.json'):
         try:

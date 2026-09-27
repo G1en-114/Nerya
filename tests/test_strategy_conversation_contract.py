@@ -41,7 +41,8 @@ def test_workflow_hub_has_no_separate_creation_wizard_or_generator():
     assert "setComposeDraftPayload" not in hub
     assert "workflowApi.template" not in hub
     assert "newPrompt" not in hub and "新建策略" not in hub
-    assert "主 Agent 对话" in hub
+    assert 'href="/chat"' in hub
+    assert 't("copy.components_workflows_StrategyWorkflowHub.036")' in hub
     assert "StrategyWorkflowPanel" in hub
 
 
@@ -51,8 +52,10 @@ def test_workflow_is_not_a_second_creation_or_verification_conversation():
     evidence = (root / "WorkflowVerification.tsx").read_text()
     assert 'workflow-next-step' not in panel
     assert 'verificationPrompt' not in panel
-    assert '验证记录' in panel and 'view === "runs"' in panel
-    assert 'NodeInspector' in panel and 'WorkflowCommand' in panel
+    assert 't("copy.components_workflows_StrategyWorkflowPanel.035")' in panel
+    assert 'view === "runs"' in panel
+    assert 'NodeInspector' in panel and 'data-testid="edit-strategy-chat"' in panel
+    assert 'strategyChatUrl' in panel and 'strategyEditPrompt' in panel
     assert 'onAgent' not in evidence and '让 Agent 继续验证' not in evidence
     assert 'exportVerification' in evidence
 
@@ -73,7 +76,9 @@ def test_relative_config_uses_workspace_not_process_cwd(tmp_path, monkeypatch):
     yaml_io.dump(process / "replay.yml", {"window_days": 180})
     monkeypatch.chdir(process)
     monkeypatch.setattr(replay, "load_workspace_config", lambda *_: SimpleNamespace(paths=SimpleNamespace(root=workspace)))
-    monkeypatch.setattr(replay, "_load_target_package", lambda *_: SimpleNamespace(manifest=SimpleNamespace(markets=["BINANCE:BTCUSDT"])))
+    monkeypatch.setattr(replay, "_load_target_package", lambda *_: SimpleNamespace(
+        root=workspace, manifest=SimpleNamespace(strategy_id="test", markets=["BINANCE:BTCUSDT"],
+                                                extras={}, policy=SimpleNamespace(max_open_positions=0))))
     def capture(**kwargs):
         from nerya.skills.builtin.backtest.scripts.config import load_config
         assert Path(kwargs["config_path"]) == workspace / "replay.yml"

@@ -298,15 +298,14 @@ class ApprovalService:
             if kind == "trade_intent":
                 from .trading import approval_resume
 
-                if not getattr(
-                    approval_resume,
-                    "_resume_subscriber_registered",
-                    False,
-                ):
-                    resume_result = approval_resume.resume_approved(
-                        self.config,
-                        approval_id,
-                    )
+                # A process-global subscriber flag does not prove that this
+                # workspace's subscriber is alive. Always dispatch against the
+                # owning configuration; resume_approved's durable SQLite claim
+                # prevents a bus subscriber or duplicate callback trading twice.
+                resume_result = approval_resume.resume_approved(
+                    self.config,
+                    approval_id,
+                )
             elif kind == "wallet_swap":
                 from .wallet import swap_approval
 

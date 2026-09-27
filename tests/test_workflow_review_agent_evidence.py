@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from copy import deepcopy
 import pytest
 from nerya.core.paths import WorkspacePaths
 from nerya.strategy_history.store import record_agent_task

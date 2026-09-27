@@ -4,6 +4,7 @@ import argparse
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from skill_fixtures import EmptySkillKernel
 
 import pytest
 
@@ -308,7 +309,7 @@ def test_tuning_run_uses_the_manifest_review_window(tmp_path, monkeypatch):
         )
         result = StrategyEvolutionRunner(
             config=Config(paths=paths, data={"runtime": {"mock_mode": True}}),
-            skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+            skills=EmptySkillKernel(),
         ).run_once(
             "alpha",
             dry_run=True,
@@ -617,7 +618,7 @@ def test_tuner_dispatch_always_requests_explicit_payload_only_context(
     )
     StrategyEvolutionRunner(
         config=Config(paths=paths, data={}),
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     )._dispatch_tuner(
         pkg=package,
         snapshot=snapshot,
@@ -823,7 +824,7 @@ def test_tuning_discards_candidate_if_package_changes_during_preview(
 
     result = StrategyEvolutionRunner(
         config=Config(paths=paths, data={"runtime": {"mock_mode": True}}),
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     ).run_once("alpha", dry_run=False)
 
     assert result.status == "error"
@@ -905,7 +906,7 @@ def test_tuner_dispatch_uses_the_frozen_strategy_local_prompt(tmp_path, monkeypa
     )
     StrategyEvolutionRunner(
         config=Config(paths=paths, data={}),
-        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
+        skills=EmptySkillKernel(),
     )._dispatch_tuner(
         pkg=package,
         snapshot=snapshot,
