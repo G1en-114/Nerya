@@ -95,11 +95,19 @@ class Gateway(ThreadingHTTPServer):
     allow_reuse_address = False
 
     def __init__(self, address, upstream_port: int, proof: str, *, local: bool, reuse_address: bool = False):
-        self.allow_reuse_address = reuse_address
+        # Windows can bind a wildcard listener alongside an occupied loopback
+        # address unless exclusive binding is requested. Never report that a
+        # shared port is ours while another process receives its local traffic.
+        self.allow_reuse_address = reuse_address and os.name != "nt"
         self.upstream_port, self.proof, self.local = upstream_port, proof, local
         self.connections: set[socket.socket] = set()
         self.connections_lock = threading.Lock()
         super().__init__(address, GatewayHandler)
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def get_request(self):
         connection, address = super().get_request()

@@ -126,7 +126,10 @@ jobs:
       - name: Native host security tests
         run: python -m unittest discover -s desktop/tests -v
       - name: Build real native installers and portable runtime
-        run: npm --prefix desktop run build -- --ci --bundles '${{ matrix.bundles }}' -- --locked
+        run: |
+          set -o pipefail
+          mkdir -p .tmp/ci
+          npm --prefix desktop run build -- --ci --verbose --bundles '${{ matrix.bundles }}' -- --locked 2>&1 | tee .tmp/ci/desktop-build.log
       - name: Rust host tests
         run: cargo test --release --locked --manifest-path desktop/src-tauri/Cargo.toml
       - name: macOS package installer
@@ -145,6 +148,17 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Preserve native build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: diagnostics-${{ matrix.label }}
+          path: |
+            .tmp/ci/desktop-build.log
+            desktop/runtime/manifest.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
 
   release:
     name: Publish verified release

@@ -3,6 +3,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -82,6 +83,13 @@ class OptionsTests(unittest.TestCase):
 
 
 class SharingTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows exclusive listener semantics")
+    def test_windows_listener_is_exclusive_even_when_reuse_requested(self):
+        gateway = host.Gateway(("127.0.0.1", 0), 1, "proof", local=True, reuse_address=True)
+        self.addCleanup(gateway.server_close)
+        self.assertFalse(gateway.allow_reuse_address)
+        self.assertEqual(gateway.socket.getsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE), 1)
+
     def test_switch_selects_free_port_and_explicit_conflict_is_not_silenced(self):
         with tempfile.TemporaryDirectory() as directory, socket.socket() as occupied:
             root = Path(directory)
