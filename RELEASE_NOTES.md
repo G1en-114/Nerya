@@ -21,6 +21,10 @@ each platform's installers.
 
 The release build resolves Python's private Linux shared libraries explicitly,
 retains detailed failure logs, and checks exclusive listener ownership on Windows.
+Windows dependencies use the bundled Python's standard package layout, and macOS
+DMGs no longer depend on mounting and detaching a writable image in CI. Both Linux
+installer payloads are extracted and smoke-tested; toggling sharing preserves the
+local port after real traffic. Import checks run before expensive installer builds.
 Runtime regression also covers late HTTP rate-limit responses, workspace-specific
 approval resumption and durable duplicate-dispatch prevention. These fixes do not
 remove trading authorization or introduce hard-coded Agent-loop budgets.

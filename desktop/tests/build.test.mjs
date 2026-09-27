@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { nativeTarget, bundlerEnvironment, tauriBuildArguments } from "../scripts/build.mjs";
+import { macBundleDirectory, macBundlePlan } from "../scripts/dmg.mjs";
 
 test("only native runtime targets can be packaged", () => {
   const host = "x86_64-unknown-linux-gnu";
@@ -42,4 +43,24 @@ test("preparation runs once without swallowing Cargo flags", () => {
   assert.equal(JSON.parse(args[args.indexOf("--config") + 1]).build.beforeBuildCommand, null);
   assert.ok(args.indexOf("--config") < marker);
   assert.ok(args.includes("custom-protocol"));
+});
+
+test("macOS disk image planning never invokes the mounted-image bundler", () => {
+  for (const formats of [[], ["--bundles", "app,dmg"], ["--bundles=dmg"], ["-b", "app", "dmg"], ["-b=all"]]) {
+    const result = macBundlePlan(["--ci", ...formats, "--", "--locked"], "darwin");
+    assert.equal(result.dmg, true);
+    assert.deepEqual(result.args, ["--ci", "--bundles", "app", "--", "--locked"]);
+  }
+  assert.equal(macBundlePlan(["--bundles", "app"], "darwin").dmg, false);
+  assert.equal(macBundlePlan(["--no-bundle"], "darwin").dmg, false);
+  assert.throws(() => macBundlePlan(["--bundles"], "darwin"), /Missing/);
+  assert.throws(() => macBundlePlan(["--bundles", "nsis"], "darwin"), /Unsupported/);
+  const args = ["--bundles", "deb,appimage", "--", "--locked"];
+  assert.deepEqual(macBundlePlan(args, "linux"), { args, dmg: false });
+});
+
+test("native architecture and profile select the actual app directory", () => {
+  assert.ok(macBundleDirectory([], {}).endsWith(path.join("target", "release", "bundle")));
+  assert.ok(macBundleDirectory(["--target", "aarch64-apple-darwin", "--debug"], {}).endsWith(
+    path.join("target", "aarch64-apple-darwin", "debug", "bundle")));
 });

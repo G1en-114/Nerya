@@ -15,6 +15,19 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def probe_json(argv: list[str], *, cwd: str, env: dict[str, str], timeout: int = 120) -> dict:
+    """Preserve the child exception instead of hiding it in CalledProcessError."""
+    result = subprocess.run(argv, cwd=cwd, env=env, text=True, encoding="utf-8",
+                            errors="replace", capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f"Packaged runtime probe exited {result.returncode}:\n"
+                           f"{result.stderr[-12000:]}\n{result.stdout[-2000:]}")
+    try:
+        return json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"Packaged runtime probe did not return JSON:\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}") from exc
+
+
 def native_target() -> tuple[str, str]:
     system = {"Darwin": "darwin", "Windows": "win32", "Linux": "linux"}.get(platform.system())
     arch = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(platform.machine().lower())
@@ -70,25 +83,28 @@ def verify(resources: Path) -> dict:
         env["PATH"] = os.pathsep.join((str((resources / manifest["node"]).parent), str((resources / manifest["python"]).parent),
                                      os.environ.get("SystemRoot", "C:\\Windows") + "\\System32" if os.name == "nt" else "/usr/bin:/bin"))
         code = """
-import json, platform, ssl, sys
+import json, platform, ssl, sys, sysconfig
 import nerya, nerya_sdk, numpy, pandas, ccxt, cryptography, mcp, playwright
+if sys.platform == 'win32':
+    import pywintypes, win32api, win32con, win32job
 from nerya.skills.registry import SkillRegistry
 skills = {entry.manifest.id for entry in SkillRegistry.load_builtin().list()}
 assert {'research', 'strategy_author', 'backtest', 'markets'} <= skills, skills
 print(json.dumps({'python': platform.python_version(), 'nerya': nerya.__version__,
-                  'machine': platform.machine(), 'platform': sys.platform, 'skills': len(skills)}))
+                  'machine': platform.machine(), 'platform': sys.platform, 'skills': len(skills),
+                  'site_packages': sysconfig.get_path('purelib')}))
 """
-        result = subprocess.run([str(resources / manifest["python"]), "-c", code], cwd=directory, env=env,
-                                text=True, encoding="utf-8", capture_output=True, check=True, timeout=120)
-        details = json.loads(result.stdout.strip().splitlines()[-1])
+        details = probe_json([str(resources / manifest["python"]), "-c", code], cwd=directory, env=env)
         if details["python"] != manifest["python_version"]:
             raise ValueError("Bundled Python executable version mismatch")
+        if Path(details["site_packages"]).resolve() not in {(resources / p).resolve() for p in paths}:
+            raise ValueError("Dependencies must use the bundled Python's standard site-packages layout")
         actual_arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(details["machine"].lower())
         if (details["platform"], actual_arch) != native_target():
             raise ValueError("Bundled Python executable is for a different target")
-        node = json.loads(subprocess.check_output([str(resources / manifest["node"]), "-p",
+        node = probe_json([str(resources / manifest["node"]), "-p",
             "JSON.stringify({version:process.versions.node,arch:process.arch,platform:process.platform})"],
-            cwd=directory, env=env, text=True, timeout=30))
+            cwd=directory, env=env, timeout=30)
         if node != {"version": manifest["node_version"], "arch": manifest["arch"], "platform": manifest["platform"]}:
             raise ValueError("Bundled Node executable version/architecture mismatch")
     report = {"version": version, "platform": manifest["platform"], "arch": manifest["arch"],

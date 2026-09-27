@@ -5,6 +5,11 @@ Its installer contains portable Python, Node and Playwright Chromium. It does no
 freeze Python into a single executable: Skills need a working `sys.executable` to
 launch their own scripts.
 
+Dependencies live in the bundled interpreter's standard `site-packages`, where
+Python loads package bootstrap files automatically. In particular, Windows MCP
+requires pywin32's module and DLL setup; a detached `PYTHONPATH` folder is not an
+equivalent Python installation. No host Python installation is modified.
+
 ## Installation
 
 Download a completed build from [GitHub Releases](https://github.com/NeryaAI/Nerya/releases).
@@ -120,6 +125,9 @@ preparation hook disabled. On Linux the build wrapper exposes the portable Pytho
 distribution's private library directory to `linuxdeploy`; this resolves the bundled
 Tcl/Tk libraries without deleting Python modules or relying on the builder's Python.
 The installer payload is subsequently tested without this build-time environment.
+macOS disk images are built directly from a clean staging copy of the signed app
+and an Applications link, then checked with `hdiutil verify`. This avoids mounting
+a writable image and relying on DiskArbitration to detach it on headless runners.
 Direct Tauri invocation retains its preparation hook, but use the npm commands above
 for complete native installer packaging. Node archives are
 checked against the official published SHA-256 list. Python installs are hash-checked
@@ -150,7 +158,7 @@ presence, portable Node and Python, essential imports and built-in Skill loading
 
 `verify_bundle.py` checks the macOS application signature and its resource payload,
 administratively extracts Windows MSI without installing it into the user account,
-or extracts a Debian package into a temporary directory. It then runs the isolated
+or extracts both Debian and AppImage payloads into temporary directories. It runs the isolated
 runtime smoke test against that packaged payload, not the original source tree.
 
 The smoke test clears developer credentials and most environment variables. It
@@ -162,7 +170,7 @@ loopback address. No real model calls or orders are made.
 
 This verifies startup and packaged resources, **not** native notification banners,
 interactive OS trust prompts or broker-specific trading. Alternative installer
-front ends (DMG/PKG, NSIS and AppImage) also need human installation acceptance on
+front ends (DMG/PKG, NSIS and graphical AppImage launch) also need human installation acceptance on
 the supported target systems; the automated payload test is not a claim of all UI
 installer paths being exercised.
 

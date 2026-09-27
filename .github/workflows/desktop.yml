@@ -142,9 +142,13 @@ jobs:
         if: runner.os == 'macOS'
         run: node desktop/scripts/installer.mjs
       - name: Packaged runtime architecture, versions and imports
-        run: python desktop/scripts/verify_runtime.py
+        run: |
+          set -o pipefail
+          python desktop/scripts/verify_runtime.py 2>&1 | tee .tmp/ci/runtime-verify.log
       - name: Extracted installer payload and isolated startup smoke
-        run: python desktop/scripts/verify_bundle.py
+        run: |
+          set -o pipefail
+          python desktop/scripts/verify_bundle.py 2>&1 | tee .tmp/ci/payload-smoke.log
       - name: Collect installers and SHA-256 manifests
         run: python desktop/scripts/collect_artifacts.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -160,7 +164,7 @@ jobs:
         with:
           name: diagnostics-${{ matrix.label }}
           path: |
-            .tmp/ci/desktop-build.log
+            .tmp/ci/*.log
             desktop/runtime/manifest.json
           include-hidden-files: true
           if-no-files-found: warn

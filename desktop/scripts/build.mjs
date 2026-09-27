@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createDiskImage, macBundleDirectory, macBundlePlan } from "./dmg.mjs";
 
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cli = path.join(desktop, "node_modules/@tauri-apps/cli/tauri.js");
@@ -66,8 +67,13 @@ export function main(args = process.argv.slice(2)) {
   const manifest = JSON.parse(fs.readFileSync(path.join(runtime, "manifest.json"), "utf8"));
   if (manifest.dev !== false || manifest.platform !== process.platform || manifest.arch !== process.arch)
     throw new Error("Refusing to bundle a development or foreign-architecture runtime.");
-  run(process.execPath, [cli, ...tauriBuildArguments(args)],
+  // Fail on missing modules/DLLs before spending time compressing installers.
+  // No user credentials, environment dependency or live model calls are used.
+  run(path.join(runtime, manifest.python), [path.join(desktop, "scripts/verify_runtime.py"), "--resources", runtime], process.env);
+  const plan = macBundlePlan(args, process.platform);
+  run(process.execPath, [cli, ...tauriBuildArguments(plan.args)],
     bundlerEnvironment(runtime, manifest, process.platform, process.env));
+  if (plan.dmg) createDiskImage(macBundleDirectory(args));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

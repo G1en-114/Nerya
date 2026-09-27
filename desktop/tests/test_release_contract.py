@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,6 +21,16 @@ runtime = load("verify_runtime", ROOT / "desktop/scripts/verify_runtime.py")
 
 
 class ReleaseContractTests(unittest.TestCase):
+    def test_probe_retains_import_failure_in_diagnostics(self):
+        result = SimpleNamespace(returncode=1, stderr="ModuleNotFoundError: No module named 'win32api'", stdout="")
+        with patch.object(runtime.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "ModuleNotFoundError.*win32api"):
+                runtime.probe_json(["owned-python", "-c", "test"], cwd=".", env={})
+
+    def test_probe_requires_json_on_success(self):
+        with patch.object(runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0, stderr="", stdout="not-json")):
+            with self.assertRaisesRegex(RuntimeError, "did not return JSON"):
+                runtime.probe_json(["owned-python"], cwd=".", env={})
     def test_release_manifests_and_locks_agree(self):
         for path, expected in version.expected_files().items():
             with self.subTest(path=path.name):

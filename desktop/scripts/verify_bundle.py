@@ -2,7 +2,7 @@
 """Smoke-test the payload extracted from the native installer on its target OS.
 
 MSI administrative extraction does not install the app or change user accounts.
-Linux uses dpkg-deb --extract. macOS validates the signed app bundle directly.
+Linux verifies both Debian and AppImage payloads. macOS validates the signed app.
 All application state and fake credentials are confined to temporary directories.
 """
 from __future__ import annotations
@@ -48,6 +48,20 @@ def main() -> None:
         verify(resources)
         subprocess.run([sys.executable, str(Path(__file__).with_name("smoke.py")),
                         "--resources", str(resources), "--access-port", "0"], check=True, timeout=480)
+    if system == "linux":
+        # linuxdeploy rewrites ELF dependencies inside AppDir. A working Debian
+        # package does not prove the AppImage's relocated Python/browser works.
+        image = only((bundle / "appimage").glob("*.AppImage"))
+        with tempfile.TemporaryDirectory(prefix="Nerya AppImage installed ") as directory:
+            result = subprocess.run([str(image), "--appimage-extract"], cwd=directory,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    text=True, timeout=180)
+            if result.returncode:
+                raise RuntimeError(f"AppImage extraction failed: {result.stderr[-8000:]}")
+            resources = only(path.parent for path in Path(directory).rglob("manifest.json") if path.parent.name == "runtime")
+            verify(resources)
+            subprocess.run([sys.executable, str(Path(__file__).with_name("smoke.py")),
+                            "--resources", str(resources), "--access-port", "0"], check=True, timeout=480)
     print("Native installer payload verification passed.")
 
 

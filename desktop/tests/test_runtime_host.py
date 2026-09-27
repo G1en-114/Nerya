@@ -83,6 +83,34 @@ class OptionsTests(unittest.TestCase):
 
 
 class SharingTests(unittest.TestCase):
+    def test_sharing_switch_keeps_port_after_serving_real_connections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text("{}")
+            runtime = host.DesktopRuntime(root, root, lambda _: None)
+            runtime.node_port = 1
+            runtime.settings["port"] = 0
+            with patch("nerya.api.auth.has_admin_password", return_value=True), patch("nerya.core.config.load_config"):
+                try:
+                    first = runtime.configure({"sharing": True})
+                    port = first["port"]
+                    for sharing in (False, True, False):
+                        # Exercise an actual response/server-initiated close so
+                        # Linux leaves a TIME_WAIT socket, unlike bind-only tests.
+                        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                        conn.request("GET", "/", headers={"Transfer-Encoding": "chunked"})
+                        response = conn.getresponse()
+                        self.assertEqual(response.status, 400)
+                        response.read()
+                        conn.close()
+                        state = runtime.configure({"sharing": sharing})
+                        self.assertEqual(state["port"], port)
+                        self.assertEqual(state["access_url"], first["access_url"])
+                        if host.sys.platform == "linux":
+                            self.assertTrue(runtime.access.socket.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR))
+                finally:
+                    runtime.close()
+
     @unittest.skipUnless(os.name == "nt", "Windows exclusive listener semantics")
     def test_windows_listener_is_exclusive_even_when_reuse_requested(self):
         gateway = host.Gateway(("127.0.0.1", 0), 1, "proof", local=True, reuse_address=True)

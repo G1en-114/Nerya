@@ -78,6 +78,17 @@ async function main() {
   }
   const pythonRel = path.join("python", installations[0], process.platform === "win32" ? "python.exe" : "bin/python3");
   const python = path.join(stage, pythonRel);
+  // Use the interpreter's real installation layout, not a flat PYTHONPATH
+  // target. Standard site-packages processes .pth files on every subprocess
+  // startup (notably pywin32's module/DLL bootstrap used by MCP on Windows).
+  const layout = spawnSync(python, ["-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+    { encoding: "utf8" });
+  if (layout.error || layout.status !== 0) throw new Error(`Cannot inspect portable Python: ${layout.stderr || layout.error}`);
+  const packages = path.resolve(layout.stdout.trim());
+  const installation = await fs.realpath(path.join(pythonDir, installations[0]));
+  if (!installation.startsWith((await fs.realpath(stage)) + path.sep) || !packages.startsWith(installation + path.sep))
+    throw new Error("Refusing to install dependencies outside the build-owned Python distribution.");
+  const packagesRel = path.relative(stage, packages);
   // Build from a clean, curated source tree: setuptools must not resurrect deleted
   // modules from a developer's stale build/lib directory. No tests or workspaces ship.
   const source = path.join(desktop, `.runtime-build-source-${randomUUID()}`);
@@ -87,16 +98,16 @@ async function main() {
   }
   // Install the exact same dependency graph on all native runners. The application
   // wheel is built separately so a local source path never enters the lock file.
-  run(uv, ["pip", "sync", "--python", python, "--target", path.join(stage, "packages"),
+  run(uv, ["pip", "sync", "--python", python, "--target", packages,
     "--require-hashes", path.join(desktop, "requirements.lock")], uvOptions);
-  run(uv, ["pip", "install", "--python", python, "--target", path.join(stage, "packages"),
+  run(uv, ["pip", "install", "--python", python, "--target", packages,
     "--no-deps", source], uvOptions);
   const browser = path.join(stage, "browser");
   run(python, ["-m", "playwright", "install", "chromium"], { env: {
-    ...process.env, PYTHONPATH: path.join(stage, "packages"), PYTHONNOUSERSITE: "1",
+    ...process.env, PYTHONPATH: packages, PYTHONNOUSERSITE: "1",
     PLAYWRIGHT_BROWSERS_PATH: browser, PLAYWRIGHT_SKIP_BROWSER_GC: "1",
   } });
-  if (existsSync(path.join(stage, "packages/nerya/workspace/bootstrap.py")))
+  if (existsSync(path.join(packages, "nerya/workspace/bootstrap.py")))
     throw new Error("Refusing to package legacy strategy seeding code.");
   // Include playbooks, prompt bundles and wallet JS templates, not just Python modules.
   await fs.cp(path.join(root, "nerya"), path.join(stage, "app/nerya"), { recursive: true, filter: copyFilter });
@@ -147,7 +158,7 @@ async function main() {
   await fs.copyFile(path.join(root, "LICENSE"), path.join(stage, "LICENSE"));
   await fs.copyFile(path.join(desktop, "requirements.lock"), path.join(stage, "requirements.lock"));
   await fs.writeFile(path.join(stage, "manifest.json"), JSON.stringify({
-    dev: false, python: pythonRel, node: nodeRel, dashboard: webRel, browser: "browser", python_paths: ["app", "packages"],
+    dev: false, python: pythonRel, node: nodeRel, dashboard: webRel, browser: "browser", python_paths: ["app", packagesRel],
     python_version: pythonVersion, node_version: nodeVersion, node_sha256: expected,
     platform: process.platform, arch: process.arch,
     app_version: (await fs.readFile(path.join(root, "VERSION"), "utf8")).trim(),

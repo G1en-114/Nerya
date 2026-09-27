@@ -397,11 +397,17 @@ class DesktopRuntime:
     def _start_access(self, port: int, *, sharing: bool, fallback: bool, reuse_address: bool = False) -> Gateway:
         host = "0.0.0.0" if sharing else "127.0.0.1"
         try:
-            return start_server(Gateway((host, port), self.node_port, self.proof, local=False, reuse_address=reuse_address))
+            # Linux requires reuse on BOTH the original and replacement socket
+            # to reclaim our own TIME_WAIT connections. Enabling it only after
+            # a mode switch silently changed the access URL after real traffic.
+            # Gateway still uses exclusive binding on Windows; no SO_REUSEPORT.
+            return start_server(Gateway((host, port), self.node_port, self.proof, local=False,
+                                        reuse_address=reuse_address or sys.platform == "linux"))
         except OSError:
             if not fallback:
                 raise
-            return start_server(Gateway((host, 0), self.node_port, self.proof, local=False))
+            return start_server(Gateway((host, 0), self.node_port, self.proof, local=False,
+                                        reuse_address=sys.platform == "linux"))
 
     def configure(self, options: dict):
         from nerya.api.auth import has_admin_password
