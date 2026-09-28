@@ -28,14 +28,25 @@ closed candles using nerya.sdk.factors.calculate_factor. Do not substitute a
 similar factor for user-specified rules, inherit validation across markets, or
 resolve latest during replay. Ordinary strategies need no empty factor file.
 
+**Fresh-creation fast path.** Once a fresh strategy request has a complete market
+scope (`venue_mapping_complete:true` when ranked discovery was needed) and, when
+necessary, one reusable paper account from `account_list`, the next state-changing
+call MUST be `strategy_draft_proposal`. Do not spend an iteration
+on `grep`, `list_dir`, `read_file`, shell/Python inspection, installed Nerya
+source, or unrelated existing strategies to rediscover SDK contracts or examples.
+The tool schemas and the SDK essentials in this Skill are authoritative. A failed
+draft with a concrete validation blocker may justify reading/editing that SAME
+candidate; pre-draft source archaeology does not.
+
 1. **Resolve scope once.** Reuse supplied markets and candidate IDs. For a requested
    crypto market-cap ranking use `market_data(action="ranked_universe", venue="binance",
    count=N, rank_by="market_cap", quote="USDT")`; keep its observed date and tradable
    exclusions. Do not launch additional ranking searches after a successful result.
    When `venue_mapping_complete:true`, use `market_ids` directly: do not call
    `list_symbols`, web search/fetch, or another ranking source to revalidate them.
-   For a clearly fresh creation request with no candidate ID, do not grep/list the
-   workspace or recall memory just to hunt for an older strategy with the same name.
+   For a clearly fresh creation request with no candidate ID, do not grep/list/read
+   the workspace or installed source, and do not recall memory just to hunt for an
+   older strategy with the same name or a coding example.
    Check current candidates before following an ID recalled from old history.
 2. **Save one real candidate.** When the request is sufficiently specified, prefer
    `strategy_draft_proposal(files={"main.py":..., "strategy.yml":..., "strategy.md":..., "tests/test_contract.py":...})`.
