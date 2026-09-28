@@ -135,6 +135,17 @@ tests/             Runtime regression tests
 .github/workflows/ Validation, native desktop builds and release publication
 ```
 
+## Optional local face analysis
+
+Install `pip install "nerya[face]"` (CPU/Apple Silicon) or
+`pip install "nerya[face-gpu]"` (NVIDIA CUDA) to enable the built-in
+[face-analysis Skill](nerya/skills/builtin/face-analysis/SKILL.md).
+It uses UniFace for face detection, alignment landmarks and two-photo cosine
+similarity, with selectable SCRFD/RetinaFace/YOLOv8-Face and ArcFace/AdaFace.
+Models load and download only on explicit use. Images and embeddings are not
+persisted by the helper. Matches are advisory and do not establish identity,
+liveness or trading authorization. See the Skill for requests and limitations.
+
 ## Security and licensing
 
 Live execution requires the corresponding configuration and authorization; do not bypass the trading risk and approval gates. Vault encryption protects stored credentials, not a compromised running process. Keep backups of your workspace and its encryption key, and never commit account secrets, `.env` files or live trading state.
