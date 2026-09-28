@@ -56,7 +56,7 @@ def replay_provenance(package: Any, cfg: Any, series: dict[str, dict[str, list]]
         "allow_mock": allow_mock, "datasets": data,
         "assumptions": {"initial_capital_usd": cfg.initial_capital_usd,
             "fee_bps_by_venue": cfg.fee_bps_by_venue, "slip_bps_by_venue": cfg.slip_bps_by_venue,
-            "fill_rule": "next_bar_open; at data end falls back to signal close",
+            "fill_rule": "next_available_bar_open; final strategy intents rejected without a next bar; remaining positions liquidated separately at last close",
             "warmup_bars": cfg.warmup_bars, "requested_window_days": cfg.window_days},
         "scope": "Historical code replay; no real Agent answers, live fills or out-of-sample claim."}
 

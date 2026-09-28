@@ -49,7 +49,8 @@
     "/env-vault": "环境变量与密钥库",
     "/messages": "消息",
     "/scripts": "脚本",
-    "/gateway": "网关"
+    "/gateway": "网关",
+    "/factors": "因子库"
   },
   "topnav": {
     "brandName": "Nerya",
@@ -227,7 +228,8 @@
     "sectionStrategies": "运行中策略",
     "newStrategyChat": "讨论此策略",
     "strategyEvolution": "进化",
-    "noStrategySessions": "暂无会话"
+    "noStrategySessions": "暂无会话",
+    "factors": "因子库"
   },
   "files": {
     "title": "工作区文件",

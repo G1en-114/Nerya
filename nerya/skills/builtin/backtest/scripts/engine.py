@@ -93,9 +93,10 @@ def settle(
         # short entry -> sell, and close_position emits the inverse leg.
         raw_side = order_side
         # Both legs fill at the *next* bar's open: adapters signal off the
-        # current bar's close, so filling entries at that same bar's open
-        # was lookahead. At data end (no next bar) market entries and
-        # forced closes fall back to the signal bar's close.
+        # current bar's close, so filling at that same bar's open is lookahead.
+        # The normal replay path never calls settle without a next bar. The
+        # fallback below is retained only for isolated low-level callers; the
+        # engine rejects end-of-data strategy intents instead of same-close fill.
         if next_bar is not None:
             base_price = float(next_bar.get("open", next_bar.get("close", 0.0)))
         else:
@@ -389,10 +390,12 @@ def run_backtest(
     if bar_index:
         last_ts = bar_index[-1]
         if pending:
-            # Explicit legacy end-of-data assumption: signal-close settlement.
-            fills, rejects = settle(pending, previous, {}, portfolio, config, policy=policy_view)
-            result.trades.extend(fills)
-            result.rejected_signals.extend(rejects)
+            # A decision made at the last candle close cannot fill at that same
+            # close. There is no next historical open inside the requested
+            # window, so retain the intent as rejected evidence instead of
+            # manufacturing an end-of-data fill.
+            result.rejected_signals.extend(_reject(order, "end_of_data_no_next_bar") for order in pending)
+            pending.clear()
         last_prices = {
             market: float(rows[-1].get("close", 0.0))
             for market, rows in candles_by_market.items()

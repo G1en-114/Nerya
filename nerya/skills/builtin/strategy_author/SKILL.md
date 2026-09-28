@@ -21,6 +21,13 @@ deliverables pending until actual receipts exist.
 
 ## Default path — finish work, not a tour of every reference
 
+For factor-based strategies or explicit research reuse, load `factor_library`,
+search once for relevant definitions and export the selected exact versions.
+Include the returned factors.json in the strategy bundle and calculate from
+closed candles using nerya.sdk.factors.calculate_factor. Do not substitute a
+similar factor for user-specified rules, inherit validation across markets, or
+resolve latest during replay. Ordinary strategies need no empty factor file.
+
 1. **Resolve scope once.** Reuse supplied markets and candidate IDs. For a requested
    crypto market-cap ranking use `market_data(action="ranked_universe", venue="binance",
    count=N, rank_by="market_cap", quote="USDT")`; keep its observed date and tradable

@@ -49,7 +49,8 @@
     "/env-vault": "Env & Vault",
     "/messages": "Messages",
     "/scripts": "Scripts",
-    "/gateway": "Gateway"
+    "/gateway": "Gateway",
+    "/factors": "Factor library"
   },
   "topnav": {
     "brandName": "Nerya",
@@ -227,7 +228,8 @@
     "sectionStrategies": "Running strategies",
     "newStrategyChat": "Discuss this strategy",
     "strategyEvolution": "Evolution",
-    "noStrategySessions": "No sessions yet"
+    "noStrategySessions": "No sessions yet",
+    "factors": "Factor library"
   },
   "files": {
     "title": "Workspace files",

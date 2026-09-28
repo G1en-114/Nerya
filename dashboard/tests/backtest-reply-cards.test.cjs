@@ -22,6 +22,68 @@ function html(message) {
     React.createElement(BacktestReplyCards, { message })));
 }
 
+const researchFixture = {
+  bias_checks: { static_temporal_scan: 'passed', historical_prefix_only: true,
+    closed_bar_context: true, multi_timeframe_close_aligned: true,
+    strategy_order_execution: 'next_bar_open', end_of_data_signal: 'rejected_no_next_bar',
+    static_warnings: [{ code: 'lookahead_dynamic_shift', message: 'Direction requires review', file: 'main.py', line: 6 }] },
+  research_checks: { version: 1, scope: 'this_run_only', checks: [
+    'dynamic_lookahead','warmup_stability','out_of_sample','walk_forward','cost_stress','parameter_sensitivity','ablation',
+  ].map(id => ({ id, status: 'not_run' })) },
+  provenance: { source_revision: 'frozen-v1', assumptions: { warmup_bars: 100,
+    execution_model_limits: { order_types:'market_only', funding:'not_modeled',liquidation:'not_modeled' } } },
+};
+
+test('research checks survive compacted receipts and later sparse streaming duplicates', () => {
+  const message = reply('review', 'summary\n[compacted_kept]\n' + JSON.stringify({ ...result, ...researchFixture }));
+  message.turn.tool_trace = [{ action:'strategy_backtest', result }];
+  const [row] = collectBacktestResults({ messages:[message] });
+  assert.deepEqual(row.biasChecks, researchFixture.bias_checks);
+  assert.deepEqual(row.researchChecks, researchFixture.research_checks);
+  const rendered = html(message);
+  assert.match(rendered, /1 need review/);
+  assert.match(rendered, /7 not run here/);
+  assert.match(rendered, /Direction requires review/);
+  assert.match(rendered, /Dynamic lookahead/);
+  assert.match(rendered, /Funding, Margin liquidation/);
+  assert.doesNotMatch(rendered, /No blocking patterns/);
+  assert.match(rendered, /backtest-research-review/);
+});
+
+test('economic PASS and missing research metadata never become research validation', () => {
+  const rendered = html(reply('legacy', { ...result, verdict:'PASS' }));
+  assert.match(rendered, /Economic checks passed/);
+  assert.match(rendered, /Not recorded/);
+  assert.doesNotMatch(rendered, /No blocking patterns|7 not run here|Closed historical prefix only/);
+});
+
+test('malformed evidence does not crash or fabricate a passed audit', () => {
+  const rendered = html(reply('malformed', { ...result,
+    bias_checks: { static_warnings:[null,42,{message:{unexpected:true}}] },
+    research_checks: { checks:[null,{id:'dynamic_lookahead',status:'passed'}] },
+  }));
+  assert.match(rendered, /Review separate evidence/);
+  assert.doesNotMatch(rendered, /No blocking patterns|7 not run here|\[object Object\]/);
+});
+
+test('nested metrics retain research fields while preserving displayed percentage values', () => {
+  const [row] = extractBacktestResults({ ...result, metrics:researchFixture });
+  assert.deepEqual(row.researchChecks, researchFixture.research_checks);
+  assert.equal(row.metrics.total_return_pct, '0.0274%');
+});
+
+test('review draft pins the historical source and does not request automatic tuning', () => {
+  const { backtestReviewDraft } = require('../lib/backtestReview.ts');
+  const draft = backtestReviewDraft({strategyId:'source',ts:'20260928_000000',proposalId:'prp_old',sourceRevision:'frozen'},true);
+  assert.match(draft, /"proposal_id":"prp_old"/);
+  assert.match(draft, /"backtest_ts":"20260928_000000"/);
+  assert.match(draft, /"source_revision":"frozen"/);
+  assert.match(draft, /不自动批量回测/);
+  const source = fs.readFileSync(path.join(__dirname,'../components/backtest/BacktestReviewAction.tsx'),'utf8');
+  assert.match(source, /autoSend: false/);
+  assert.doesNotMatch(source, /run_turn|callApi/);
+});
+
 test('compacted result keeps exact proposal/run identity and percentage units', () => {
   const message = reply('first', 'backtest: metrics=[...]\n[compacted_kept]\n' + JSON.stringify(result));
   const rows = collectBacktestResults({ messages: [message] });

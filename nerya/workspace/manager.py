@@ -102,7 +102,7 @@ _DEFAULT_ENABLED_SKILLS = [
     "expert_investors", "finance-creators", "llm", "market_data_routing",
     "market_research",
     "markets", "memory", "news_social", "notify", "quant-strategy-loop",
-    "quant_research",
+    "quant_research", "factor_library",
     "research", "research_report", "strategy_author", "tasks", "team",
     "trading", "triggers", "self_modify", "plugin_author", "adapter",
     # Integration-gated: listed here but loaded only after configuration.
