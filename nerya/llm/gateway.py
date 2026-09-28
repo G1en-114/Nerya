@@ -486,7 +486,12 @@ class LLMGateway:
                     "ts": now_iso(),
                 },
             )
-            non_blocking_tasks = {"classify", "risk_screening", "compress"}
+            non_blocking_tasks = {
+                "classify",
+                "intent_classification",
+                "risk_screening",
+                "compress",
+            }
             if task not in non_blocking_tasks:
                 raise PromptInjectionDetected(patterns=hits, caller=caller)
 
