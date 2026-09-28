@@ -72,6 +72,34 @@ def test_known_errors_before_network_or_execution(tmp_path, monkeypatch, code, e
     assert not list(root.glob("backtests/**/metrics.json"))
 
 
+@pytest.mark.parametrize("expression, expected", [
+    ("series.shift(-1)", "lookahead_negative_shift"),
+    ("series.diff(periods=-2)", "lookahead_negative_shift"),
+    ("series.pct_change(-3)", "lookahead_negative_shift"),
+    ("series.bfill()", "lookahead_backward_fill"),
+    ("series.fillna(method='backfill')", "lookahead_backward_fill"),
+    ("series.rolling(10, center=True).mean()", "lookahead_centered_window"),
+    ("pd.merge_asof(left, right, on='ts', direction='forward')", "lookahead_forward_asof"),
+    ("series.interpolate(limit_direction='both')", "lookahead_backward_interpolation"),
+])
+def test_static_preflight_blocks_explicit_future_data_patterns(tmp_path, expression, expected):
+    package(tmp_path, f"def run(ctx):\n    {expression}\n    return ctx.result.hold(reason='unreachable')\n")
+    with pytest.raises(BacktestPreflightError) as failure:
+        replay(tmp_path, preflight_only=True)
+    assert expected in {row["code"] for row in failure.value.receipt["blockers"]}
+    assert "temporal_bias_static_scan" in failure.value.receipt["checks"]
+
+
+def test_static_preflight_warns_when_shift_direction_is_dynamic(tmp_path):
+    package(tmp_path, """def run(ctx):
+    periods = ctx.config.extras.get("periods", 1)
+    series.shift(periods=periods)
+    return ctx.result.hold(reason="fixture")
+""")
+    result = replay(tmp_path, preflight_only=True)
+    assert "lookahead_dynamic_shift" in {row["code"] for row in result["preflight"]["warnings"]}
+
+
 def test_preflight_only_never_runs_user_top_level_code(tmp_path):
     marker = tmp_path / "should_not_exist"
     package(tmp_path, f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\ndef run(ctx): pass\n")
@@ -90,6 +118,25 @@ def test_local_replay_receipts_source_and_data_snapshot(tmp_path, monkeypatch):
     assert result["ok"] and result["data_manifest"]["requested_window_complete"]
     folder = Path(result["run_path"])
     assert json.loads((folder / "run.json").read_text())["status"] == "completed"
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["bias_checks"]["static_temporal_scan"] == "passed"
+    assert metrics["bias_checks"]["historical_prefix_only"] is True
+    assert metrics["bias_checks"]["strategy_order_execution"] == "next_bar_open"
+    assert metrics["bias_checks"]["end_of_data_signal"] == "rejected_no_next_bar"
+    assert metrics["provenance"]["assumptions"]["execution_model_limits"]["funding"] == "not_modeled"
+    assert result["bias_checks"] == metrics["bias_checks"]
+    assert result["research_checks"] == metrics["research_checks"]
+    assert metrics["research_checks"]["scope"] == "this_run_only"
+    checks = {row["id"]: row["status"] for row in metrics["research_checks"]["checks"]}
+    assert checks == dict.fromkeys(("dynamic_lookahead", "warmup_stability", "out_of_sample",
+                                   "walk_forward", "cost_stress", "parameter_sensitivity", "ablation"), "not_run")
+    chart = json.loads((folder / "chart.json").read_text())
+    assert chart["meta"]["research_checks"] == metrics["research_checks"]
+    report = (folder / "report.md").read_text()
+    assert "| dynamic_lookahead | not_run |" in report
+    assert "funding: not_modeled" in report
+    assert "remaining orders use the recorded last close" not in report
+    assert "falls back to signal close" not in metrics["provenance"]["assumptions"]["fill_rule"]
     assert (folder / "source/pipeline_test/main.py").is_file()
     assert json.loads((folder / "replay_input.json").read_text())["candles_by_market"]["BYBIT:BTCUSDT"] == rows()
     assert not (folder / "failure.json").exists()

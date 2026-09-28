@@ -1,7 +1,7 @@
 ---
 name: backtest
 description: "Run a saved Nerya strategy over reusable local historical data; diagnose errors and present version-bound results without activation."
-version: 0.3.0
+version: 0.4.0
 license: MIT
 author: Nerya
 ---
@@ -44,6 +44,16 @@ model turns. Preserve the user's capital, sizing, fees and position limits. Cand
 defaults are version-bound evidence assumptions; ordinary model-generated settings do
 not override them. Explicit operator-requested alternate assumptions require the
 override flag and are saved with the run.
+
+Preflight rejects high-confidence future-data patterns such as negative
+shift/diff/pct_change, backward filling/interpolation, centered rolling
+windows and forward merge_asof. Dynamic period/alignment values, direct
+external file reads, wall-clock access and replay randomness are warnings
+because static analysis cannot prove their causality. The replay runtime itself
+exposes only the closed historical prefix, exposes higher timeframes only after
+their candle close, and fills strategy orders on the next bar open. A signal
+on the final candle is rejected rather than filled at that same close.
+
 For exact dates use inclusive `start_utc` and exclusive `end_utc`, both UTC. Do not
 silently substitute a shorter period, different timeframe or cached old report.
 
@@ -99,3 +109,33 @@ Positive alpha means outperformed even when both returns are negative. Prefer
 old report: run the strategy again and link the NEW timestamp; retain old evidence.
 GBS is only an explicitly recorded strategy signal, never inferred from buy/sell.
 No replay or report view approves a strategy, activates a schedule or trades an account.
+
+## Research review, only when requested
+
+An ordinary replay remains **one native call**, not an automatic audit campaign.
+Read `bias_checks`, `research_checks` and recorded execution-model limits in the
+returned receipt. Static scan passed means no blocking pattern was found, NOT
+proof of no leakage; warnings remain unresolved. A completed replay, positive
+return or economic PASS does not establish out-of-sample validity.
+
+For future-data/repainting concerns or recursive-indicator initialization, load
+`references/causality-audit.md`. For robustness, independent test windows,
+walk-forward, cost stress, component ablation or market-regime review, load
+`references/research-validation.md`. Read only the needed reference.
+
+Preserve the original baseline and bind every comparison to source/data hashes,
+run IDs, market profile and assumptions. One hypothesis per experiment; retain
+negative results. Do not tune until profitable, silently change risk rules, or
+present an inspected holdout as locked. These references describe methodology,
+not new tool actions. Check actual tool capabilities before running anything;
+unsupported checks stay not_run/blocked with a reason, never become a fabricated
+pass. UI review actions prepare a scoped draft, not an automatic batch or trade.
+
+## Reusable factors
+
+When asked to extract or reuse research components, load `factor_library`.
+Pass this run's exact strategy_id/backtest_ts (as ts) and proposal_id to its
+extract action. It reads frozen source and keeps extracted candidates separate
+from the factors declared in the run. New strategies may include exported,
+version-pinned factors.json; native replay freezes those references alongside
+source. Total strategy profit is not proof of an individual factor's value.

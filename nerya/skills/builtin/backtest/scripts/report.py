@@ -18,7 +18,7 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         "## Verdict",
         str(metrics.get("verdict") or "UNKNOWN"),
         "",
-        "Assumption: signals use closed bars; orders are queued and settle at the next available bar open. At data end, remaining orders use the recorded last close. Unsupported order types are rejected, never silently converted. Missing market marks carry the last known close, not zero. The benchmark uses fixed equal-weight allocations.",
+        "Assumption: signals use closed bars; orders are queued and settle at the next available bar open. At data end, strategy intents without a next bar are rejected; existing positions are liquidated separately at the last close. Unsupported order types are rejected, never silently converted. Missing market marks carry the last known close, not zero. The benchmark uses fixed equal-weight allocations.",
         "",
         "## Key metrics",
         "| Metric | Value |",
@@ -53,6 +53,22 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         lines.append(f"| {key} | {evidence.get(key, 'not recorded')} |")
     for reason, count in evidence.get("rejection_reasons", {}).items():
         lines.append(f"- rejection {reason}: {count}")
+    bias = metrics.get("bias_checks") or {}
+    research = metrics.get("research_checks") or {}
+    if bias or research:
+        lines.extend(["", "## Research evidence (this run only)",
+                      "Static scanning is not a dynamic causality proof. Economic PASS is not out-of-sample validation.",
+                      "| Check | Recorded status |", "|---|---|"])
+        lines.append(f"| Static temporal scan | {bias.get('static_temporal_scan', 'not recorded')} |")
+        for check in research.get("checks", []):
+            lines.append(f"| {check['id']} | {check['status']} |")
+        for warning in bias.get("static_warnings", []):
+            lines.append(f"- Review {warning.get('file', '')}:{warning.get('line', '')}: {warning.get('message', warning.get('code', ''))}")
+    limits = ((metrics.get("provenance") or {}).get("assumptions") or {}).get("execution_model_limits") or {}
+    if limits:
+        lines.extend(["", "## Execution-model limitations", "Unmodeled is not zero cost or verified execution."])
+        for key, value in limits.items():
+            lines.append(f"- {key}: {value}")
     lines.extend(["", "## Trades by reason", "| Reason | N | Total notional | Fees |", "|---|---:|---:|---:|"])
     by_reason: dict[str, dict[str, float]] = {}
     for t in result.trades:

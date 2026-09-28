@@ -16,6 +16,9 @@ import { SummaryCards } from "./SummaryCards";
 import { BacktestTables } from "./BacktestTables";
 import { BacktestExecutionEvidence } from "./BacktestExecutionEvidence";
 import { BacktestCoverage } from "./BacktestCoverage";
+import { BacktestBiasChecks } from "./BacktestBiasChecks";
+import { BacktestReviewAction } from "./BacktestReviewAction";
+import { BacktestFactors } from "./BacktestFactors";
 import { BacktestMarketExplorer } from "./BacktestMarketExplorer";
 import { replayTime } from "../../lib/backtestMarket";
 import { useChartTheme } from "../../lib/chartTheme";
@@ -73,6 +76,7 @@ export function BacktestChart({
     const decisions = (chart.tables || []).filter(table => table.id === "decisions");
     return <div className="min-w-0 space-y-5" data-testid="backtest-report" data-report-kind="observation">
       <BacktestCoverage meta={chart.meta}/>
+      <BacktestBiasChecks compact meta={chart.meta}/>
       <WorkspaceTabs id={id} label={zh ? "观察回放详情" : "Observation replay details"} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "事件与诊断" : "Events & diagnostics" }, { id: "trades", label: zh ? "行情与信号" : "Market & signals" }]}/>
       <section role="tabpanel" id={`${id}-panel-overview`} aria-labelledby={`${id}-tab-overview`} hidden={view !== "overview"} className={view === "overview" ? "space-y-5" : "hidden"}>
       <div><h4 className="text-sm font-semibold">{zh ? "历史事件与分支验证" : "Historical event and branch verification"}</h4>
@@ -103,9 +107,13 @@ export function BacktestChart({
   return (
     <div className="min-w-0 space-y-4" data-testid="backtest-report">
       <BacktestCoverage meta={chart.meta}/>
+      <BacktestBiasChecks compact meta={chart.meta}/>
       <BacktestExecutionEvidence replay={(chart.meta.replay || {}) as Record<string, unknown>} legacyBenchmark={chart.meta.engine_version === "backtest_skill_v2_closed_bar" && Array.isArray(chart.meta.markets) && chart.meta.markets.length > 1}/>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[color:var(--text-muted)]"><span className="font-medium text-warn">{i18nCopy(zh, "copy.components_backtest_BacktestChart.001")}</span><span>{i18nCopy(zh, "copy.components_backtest_BacktestChart.002")}</span></div>
-      <WorkspaceTabs id={id} label={i18nCopy(zh, "copy.components_backtest_BacktestChart.003")} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "概览" : "Overview" }, { id: "trades", label: zh ? "行情与成交" : "Market & executions" }, { id: "diagnostics", label: zh ? "诊断" : "Diagnostics" }]} />
+      <WorkspaceTabs id={id} label={i18nCopy(zh, "copy.components_backtest_BacktestChart.003")} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "概览" : "Overview" }, { id: "trades", label: zh ? "行情与成交" : "Market & executions" }, { id: "factors", label: zh ? "因子研究" : "Factor research" }, { id: "diagnostics", label: zh ? "诊断" : "Diagnostics" }]} />
+      <section role="tabpanel" id={`${id}-panel-factors`} aria-labelledby={`${id}-tab-factors`} hidden={view !== "factors"} className={view === "factors" ? "space-y-5" : "hidden"}>
+        {view === "factors" && <BacktestFactors strategyId={strategyId} ts={ts} proposalId={proposalId}/>}
+      </section>
       <section role="tabpanel" id={`${id}-panel-overview`} aria-labelledby={`${id}-tab-overview`} hidden={view !== "overview"} className={view === "overview" ? "space-y-5" : "hidden"}>
       <SummaryCards cards={chart.summary_cards ?? []} />
       {primaryPanel && view === "overview" ? (
@@ -127,6 +135,7 @@ export function BacktestChart({
       {view === "trades" && <BacktestMarketExplorer panels={pricePanels} tables={tradeTables} meta={chart.meta}/>}
       </section>
       <section role="tabpanel" id={`${id}-panel-diagnostics`} aria-labelledby={`${id}-tab-diagnostics`} hidden={view !== "diagnostics"} className={view === "diagnostics" ? "space-y-5" : "hidden"}>
+      {view === "diagnostics" && <><BacktestBiasChecks meta={chart.meta}/><BacktestReviewAction target={{strategyId,ts,proposalId}}/></>}
       {!diagnosticPanels.length && !diagnosticTables.length ? <Empty label={i18nCopy(zh, "copy.components_backtest_BacktestChart.008")} /> : null}
       {diagnosticPanels.length > 0 || diagnosticTables.length > 0 ? (
         <Section

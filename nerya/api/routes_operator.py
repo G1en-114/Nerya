@@ -323,6 +323,14 @@ _PRIMARY_NAV: tuple[dict[str, Any], ...] = (
         "always_visible": True,
     },
     {
+        "id": "factor_library",
+        "label": "Factor Library",
+        "href": "/factors",
+        "icon": "skills",
+        "tagline": "Versioned factor definitions and reproducible research evidence.",
+        "always_visible": True,
+    },
+    {
         "id": "runtime_library",
         "label": "Runtime Library",
         "href": "/agents",

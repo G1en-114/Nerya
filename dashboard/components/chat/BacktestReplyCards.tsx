@@ -13,6 +13,9 @@ import { strategyDetailId, type StrategyDetailTarget } from "../../lib/strategyD
 import styles from "./BacktestReplyCards.module.css";
 import { BacktestExecutionEvidence } from "../backtest/BacktestExecutionEvidence";
 import { BacktestCoverage } from "../backtest/BacktestCoverage";
+import { BacktestBiasChecks } from "../backtest/BacktestBiasChecks";
+import { BacktestReviewAction } from "../backtest/BacktestReviewAction";
+import { factorSourceUrl } from "../../lib/factorLibrary";
 
 const BacktestChart = dynamic(() => import("../backtest/BacktestChart").then(module => module.BacktestChart), { ssr: false });
 const evaluationNotes: Record<string, [string, string]> = {
@@ -57,7 +60,7 @@ export function BacktestResultCard({ result }: { result: BacktestResultRef }) {
   const format = (key: string, raw: unknown): string => typeof raw === "string" && ["sharpe_ratio","total_trades"].includes(key) && raw.trim() && Number.isFinite(Number(raw)) ? format(key,Number(raw)) : typeof raw === "number" && Number.isFinite(raw)
     ? `${financeNumber(raw, locale, observation || key === "total_trades" ? 0 : 2)}${key.endsWith("_pct") ? "%" : ""}`
     : typeof raw === "string" && raw.trim() && !/^(nan|none|null|undefined|[-+]?inf(?:inity)?|[-+]?∞)$/i.test(raw.trim()) ? raw : "—";
-  const verdict = ({ PASS: zh ? "检查通过" : "Checks passed", WARN: zh ? "需关注局限" : "Review limitations", FAIL: zh ? "未通过评估" : "Evaluation failed" } as Record<string,string>)[result.verdict];
+  const verdict = ({ PASS: observation ? (zh ? "回放检查通过" : "Replay checks passed") : (zh ? "经济评估通过" : "Economic checks passed"), WARN: zh ? "需关注局限" : "Review limitations", FAIL: zh ? "未通过评估" : "Evaluation failed" } as Record<string,string>)[result.verdict];
   const points = [...new Map(result.equityPreview.map(p => [p.time,p])).values()].sort((a,b) => a.time-b.time);
   const min = Math.min(...points.map(p=>p.value)), max = Math.max(...points.map(p=>p.value));
   const from = points[0]?.time || 0, span = (points.at(-1)?.time || 0) - from;
@@ -81,6 +84,7 @@ export function BacktestResultCard({ result }: { result: BacktestResultRef }) {
         <svg viewBox="0 0 560 64" preserveAspectRatio="none" role="img" aria-label={zh ? "已记录的回测净值曲线" : "Recorded backtest equity"}><path d={line} fill="none" stroke="currentColor" strokeWidth="1.6" vectorEffect="non-scaling-stroke"/></svg>
         <figcaption><span>{zh ? "净值 · 含手续费" : "Equity · includes fees"}</span><span>{financeNumber(points.at(-1)!.value,locale,2)} USD</span></figcaption>
       </figure>}
+      {complete && <BacktestBiasChecks compact meta={{ bias_checks: result.biasChecks, research_checks: result.researchChecks, provenance: result.provenance }}/>}
       {complete ? <>
         {result.flags.filter(flag => evaluationNotes[flag]).map(flag => <p key={flag} className={styles.note} data-testid="backtest-evaluation-note">{evaluationNotes[flag][zh ? 0 : 1]}</p>)}
         <div className={styles.evidence}><span>{dataLabel}</span><span>{result.engine === "freeform" ? (zh ? "自定义研究回放" : "Custom research replay") : (zh ? "原生策略引擎" : "Native strategy engine")}</span>
@@ -91,6 +95,8 @@ export function BacktestResultCard({ result }: { result: BacktestResultRef }) {
           : (zh ? "仅为历史模拟，不会自动上线或执行实盘交易。" : "Historical simulation only; does not activate the strategy or place live orders.")}</p>
       </> : <p className={styles.diagnostic} role="status">{result.message.split("\n")[0].slice(0,360) || (zh ? "回测未能完成。" : "Replay could not complete.")}</p>}
       <div className={styles.footer}>
+        {complete && <BacktestReviewAction className={styles.secondary} target={{strategyId:result.strategyId,ts:result.ts,proposalId:result.proposalId,sourceRevision:typeof result.provenance.source_revision === "string" ? result.provenance.source_revision : undefined}}/>}
+        {complete && !observation && <Link href={factorSourceUrl({strategy_id:result.strategyId,ts:result.ts,proposal_id:result.proposalId})} className={styles.secondary} data-testid="backtest-factor-library">{zh ? "提取与复用因子" : "Extract & reuse factors"}<Icon name="arrowUpRight" size={14}/></Link>}
         {complete && <button type="button" className={styles.action} aria-expanded={expanded} aria-controls={details ? `task-dock-panel-${reportId}` : id} onClick={openReport} data-testid="open-backtest-report">
           <Icon name="chart" size={14}/>{!details && open ? (zh ? "收起报告" : "Close report") : observation ? (zh ? "查看事件与诊断" : "View events and diagnostics") : (zh ? "查看行情与交易明细" : "View equity curve and trades")}<Icon name="chevronRight" size={14}/></button>}
         {target && (details ? <button type="button" onClick={openStrategy} className={styles.secondary}>{zh ? "对应策略" : "View this strategy"}<Icon name="chevronRight" size={14}/></button> : <Link href={target} className={styles.secondary}>{zh ? "查看对应策略" : "View this strategy"}<Icon name="arrowUpRight" size={14}/></Link>)}

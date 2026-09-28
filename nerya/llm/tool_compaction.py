@@ -847,7 +847,7 @@ def _reduce_backtest(name: str, output: Any) -> Optional[CompactedResult]:
     summary = f"backtest: metrics={metric_keys}, errors={error_count}"
     kept = _compact_top_level_fields(output)
     for key in ("result_type", "backtest_status", "strategy_id", "proposal_id", "backtest_ts", "title", "engine",
-                "evaluation_mode", "execution_mode", "performance_evidence", "replay", "provenance",
+                "evaluation_mode", "execution_mode", "performance_evidence", "replay", "provenance", "bias_checks", "research_checks",
                 "metrics_display", "start_utc", "end_utc", "coverage_message", "flags", "next_required_action", "equity_preview",
                 "requested_window_days", "requested_window_complete", "requested_start_utc", "requested_end_utc", "primary_timeframe", "data_manifest",
                 "run_receipt", "failure_path", "phase"):

@@ -188,7 +188,9 @@ def test_backtest_engine_exposes_requested_timeframes_and_policy():
     )
 
     assert seen
-    assert max(row["trend"] for row in seen) >= 1
+    # The hourly candle opening at the same time as the first 5m bar is still
+    # forming for this whole 30-minute fixture and must never enter context.
+    assert {row["trend"] for row in seen} == {1}
     assert seen[0]["order_usd"] == 50
     assert result.trades[0]["reason"] == "enter from multi timeframe"
     assert any(row["positions"] for row in seen[1:])
