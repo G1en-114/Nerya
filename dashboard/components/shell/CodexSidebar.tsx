@@ -30,6 +30,7 @@ import {
   SearchIcon,
   SettingsIcon,
   StrategiesIcon,
+  SkillsIcon,
   MoreIcon,
   TriggersIcon,
 } from "../icons";
@@ -58,6 +59,7 @@ const COVERED_HREFS = new Set([
   "/dashboard",
   "/portfolio",
   "/strategies",
+  "/factors",
   "/inbox",
   "/settings",
   "/accounts",
@@ -252,6 +254,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
             <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed active={pathMatches(pathname,"/chat")} />
             <SideRow icon={AgentsIcon} label={t("agents")} href="/agents" collapsed active={isActive(pathname,"/agents",["/skills","/tasks"])} />
             <SideRow icon={StrategiesIcon} label={t("strategies")} href="/strategies" collapsed active={isActive(pathname,"/strategies")} />
+            <SideRow icon={SkillsIcon} label={t("factors")} href="/factors" collapsed active={isActive(pathname,"/factors")} />
             <SideRow icon={PortfolioIcon} label={t("trading")} href="/portfolio" collapsed active={isActive(pathname,"/portfolio",["/accounts","/orders","/incidents"])} />
             <SideRow icon={TriggersIcon} label={t("automation")} href="/workflows" collapsed active={isActive(pathname,"/workflows")} />
             {advancedItems.length > 0 && <SidebarHint label={t("sectionAdvanced")}><button type="button" className="sidebar-item sidebar-item-idle w-full justify-center px-0" aria-label={t("sectionAdvanced")} aria-expanded={advancedOpen} aria-controls="sidebar-additional-destinations" onClick={() => setAdvancedOpen(value => !value)}><MoreIcon size={18} /></button></SidebarHint>}

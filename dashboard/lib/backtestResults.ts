@@ -9,6 +9,8 @@ export type BacktestResultRef = {
   start: string; end: string; nextAction: string; flags: string[];
   equityPreview: Array<{ time: number; value: number }>;
   coverage?: Record<string, unknown>;
+  biasChecks?: Record<string, unknown>;
+  researchChecks?: Record<string, unknown>;
 };
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
@@ -90,6 +92,8 @@ export function extractBacktestResults(value: unknown, seenAt = 0, action = ""):
         performanceEvidence: typeof row.performance_evidence === "boolean" ? row.performance_evidence : old?.performanceEvidence,
         replay: { ...old?.replay, ...object(row.replay) },
         provenance: { ...old?.provenance, ...object(row.provenance) },
+        biasChecks: { ...old?.biasChecks, ...object(object(row.metrics).bias_checks), ...object(row.bias_checks) },
+        researchChecks: { ...old?.researchChecks, ...object(object(row.metrics).research_checks), ...object(row.research_checks) },
         engine: text(row.engine) || old?.engine || "",
         coverage: { ...old?.coverage, ...Object.fromEntries(["requested_window_days", "requested_window_complete", "data_manifest", "tf", "backtest_days"].filter(key => row[key] !== undefined).map(key => [key, row[key]])) },
         start: text(row.start_utc || object(row.metrics_display).start_utc || object(row.metrics).start_utc) || old?.start || "",
@@ -127,6 +131,8 @@ export function collectBacktestResults(thread: Pick<ChatThread, "messages"> | nu
         performanceEvidence: result.performanceEvidence ?? old?.performanceEvidence,
         replay: { ...old?.replay, ...result.replay }, provenance: { ...old?.provenance, ...result.provenance },
         coverage: { ...old?.coverage, ...result.coverage },
+        biasChecks: { ...old?.biasChecks, ...result.biasChecks },
+        researchChecks: { ...old?.researchChecks, ...result.researchChecks },
         start: result.start || old?.start || "", end: result.end || old?.end || "", engine: result.engine || old?.engine || "",
         flags: result.flags.length ? result.flags : old?.flags || [], nextAction: result.nextAction || old?.nextAction || "",
         equityPreview: result.equityPreview.length ? result.equityPreview : old?.equityPreview || [] });

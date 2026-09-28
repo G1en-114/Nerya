@@ -53,6 +53,13 @@ const FALLBACK: OperatorNavData = {
       always_visible: true,
     },
     {
+      id: "factor_library",
+      label: "Factor Library",
+      href: "/factors",
+      icon: "skills",
+      always_visible: true,
+    },
+    {
       id: "runtime_library",
       label: "Runtime Library",
       href: "/agents",

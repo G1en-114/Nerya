@@ -146,7 +146,7 @@ export const NAV_ICONS: Record<string, IconComponent> = {
   "/portfolio": PortfolioIcon, "/accounts": SecurityIcon,
   "/orders": OrdersIcon, "/incidents": BellIcon,
   "/strategies": StrategiesIcon, "/agents": AgentsIcon,
-  "/skills": SkillsIcon, "/workflows": WorkflowIcon,
+  "/skills": SkillsIcon, "/factors": SkillsIcon, "/workflows": WorkflowIcon,
   "/inbox": BellIcon, "/tasks": AgentsIcon,
   "/self-evolution": EvolutionIcon, "/settings": SettingsIcon,
   "/gateway": MessagesIcon, "/web-search": SearchIcon,

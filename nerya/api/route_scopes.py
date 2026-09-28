@@ -176,6 +176,13 @@ _RULES: tuple[RouteRule, ...] = (
     # workspace-native tool registry view.
     RouteRule("GET", "/agent/tools", "read:runtime", ""),
 
+    # Factor metadata is readable; definition/evidence writes have a separate scope.
+    RouteRule("GET", "/factors/", "read:runtime", "versioned factor library"),
+    RouteRule("POST", "/factors/backtest", "read:runtime", "frozen factor references and research sources"),
+    RouteRule("POST", "/factors/extract", "read:runtime", "inspect a frozen backtest for factor extraction"),
+    RouteRule("POST", "/factors/save", "write:tools", "save a factor revision directly"),
+    RouteRule("POST", "/factors/evaluate", "write:tools", "append a local factor diagnostic experiment"),
+
     # charts
     RouteRule("GET", "/charts/get", "read:runtime", "fetch chart bulk artifact by id"),
     RouteRule(

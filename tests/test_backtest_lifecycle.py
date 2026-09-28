@@ -120,6 +120,28 @@ def test_settlement_and_final_chart_match_independent_accounting(tmp_path):
     assert points[-1]["value"] == metrics["final_equity_usd"]
 
 
+def test_last_bar_signal_is_rejected_without_same_close_fill():
+    rows = bars(3)
+    def run(ctx):
+        if len(ctx.market.candles("MOCK:BTC", timeframe="1h")) == len(rows):
+            ctx.trading.open_position(
+                market="MOCK:BTC",
+                side="long",
+                sizing={"method": "fixed_usd", "fixed_usd": 100},
+                reasoning_ref="last bar signal",
+            )
+        return ctx.result.hold(reason="fixture")
+    cfg = load_config(markets=["MOCK:BTC"], overrides={
+        "warmup_bars": 0,
+        "initial_capital_usd": 1000,
+        "fee_bps_by_venue": {"MOCK": 0},
+        "slip_bps_by_venue": {"MOCK": 0},
+    })
+    result = run_backtest(None, cfg, candles_by_market={"MOCK:BTC": rows}, run_fn=run)
+    assert result.trades == []
+    assert [row["reject_reason"] for row in result.rejected_signals] == ["end_of_data_no_next_bar"]
+
+
 def test_agent_builder_has_runtime_precedence_and_input_errors_are_not_ignored(tmp_path):
     raw = CASE("event")
     raw["files"]["main.py"] = raw["files"]["main.py"].replace("return build_agent_task(ctx)", "raise AssertionError('stale script entrypoint must not run')")

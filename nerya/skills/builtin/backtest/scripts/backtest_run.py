@@ -222,6 +222,8 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     yaml_io.dump(out_dir / "config.yml", cfg.asdict())
     if not preflight["ok"]:
         raise BacktestPreflightError(preflight)
+    from ...factor_library.scripts.library import strategy_factor_snapshots
+    factor_snapshots = strategy_factor_snapshots(config_obj, files)
     if preflight_only:
         tracker.complete(preflight_only=True)
         return {"ok": True, "result_type": "backtest_preflight", "strategy_id": package.manifest.strategy_id,
@@ -230,6 +232,8 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     # Freeze the exact files checked, not whatever happens to be on disk after
     # a long download. Local imports resolve inside this snapshot as in runtime.
     snapshot_root = out_dir / "source" / package.manifest.strategy_id
+    if factor_snapshots:
+        atomic_json(out_dir / "factor_snapshot.json", factor_snapshots)
     for rel, content in files.items():
         destination = snapshot_root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -306,6 +310,57 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     end_files, end_omitted = _read_files(package.root)
     provenance["source_changed_during_run"] = bool(end_omitted) or source_revision(end_files) != provenance["source_revision"]
     metrics["provenance"] = provenance
+    temporal_warning_codes = {
+        "lookahead_dynamic_shift", "lookahead_dynamic_center", "lookahead_dynamic_asof",
+        "time_alignment_resample", "nondeterministic_wall_clock",
+        "nondeterministic_randomness", "external_strategy_data_read",
+    }
+    temporal_warnings = [
+        row for row in preflight.get("warnings", [])
+        if isinstance(row, dict) and row.get("code") in temporal_warning_codes
+    ]
+    metrics["bias_checks"] = {
+        "version": 1,
+        "static_temporal_scan": "passed",
+        "static_warnings": temporal_warnings,
+        "historical_prefix_only": True,
+        "closed_bar_context": True,
+        "multi_timeframe_close_aligned": True,
+        "strategy_order_execution": "next_bar_open",
+        "end_of_data_signal": "rejected_no_next_bar",
+        "scope": (
+            "Causal replay/runtime checks plus static high-confidence pattern detection. "
+            "External point-in-time datasets and dynamic code paths still require independent review."
+        ),
+    }
+    # Describe this invocation, not a global strategy-validation badge. These
+    # independent experiments are not performed by an ordinary native replay.
+    metrics["research_checks"] = {
+        "version": 1,
+        "scope": "this_run_only",
+        "checks": [{"id": name, "status": "not_run"} for name in (
+            "dynamic_lookahead", "warmup_stability", "out_of_sample",
+            "walk_forward", "cost_stress", "parameter_sensitivity", "ablation",
+        )],
+        "note": "A completed replay or static scan is not independent research validation. Separate experiments retain their own run IDs.",
+    }
+    provenance.setdefault("assumptions", {})["causality_model"] = {
+        "historical_prefix_only": True,
+        "closed_bar_context": True,
+        "multi_timeframe_close_aligned": True,
+        "strategy_order_execution": "next_bar_open",
+        "end_of_data_signal": "rejected_no_next_bar",
+    }
+    provenance["assumptions"]["execution_model_limits"] = {
+        "order_types": "market_only",
+        "maker_taker_fee_split": "not_modeled",
+        "funding": "not_modeled",
+        "liquidation": "not_modeled",
+        "partial_fills": "not_modeled",
+        "exchange_precision_and_minimums": "not_modeled",
+        "extra_latency_beyond_next_bar": "not_modeled",
+    }
+    metrics["factor_refs"] = [{key: factor[key] for key in ("factor_id", "version", "name", "definition_hash")} for factor in factor_snapshots]
     metrics["data_manifest"] = data_manifest
     metrics["requested_window_complete"] = data_manifest["requested_window_complete"]
     metrics["tf"] = cfg.tf
@@ -430,6 +485,8 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
         "engine": "native",
         "execution_mode": metrics.get("execution_mode"),
         "performance_evidence": metrics.get("performance_evidence"),
+        "bias_checks": metrics["bias_checks"],
+        "research_checks": metrics["research_checks"],
         "equity_preview": ([{"time": ts, "value": value} for ts, value in
             result.equity_series[::max(1, len(result.equity_series) // 60)] + result.equity_series[-1:]]
             if metrics.get("performance_evidence") else []),

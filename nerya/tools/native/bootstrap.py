@@ -2365,6 +2365,8 @@ def register_native_tools(
     if deps.config is not None:
         from .historical_data import historical_data_descriptors
         descriptors.extend(historical_data_descriptors(deps.config))
+        from .factor_library import factor_library_descriptors
+        descriptors.extend(factor_library_descriptors(deps.config))
         # ----- conversational workspace customization -----
         descriptors.extend([
             make_native_descriptor(
