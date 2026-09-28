@@ -14,7 +14,8 @@ export type TimelineItem = {
 /** Public tool evidence only. Do not project system messages or hidden reasoning. */
 export function workbenchTimeline(thread: ChatThread | null, zh: boolean): TimelineItem[] {
   if (!thread) return [];
-  return thread.messages.flatMap((message) => {
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  return messages.flatMap((message) => {
     if (message.role !== "assistant") return [];
     const blocks = [...(message.turn?.blocks || []), ...liveEventsToBlocks([
       ...(message.turn?.activity_events || []), ...(message.live_events || []),

@@ -60,3 +60,7 @@ workspace/artifacts/
 .idea/
 .codegraph/
 /release-artifacts/
+venv/
+/venv
+venv
+doc

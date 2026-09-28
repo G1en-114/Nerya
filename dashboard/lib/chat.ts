@@ -517,7 +517,7 @@ function compactThreadForHistory(thread: ChatThread): ChatThread {
   }
   return {
     ...thread,
-    messages: thread.messages.map(stripLargeMessagePayloads),
+    messages: (thread.messages ?? []).map(stripLargeMessagePayloads),
   };
 }
 
@@ -584,9 +584,10 @@ export function invalidateThreadTranscript(id: string): void {
 
 export function cacheThreadTranscript(thread: ChatThread): ChatThread {
   if (isBrowser() && loadDeletedSessionIds().has(thread.id)) return thread;
-  if (!isBrowser() || thread.messages.length === 0) {
+  const messages = thread.messages ?? [];
+  if (!isBrowser() || messages.length === 0) {
     if (isBrowser()) invalidateThreadTranscript(thread.id);
-    return { ...thread, transcript_loaded: true };
+    return { ...thread, messages: [], transcript_loaded: true };
   }
   const cachedAt = Date.now();
   const next: ChatThread = {
@@ -594,12 +595,12 @@ export function cacheThreadTranscript(thread: ChatThread): ChatThread {
     transcript_loaded: true,
     transcript_cached_at: cachedAt,
     backend_updated_ts: thread.updated_ts,
-    message_count: Math.max(thread.message_count ?? 0, thread.messages.length),
+    message_count: Math.max(thread.message_count ?? 0, messages.length),
   };
   const raw = JSON.stringify({
     thread: {
       ...next,
-      messages: next.messages.map(stripLargeMessagePayloads),
+      messages: messages.map(stripLargeMessagePayloads),
     },
     cached_at: cachedAt,
   });
@@ -680,6 +681,14 @@ export function loadCachedThreadTranscript(
   }
 }
 
+function isValidThread(thread: unknown): thread is ChatThread {
+  if (!thread || typeof thread !== "object") return false;
+  const record = thread as Record<string, unknown>;
+  if (typeof record.id !== "string" || !record.id) return false;
+  if (!Array.isArray(record.messages)) return false;
+  return true;
+}
+
 export function loadThreads(): ChatThread[] {
   if (!isBrowser()) return [];
   try {
@@ -688,7 +697,9 @@ export function loadThreads(): ChatThread[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     const deleted = loadDeletedSessionIds();
-    return (parsed as ChatThread[]).filter(thread => !deleted.has(thread.id));
+    return parsed.filter((thread): thread is ChatThread =>
+      isValidThread(thread) && !deleted.has(thread.id)
+    );
   } catch {
     return [];
   }
