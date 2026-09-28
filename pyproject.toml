@@ -38,6 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Local face analysis; model weights are downloaded on first explicit use.
+face = ["uniface[cpu]>=4.0.0,<5"]
+face-gpu = ["uniface[gpu]>=4.0.0,<5"]
 # Opt-in desktop runtime; install its binary explicitly with playwright install chromium.
 browser = ["playwright>=1.58,<2"]
 # Keep the supported v1 protocol API explicit; normal CLI needs no MCP SDK.
@@ -97,3 +100,4 @@ markers = [
     "integration: opt-in checks that may touch real external services",
     "profile: per-profile gate (unit_mock | strict_runtime | live_opt_in)",
 ]
+

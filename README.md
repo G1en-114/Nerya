@@ -135,6 +135,32 @@ tests/             Runtime regression tests
 .github/workflows/ Validation, native desktop builds and release publication
 ```
 
+## Optional local face analysis
+
+Install `pip install "nerya[face]"` (CPU/Apple Silicon) or
+`pip install "nerya[face-gpu]"` (NVIDIA CUDA) to enable the built-in
+[face-analysis Skill](nerya/skills/builtin/face-analysis/SKILL.md).
+It uses UniFace for face detection, alignment landmarks and two-photo cosine
+similarity, with selectable SCRFD/RetinaFace/YOLOv8-Face and ArcFace/AdaFace.
+Models load and download only on explicit use. Images and embeddings are not
+persisted by the helper. Matches are advisory and do not establish identity,
+liveness or trading authorization. See the Skill for requests and limitations.
+
+The dashboard also offers opt-in **administrator login face verification** under
+Settings → Access and security. Set the administrator password first, then enroll
+the shared administrator reference using the camera. Login then requires a live
+camera face check before entering the password. Its server-issued receipt lasts
+120 seconds and is consumed once, including on an incorrect-password attempt.
+Trading approvals and risk checks continue normally without additional face scans.
+Existing local-login exemptions and API tokens retain their existing behavior.
+
+Reference features are encrypted in a separate `face.enc` vault; original camera
+frames are not saved. Removing the reference disables login face verification.
+UniFace MiniFASNet provides passive anti-spoofing, not replay-proof authentication;
+evaluate recognition thresholds and presentation-attack resistance before use.
+Models may download on first capture. For an isolated inference environment, set
+`NERYA_FACE_PYTHON` to a Python executable with `uniface[cpu]` installed.
+
 ## Security and licensing
 
 Live execution requires the corresponding configuration and authorization; do not bypass the trading risk and approval gates. Vault encryption protects stored credentials, not a compromised running process. Keep backups of your workspace and its encryption key, and never commit account secrets, `.env` files or live trading state.

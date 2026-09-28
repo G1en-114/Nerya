@@ -1,6 +1,7 @@
 "use client";
 
 import { DesktopSettings } from "./settings/DesktopSettings";
+import { FaceSecuritySettings } from "./settings/FaceSecuritySettings";
 import { copy as i18nCopy } from "../lib/i18n";
 
 import { useLocale,useTranslations } from "next-intl";
@@ -2777,6 +2778,7 @@ function SettingsWorkspaceContent({
             </div>
           </Card>
           <DesktopSettings passwordConfigured={Boolean(authStatus?.password_configured)} />
+          <FaceSecuritySettings />
           </div>
         </div>
       ) : null}

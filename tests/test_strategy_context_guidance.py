@@ -169,6 +169,9 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
         "Never multiply raw _pct fields by 100", "preferred_provider",
         "wallet_binding", "exact chain:token", "runtime scanner",
         "CEX proxies are not an on-chain backtest", "operator_approved:true",
+        "never use `open()`", "Do not re-parse `strategy.yml` from a test",
+        "the next state-changing\ncall MUST be `strategy_draft_proposal`",
+        "pre-draft source archaeology does not",
     ):
         assert contract in text, contract
     assert "strategy_generate_proposal" not in entry

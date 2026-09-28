@@ -90,6 +90,9 @@ def _json_safe(value: Any) -> Any:
 
 
 _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
+    "/security/face/status",
+    "/security/face/enroll",
+    "/security/face/delete",
     "/browsers/agent",
     "/agent/run_turn",
     "/agent/run_turn_internal",
@@ -660,6 +663,8 @@ def build_server(
 
         def _read_body(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or 0)
+            if (self.path.split("?")[0].startswith("/security/face/") or self.path.split("?")[0] == "/auth/face/verify") and length > 3_100_000:
+                raise ValueError("camera_frame_too_large")
             if not length:
                 return {}
             raw = self.rfile.read(length).decode("utf-8") or "{}"
