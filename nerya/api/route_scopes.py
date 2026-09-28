@@ -66,6 +66,7 @@ ANONYMOUS_PATHS: frozenset[str] = frozenset({
     "/health",
     "/auth/status",
     "/auth/login",
+    "/auth/face/verify",
 })
 
 
@@ -230,6 +231,13 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("GET", "/strategies/runtime/workflow/check", "read:runtime", "workflow configuration and evidence check"),
     RouteRule("GET", "/strategies/runtime/workflow/export", "read:runtime", "portable strategy source; excludes runtime state and credentials"),
     RouteRule("POST", "/strategies/runtime/workflow/import", "write:config", "stage a new paper strategy proposal; never execute or promote"),
+
+    # Authenticated administrators manage the shared login reference. The
+    # anonymous check grants a one-use receipt, never a JWT by itself.
+    RouteRule("POST", "/security/face/status", "read:runtime", ""),
+    RouteRule("POST", "/security/face/enroll", "admin:ops", ""),
+    RouteRule("POST", "/security/face/delete", "admin:ops", ""),
+    RouteRule("POST", "/auth/face/verify", None, "face check before administrator password login"),
 
     # trading / portfolio / strategy
     RouteRule(
@@ -591,3 +599,4 @@ def describe_matrix() -> list[dict[str, object]]:
             "note": rule.note,
         })
     return out
+

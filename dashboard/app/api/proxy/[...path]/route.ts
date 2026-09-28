@@ -97,12 +97,14 @@ function buildForwardHeaders(req: NextRequest): Headers {
 }
 
 function isAnonymousProxyPath(joined: string): boolean {
-  return joined === "health" || joined === "auth/status" || joined === "auth/login";
+  return joined === "health" || joined === "auth/status" || joined === "auth/login" || joined === "auth/face/verify";
 }
 
 function isLongRunningProxyPath(joined: string): boolean {
   return (
     joined.startsWith("agent/run_turn") ||
+    joined === "auth/face/verify" ||
+    joined === "security/face/enroll" ||
     joined.startsWith("strategy/") ||
     joined.startsWith("strategies/runtime/") ||
     joined === "triggers/schedules/run_now" ||
