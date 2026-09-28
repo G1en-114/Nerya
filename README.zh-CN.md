@@ -83,6 +83,19 @@
 
 模型能否调用、行情能否获取取决于你配置的服务。回测是历史模拟，不代表未来收益。启动执行前，请检查策略代码、参数、数据覆盖、手续费和交易权限。
 
+## 测试网风控存证
+
+操作员可以把一次已保存的策略风控决策摘要写入 Sepolia 或 Base Sepolia。需要安装 `.[trading]`，准备测试网 RPC、少量测试币，并在工作空间密钥库中保存演示钱包私钥，作用域设为 `chain_audit`；命令只接受 `vault://` 引用，不接受明文私钥。`anchor` 是显式的链上广播，会消耗测试币支付 gas。
+
+```powershell
+$env:NERYA_TESTNET_RPC_URL = "https://<your-sepolia-rpc>"
+python -m nerya.cli.app chain-evidence prepare --strategy-id <strategy-id> --session-id <session-id>
+python -m nerya.cli.app chain-evidence anchor --strategy-id <strategy-id> --session-id <session-id> --chain sepolia --signer-ref vault://<secret-name>
+python -m nerya.cli.app chain-evidence verify --strategy-id <strategy-id> --session-id <session-id> --chain sepolia
+```
+
+`session-id` 来自交易计划提交结果。`prepare` 显示待存证内容及 SHA-256 摘要；`verify` 从测试网读取交易与回执，核对链 ID、摘要和确认状态。工作空间 `journals/chain_evidence.jsonl` 保存会话 ID、交易哈希与状态。工作空间不在默认位置时，每条命令都加 `--workspace <path>`。这只证明决策摘要被写入测试网，不证明该风控结论本身正确。
+
 ## 从源码运行
 
 源码方式适用于开发与服务端部署。Node 和 Python 版本分别固定在 `.node-version` 与 `.python-version`。

@@ -31,6 +31,7 @@ import argparse
 import sys
 
 from .commands import (
+    chain_evidence,
     core,
     evolution,
     quickstart,
@@ -62,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.register(sub)
     evolution.register(sub)
     runtime.register(sub)
+    chain_evidence.register(sub)
     external_tools.register(sub)
     wallet.register(sub)
     historical_data.register(sub)
