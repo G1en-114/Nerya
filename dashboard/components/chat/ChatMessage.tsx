@@ -376,7 +376,7 @@ export function AssistantBubble({
 }: {
   msg: AssistantMessage;
   pendingApprovals?: Map<string, ApprovalCard>;
-  onApprovalAction?: (callbackData: string) => void;
+  onApprovalAction?: (callbackData: string, extras?: { nodIntentReceipt?: string }) => void;
   resolvingApprovalIds?: Set<string>;
   onRetry?: () => void; onContinue?:()=>void; onOpenResult?: () => void;
   traceContent?: ReactNode; traceLabel?: string; conversationId?: string; onOpenBrowser?: () => void;

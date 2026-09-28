@@ -151,6 +151,7 @@ export const NAV_ICONS: Record<string, IconComponent> = {
   "/self-evolution": EvolutionIcon, "/settings": SettingsIcon,
   "/gateway": MessagesIcon, "/web-search": SearchIcon,
   "/browsers": GlobeIcon, "/env-vault": SecurityIcon,
+  "/visual-evidence": ImageIcon,
 };
 
 /** Backend semantic hints stay independent of SVG geometry. */
@@ -163,4 +164,5 @@ export const NAV_ICON_BY_NAME: Record<string, IconComponent> = {
   messages: MessagesIcon, memory: MemoryIcon, evolution: EvolutionIcon,
   security: SecurityIcon, globe: GlobeIcon, shield: ShieldCheckIcon,
   search: SearchIcon, browsers: GlobeIcon, vault: SecurityIcon,
+  image: ImageIcon, eye: EyeIcon,
 };

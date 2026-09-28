@@ -1,6 +1,7 @@
 "use client";
 
 import { DesktopSettings } from "./settings/DesktopSettings";
+import { FaceSecuritySettings } from "./settings/FaceSecuritySettings";
 import { copy as i18nCopy } from "../lib/i18n";
 
 import { useLocale,useTranslations } from "next-intl";
@@ -2717,6 +2718,11 @@ function SettingsWorkspaceContent({
             }
           >
             <div className="space-y-3">
+              {authStatus?.demo_password_active ? (
+                <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-5 text-warn">
+                  {tAuth("demoPasswordWarning")}
+                </div>
+              ) : null}
               {authStatus?.password_configured ? (
                 <Field label={tAuth("currentPassword")} hint={tAuth("requiredForRotation")}>
                   <input
@@ -2777,6 +2783,7 @@ function SettingsWorkspaceContent({
             </div>
           </Card>
           <DesktopSettings passwordConfigured={Boolean(authStatus?.password_configured)} />
+          <FaceSecuritySettings />
           </div>
         </div>
       ) : null}

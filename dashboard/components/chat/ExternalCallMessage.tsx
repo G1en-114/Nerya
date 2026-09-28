@@ -25,7 +25,7 @@ export function externalStatus(status: string, zh: boolean) {
 }
 export type ExternalApprovalProps = {
   pendingApprovals?: Map<string, ApprovalCard>;
-  onApprovalAction?: (callbackData: string) => void;
+  onApprovalAction?: (callbackData: string, extras?: { nodIntentReceipt?: string }) => void;
   resolvingApprovalIds?: Set<string>;
 };
 

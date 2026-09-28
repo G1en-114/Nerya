@@ -30,14 +30,29 @@ export function isLoopbackHost(rawHost: string): boolean {
   return name === "localhost" || name === "::1" || /^127(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(name);
 }
 
+/**
+ * True when every hop recorded in ``x-forwarded-for`` is a loopback address.
+ *
+ * Next.js (dev and standalone) appends its own loopback address to this
+ * header on every request, so its mere presence cannot prove a remote
+ * caller. What does prove one is a non-loopback hop anywhere in the chain:
+ * a tunnel, a LAN proxy, or any real client that is not this machine.
+ * Entries are ordered client-first, and each proxy appends the address it
+ * saw, so all of them must be loopback for the request to have stayed local.
+ */
+function isLoopbackForwardChain(rawForwardedFor: string | null): boolean {
+  const value = (rawForwardedFor || "").trim();
+  if (!value) return true;
+  const hops = value.split(",").map((hop) => hop.trim());
+  if (!hops.length) return true;
+  return hops.every((hop) => isLoopbackHost(hop));
+}
+
 export function isLocalRequest(req: Request): boolean {
   // The bundled server proves socket locality before Next inserts forwarding
   // headers. The random key is server-only and incoming proofs are stripped.
   const key = process.env.NERYA_LOCAL_PEER_KEY;
   if (key) return req.headers.get("x-nerya-local-peer") === key && isLoopbackHost(req.headers.get("host") || "");
-  // Any proxy hop makes the request remote, even if it claims a loopback
-  // host — `x-forwarded-for` is trivial to send but a direct local browser
-  // never has one.
-  if (req.headers.get("x-forwarded-for")) return false;
+  if (!isLoopbackForwardChain(req.headers.get("x-forwarded-for"))) return false;
   return isLoopbackHost(req.headers.get("host") || "");
 }

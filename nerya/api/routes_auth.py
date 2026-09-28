@@ -4,21 +4,34 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..security.face_authorization import (
+    ADMIN_ACTOR,
+    LOGIN_CONTEXT,
+    FaceAuthorization,
+    FaceAuthorizationError,
+)
 from . import auth as auth_mod
 
 
 def routes():
     def status(client, _payload):
-        return auth_mod.admin_auth_status(client.config)
-
+        result = auth_mod.admin_auth_status(client.config)
+        result["face_required"] = FaceAuthorization(client.config).enabled()
+        return result
     def login(client, payload: dict[str, Any]):
         password = str((payload or {}).get("password") or "")
-        if not auth_mod.has_admin_password(client.config):
+        if not auth_mod.has_admin_password(client.config) and not auth_mod.verify_admin_password(
+            client.config, password
+        ):
             return {
                 "ok": False,
                 "error": "admin_password_not_configured",
                 "detail": "Set the admin password from a local dashboard session first.",
             }
+        try:
+            FaceAuthorization(client.config).consume(ADMIN_ACTOR, LOGIN_CONTEXT, (payload or {}).get("face_receipt"))
+        except FaceAuthorizationError as exc:
+            return {"ok": False, "error": str(exc)}
         if not auth_mod.verify_admin_password(client.config, password):
             return {"ok": False, "error": "invalid_password"}
         token = auth_mod.issue_admin_jwt(client.config)
@@ -33,6 +46,10 @@ def routes():
                 return {"ok": False, "error": "current_password_required"}
             if not auth_mod.verify_admin_password(client.config, current_password):
                 return {"ok": False, "error": "invalid_current_password"}
+        elif not auth_mod.verify_admin_password(client.config, current_password):
+            # Still on the demo bootstrap password: require it so a stale
+            # session cannot silently replace the credential.
+            return {"ok": False, "error": "invalid_current_password"}
         try:
             auth_mod.set_admin_password(client.config, new_password)
         except ValueError as exc:
@@ -44,6 +61,12 @@ def routes():
             **token,
         }
 
+    def verify_face(client, payload):
+        try:
+            return FaceAuthorization(client.config).verify(ADMIN_ACTOR, LOGIN_CONTEXT, (payload or {}).get("image"))
+        except FaceAuthorizationError as exc:
+            return {"ok": False, "error": str(exc), "_status": 403}
+
     def logout(_client, _payload):
         # JWTs are stateless; the browser clears its stored token.
         return {"ok": True}
@@ -52,6 +75,7 @@ def routes():
         ("GET", "/auth/status", status),
         ("POST", "/auth/status", status),
         ("POST", "/auth/login", login),
+        ("POST", "/auth/face/verify", verify_face),
         ("POST", "/auth/admin/password", set_password),
         ("POST", "/auth/logout", logout),
     ]

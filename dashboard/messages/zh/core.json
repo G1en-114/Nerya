@@ -42,7 +42,8 @@
     "/env-vault": "环境变量与密钥库",
     "/messages": "消息",
     "/scripts": "脚本",
-    "/gateway": "网关"
+    "/gateway": "网关",
+    "/visual-evidence": "视觉证据工作台"
   },
   "topnav": {
     "brandName": "Nerya",

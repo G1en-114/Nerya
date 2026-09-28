@@ -9,6 +9,7 @@ import { TaskDeliverables } from "./TaskDeliverables";
 import { WorkspaceTerminal } from "./WorkspaceTerminal";
 import { useStrategyReports } from "./useStrategyReports";
 import { resolveMessageApproval } from "../../lib/approvalResolution";
+import { nodError } from "../../lib/nodIntent";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -1332,7 +1333,7 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     );
   }
 
-  async function resolveApproval(callbackData: string) {
+  async function resolveApproval(callbackData: string, extras?: { nodIntentReceipt?: string }) {
     const approvalId = approvalIdFromCallback(callbackData);
     if (!approvalId) return;
     setResolvingApprovalIds((prev) => new Set(prev).add(approvalId));
@@ -1340,6 +1341,7 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
       const res = await clientApi.approvalCallback({
         callback_data: callbackData,
         actor_id: "dashboard",
+        ...(extras?.nodIntentReceipt ? { nod_intent_receipt: extras.nodIntentReceipt } : {}),
       });
       if (!res.ok) throw new Error(res.error || "approval_resolution_failed");
       const state = String(res?.state || "").toLowerCase();
@@ -1364,7 +1366,13 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
         toast({tone:'warn',message:zh ? "授权已保存，续跑任务尚未恢复，请查看任务状态。无需重复授权。" : "Permission saved; continuation is not yet confirmed. Check task status; do not grant permission again."});
       }
     } catch (error) {
-      toast({tone:'error',message:zh ? `授权处理失败：${String(error)}` : `Approval failed: ${String(error)}`});
+      const message = error instanceof Error ? error.message : String(error);
+      toast({
+        tone: 'error',
+        message: message.startsWith("nod_")
+          ? nodError(new Error(message), zh)
+          : zh ? `授权处理失败：${message}` : `Approval failed: ${message}`,
+      });
     } finally {
       setResolvingApprovalIds((prev) => {
         const next = new Set(prev);

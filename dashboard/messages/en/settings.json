@@ -622,7 +622,8 @@
       "loggedOut": "Admin login cleared for this browser.",
       "tooShort": "Admin password must be at least 8 characters.",
       "mismatch": "The new password confirmation does not match.",
-      "note": "Only a password hash is stored. The JWT secret is generated into runtime config. Set the password locally before logging in from a remote address."
+      "note": "Only a password hash is stored. The JWT secret is generated into runtime config. Set the password locally before logging in from a remote address.",
+      "demoPasswordWarning": "The demo bootstrap password is still active and is readable by anyone with the source. Set your own password below; the bootstrap password stops working immediately."
     },
     "memoryCard": {
       "backendTitle": "Enhanced memory backend",

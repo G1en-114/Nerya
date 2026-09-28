@@ -66,6 +66,7 @@ ANONYMOUS_PATHS: frozenset[str] = frozenset({
     "/health",
     "/auth/status",
     "/auth/login",
+    "/auth/face/verify",
 })
 
 
@@ -231,6 +232,19 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("GET", "/strategies/runtime/workflow/export", "read:runtime", "portable strategy source; excludes runtime state and credentials"),
     RouteRule("POST", "/strategies/runtime/workflow/import", "write:config", "stage a new paper strategy proposal; never execute or promote"),
 
+    # Authenticated administrators manage the shared login reference. The
+    # anonymous check grants a one-use receipt, never a JWT by itself.
+    RouteRule("POST", "/security/face/status", "read:runtime", ""),
+    RouteRule("POST", "/security/face/enroll", "admin:ops", ""),
+    RouteRule("POST", "/security/face/delete", "admin:ops", ""),
+    RouteRule("POST", "/auth/face/verify", None, "face check before administrator password login"),
+    RouteRule(
+        "POST",
+        "/security/nod/intent",
+        "approve:trade|approve:tool",
+        "camera nod expresses intent for one approval; authority unchanged",
+    ),
+
     # trading / portfolio / strategy
     RouteRule(
         "POST",
@@ -369,6 +383,12 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("GET", "/data-sources/events", "read:runtime", ""),
     RouteRule("POST", "/data-sources/sync-now", "write:config", ""),
     # Trading evidence vault.
+    RouteRule("GET", "/evidence/visual/list", "read:runtime", "shared research images"),
+    RouteRule("GET", "/evidence/visual/get", "read:runtime", "versioned manual review"),
+    RouteRule("GET", "/evidence/visual/image", "read:runtime", "hash-checked original image"),
+    RouteRule("POST", "/evidence/visual/upload", "write:memory", "operator research input"),
+    RouteRule("POST", "/evidence/visual/field", "write:memory", "operator correction with optimistic concurrency"),
+    RouteRule("POST", "/evidence/visual/cite", "write:memory", "version-bound research citation"),
     RouteRule("GET", "/evidence/sources", "read:runtime", ""),
     RouteRule("GET", "/evidence/topics", "read:runtime", ""),
     RouteRule("GET", "/evidence/search", "read:runtime", ""),
@@ -591,3 +611,4 @@ def describe_matrix() -> list[dict[str, object]]:
             "note": rule.note,
         })
     return out
+

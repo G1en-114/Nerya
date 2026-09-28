@@ -391,6 +391,14 @@ _ADVANCED_NAV: tuple[dict[str, Any], ...] = (
         "tagline": "Configure each chat platform with its own inline setup docs, then watch live traffic.",
         "always_visible": True,
     },
+    {
+        "id": "visual_evidence",
+        "label": "Visual evidence",
+        "href": "/visual-evidence",
+        "icon": "image",
+        "tagline": "Upload research images, review fields by hand, cite the exact reviewed version.",
+        "always_visible": True,
+    },
 )
 
 

@@ -42,7 +42,8 @@
     "/env-vault": "Env & Vault",
     "/messages": "Messages",
     "/scripts": "Scripts",
-    "/gateway": "Gateway"
+    "/gateway": "Gateway",
+    "/visual-evidence": "Visual evidence"
   },
   "topnav": {
     "brandName": "Nerya",
