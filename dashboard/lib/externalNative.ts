@@ -50,6 +50,7 @@ export function externalNodeMessage(trace: ExternalCallTrace, node: ExternalCall
  * the same native blocks, including on reload of pre-adapter saved sessions. */
 export function projectExternalThread(thread: ChatThread | null): ChatThread | null {
   if (!thread) return thread;
+  if (!Array.isArray(thread.messages)) return { ...thread, messages: [], transcript_loaded: false };
   const source = isExternalSource(thread.source) ? thread.source : thread.id.match(/^ext_(mcp|tunnel)_[0-9a-f]{32}$/)?.[1];
   const hasCalls = thread.messages.some(message => message.role === 'assistant' && message.turn?.external_call);
   if (!hasCalls) return source && source !== thread.source ? { ...thread, source } : thread;

@@ -583,8 +583,15 @@ export function invalidateThreadTranscript(id: string): void {
 }
 
 export function cacheThreadTranscript(thread: ChatThread): ChatThread {
+  const normalized = normalizeCachedThread(thread);
+  if (!normalized) return { ...thread, messages: [], transcript_loaded: false };
+  // An incomplete/malformed response is not an empty authoritative transcript.
+  // Keep any good cached transcript and let the caller retry backend hydration.
+  if (!isCachedTranscript(thread.messages)) return normalized;
+  thread = normalized;
   if (isBrowser() && loadDeletedSessionIds().has(thread.id)) return thread;
-  if (!isBrowser() || thread.messages.length === 0) {
+  const messages = thread.messages;
+  if (!isBrowser() || messages.length === 0) {
     if (isBrowser()) invalidateThreadTranscript(thread.id);
     return { ...thread, transcript_loaded: true };
   }
@@ -594,12 +601,12 @@ export function cacheThreadTranscript(thread: ChatThread): ChatThread {
     transcript_loaded: true,
     transcript_cached_at: cachedAt,
     backend_updated_ts: thread.updated_ts,
-    message_count: Math.max(thread.message_count ?? 0, thread.messages.length),
+    message_count: Math.max(thread.message_count ?? 0, messages.length),
   };
   const raw = JSON.stringify({
     thread: {
       ...next,
-      messages: next.messages.map(stripLargeMessagePayloads),
+      messages: messages.map(stripLargeMessagePayloads),
     },
     cached_at: cachedAt,
   });
@@ -647,8 +654,8 @@ export function loadCachedThreadTranscript(
     const raw = localStorage.getItem(transcriptCacheKey(id));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    const thread = parsed?.thread as ChatThread | undefined;
-    if (!thread || thread.id !== id || !Array.isArray(thread.messages)) {
+    const thread = normalizeCachedThread(parsed?.thread);
+    if (!thread || thread.id !== id || !isCachedTranscript(parsed?.thread?.messages)) {
       return null;
     }
     if (thread.messages.length === 0) {
@@ -680,6 +687,39 @@ export function loadCachedThreadTranscript(
   }
 }
 
+function isCachedMessage(message: unknown): message is ChatMessage {
+  if (!message || typeof message !== "object") return false;
+  const row = message as Record<string, unknown>;
+  return typeof row.id === "string" && Boolean(row.id.trim()) &&
+    typeof row.ts === "number" && Number.isFinite(row.ts) &&
+    (row.role === "assistant" || (row.role === "user" && typeof row.text === "string"));
+}
+
+function isCachedTranscript(messages: unknown): messages is ChatMessage[] {
+  return Array.isArray(messages) && messages.every(isCachedMessage);
+}
+
+/** Cache boundary only: retain valid messages and metadata, never invent history. */
+function normalizeCachedThread(thread: unknown): ChatThread | null {
+  if (!thread || typeof thread !== "object" || Array.isArray(thread)) return null;
+  const record = thread as Record<string, unknown>;
+  if (typeof record.id !== "string" || !record.id.trim()) return null;
+  const messages = Array.isArray(record.messages) ? record.messages.filter(isCachedMessage) : [];
+  const damaged = !isCachedTranscript(record.messages);
+  const created = typeof record.created_ts === "number" && Number.isFinite(record.created_ts) ? record.created_ts : 0;
+  return {
+    ...record,
+    id: record.id,
+    title: typeof record.title === "string" ? record.title : `Session ${record.id.slice(0, 8)}`,
+    created_ts: created,
+    updated_ts: typeof record.updated_ts === "number" && Number.isFinite(record.updated_ts) ? record.updated_ts : created,
+    message_count: typeof record.message_count === "number" && Number.isFinite(record.message_count)
+      ? Math.max(record.message_count, messages.length) : messages.length,
+    messages,
+    ...(damaged ? { imported: true, transcript_loaded: false, transcript_cached_at: undefined } : {}),
+  } as ChatThread;
+}
+
 export function loadThreads(): ChatThread[] {
   if (!isBrowser()) return [];
   try {
@@ -688,7 +728,8 @@ export function loadThreads(): ChatThread[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     const deleted = loadDeletedSessionIds();
-    return (parsed as ChatThread[]).filter(thread => !deleted.has(thread.id));
+    return parsed.map(normalizeCachedThread).filter((thread): thread is ChatThread =>
+      thread !== null && !deleted.has(thread.id));
   } catch {
     return [];
   }
@@ -697,9 +738,12 @@ export function loadThreads(): ChatThread[] {
 export function saveThreads(threads: ChatThread[]) {
   if (!isBrowser()) return;
   try {
+    const deleted = loadDeletedSessionIds();
+    const safe = threads.map(normalizeCachedThread).filter((thread): thread is ChatThread =>
+      thread !== null && !deleted.has(thread.id));
     localStorage.setItem(
       scopedStorageKey(STORAGE_KEY),
-      JSON.stringify(threads.filter(thread => !loadDeletedSessionIds().has(thread.id)).map(compactThreadForHistory)),
+      JSON.stringify(safe.map(compactThreadForHistory)),
     );
   } catch {
     // ignore quota errors — the UI will keep working with in-memory state.

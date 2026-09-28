@@ -1,4 +1,11 @@
 {
+  "chatError": {
+    "label": "Chat error",
+    "title": "Chat view could not render.",
+    "unexpected": "Unexpected chat error.",
+    "retry": "Retry",
+    "reload": "Reload page"
+  },
   "topHeader": {
     "pinToFavorites": "Pin to favorites",
     "search": "Search",

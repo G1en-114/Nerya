@@ -33,6 +33,7 @@ export function commitMessageHistory(sessionId: string, messageId: string, backe
   if (!getWorkspaceIdentity()) return;
   saveThreads(loadThreads().map(thread => {
     if (thread.id !== sessionId) return thread;
+    if (!Array.isArray(thread.messages)) return thread;
     const matches = (row: typeof thread.messages[number]) => row.id === messageId || row.backend_message_id === backendId;
     const messages = patch ? thread.messages.map(row => matches(row) && row.role === "user" ? { ...row, ...patch } : row)
       : thread.messages.filter(row => !matches(row));

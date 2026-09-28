@@ -1328,7 +1328,12 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
 
   function updateThread(id: string, fn: (t: ChatThread) => ChatThread) {
     setThreads((prev) =>
-      prev.map((t) => (t.id === id ? { ...fn(t), updated_ts: Date.now() } : t))
+      prev.map((t) => {
+        if (!t || t.id !== id || !Array.isArray(t.messages)) return t;
+        const next = fn(t);
+        if (!next || !Array.isArray(next.messages)) return t;
+        return { ...next, updated_ts: Date.now() };
+      })
     );
   }
 

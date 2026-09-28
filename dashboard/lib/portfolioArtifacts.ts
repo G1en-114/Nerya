@@ -7,7 +7,8 @@ export type PortfolioArtifact = { id: string; turnId: string; ts: number; accoun
 /** Only recorded portfolio tools become snapshots; text and failed tools are not inferred. */
 export function collectPortfolioArtifacts(thread: ChatThread | null): PortfolioArtifact[] {
   if (!thread) return [];
-  return thread.messages.flatMap((message) => {
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  return messages.flatMap((message) => {
     if (message.role !== "assistant") return [];
     const blocks = [...liveEventsToBlocks([...(message.turn?.activity_events || []), ...(message.live_events || [])]), ...(message.turn?.blocks || [])];
     const calls = new Map<string, Record<string, unknown>>();

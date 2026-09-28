@@ -1,4 +1,11 @@
 {
+  "chatError": {
+    "label": "对话异常",
+    "title": "暂时无法显示对话。",
+    "unexpected": "发生了意外的对话错误。",
+    "retry": "重试",
+    "reload": "刷新页面"
+  },
   "topHeader": {
     "pinToFavorites": "固定到收藏",
     "search": "搜索",

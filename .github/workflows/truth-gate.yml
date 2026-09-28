@@ -84,6 +84,10 @@ jobs:
       - name: Translation contracts
         run: npm run check:i18n --workspace @nerya/dashboard
 
+      - name: Chat cache and workspace recovery regressions
+        working-directory: dashboard
+        run: node --test tests/workspace-history-cache.test.cjs tests/workspace-drafts.test.cjs tests/external-native.test.cjs
+
       - name: Lint
         run: npm run lint --workspace @nerya/dashboard
 
