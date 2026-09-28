@@ -54,6 +54,11 @@ an unbounded factor factory or optimize until historical returns become positive
 ```
 
 Read `references/full-playbook.md` for formulas, statistical scope and limits.
+For lifecycle review, market applicability, decay/capacity or correlation
+deduplication, load `references/factor-governance.md`. It maps research evidence
+to the existing registry, not a second factor library or an approval workflow.
+Only candidate/retired/rejected are writable statuses; validation and adoption
+are scoped conclusions supported by separate evidence, never automatic badges.
 For leakage/warmup questions load `Skill(skill="backtest", file="references/causality-audit.md")`.
 For adoption into a strategy load `Skill(skill="backtest", file="references/research-validation.md")`:
 require paired baseline/component evidence, not an attribution inferred from IC.

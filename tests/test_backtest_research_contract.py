@@ -1,4 +1,6 @@
 """Research guidance and evidence transport, not empirical alpha claims."""
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,29 @@ def test_related_skills_route_to_one_shared_research_contract():
         text = (BUILTIN / name / "SKILL.md").read_text()
         assert 'Skill(skill="backtest", file="references/research-validation.md")' in text
         assert 'Skill(skill="backtest", file="references/causality-audit.md")' in text
+
+
+def test_factor_governance_reuses_native_schema_and_does_not_invent_lifecycle_actions():
+    from pydantic import ValidationError
+    from nerya.research.factors import FactorDefinition
+
+    root = BUILTIN / "factor_library"
+    entry = (root / "SKILL.md").read_text()
+    assert "references/factor-governance.md" in entry
+    governance = (root / "references/factor-governance.md").read_text()
+    examples = re.findall(r"```json\n(.*?)\n```", governance, re.DOTALL)
+    assert examples
+    for example in examples:
+        definition = json.loads(example)
+        assert FactorDefinition.model_validate(definition).status == "candidate"
+        for unsupported in ("validated", "production", "degraded"):
+            with pytest.raises(ValidationError):
+                FactorDefinition.model_validate({**definition, "status": unsupported})
+    assert "fingerprints; it is not statistical correlation deduplication" in governance
+    assert "no new pipeline config files" in governance
+    assert "no enforced holdout lock" in governance
+    assert 'Skill(skill="backtest", file="references/research-validation.md")' in governance
+    assert not (BUILTIN / "quant_factor_library").exists()
 
 
 def test_tool_compaction_keeps_negative_evidence_and_model_limits():

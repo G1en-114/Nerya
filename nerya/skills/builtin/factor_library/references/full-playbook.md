@@ -61,6 +61,11 @@ CLI: `python -m nerya.skills.builtin.factor_library.scripts.library --workspace
 
 ## Design references
 
+Load `references/factor-governance.md` for the lifecycle/evidence mapping,
+market-specific applicability and independent-information review adapted from
+community PR #1. Use this same registry and the existing research-validation
+reference; do not create another index, mutable status directory or pipeline.
+
 Local quant-research-lab: src/quant_lab/registry.py, runs.py,
 docs/02-回测与验收规范.md, docs/03-因子库治理.md and factor_library/schema.example.json.
 Its factor validation and full Freqtrade backtests are roadmap items, not
