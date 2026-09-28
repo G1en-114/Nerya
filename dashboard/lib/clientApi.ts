@@ -1602,6 +1602,7 @@ export type FinancialDatasetsKeysRequest = {
 export type AuthStatus = {
   /** Server-verified socket locality; localhost in the address bar is not proof. */
   local_access?: boolean;
+  face_required?: boolean;
   ok: boolean;
   mode: string;
   password_configured: boolean;
@@ -1677,7 +1678,7 @@ export interface WorkspaceSyncRunResult {
 
 export const clientApi = {
   authStatus: () => get<AuthStatus>("/auth/status"),
-  authLogin: (body: { password: string }) =>
+  authLogin: (body: { password: string; face_receipt?: string }) =>
     post<AuthLoginResponse>("/auth/login", body),
   authSetPassword: (body: { current_password?: string; new_password: string }) =>
     post<AuthLoginResponse>("/auth/admin/password", body),

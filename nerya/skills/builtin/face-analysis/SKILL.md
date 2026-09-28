@@ -31,7 +31,9 @@ Review pretrained model licences before commercial deployment.
 
 A match is not proof of identity or liveness and must not approve trades,
 unlock wallets or bypass Approval Gate. The default threshold is a starting
-point for evaluation, not a calibrated authentication threshold. This version
+point for evaluation, not a calibrated authentication threshold. This Skill
 does not expose age, sex, emotion, anti-spoofing, video or FAISS search.
+The dashboard's separate, opt-in administrator login check uses camera capture
+and passive anti-spoofing; this analysis Skill cannot issue login receipts.
 
 Upstream API and models: https://yakhyo.github.io/uniface/quickstart/
