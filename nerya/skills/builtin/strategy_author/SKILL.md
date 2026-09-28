@@ -193,6 +193,12 @@ logic with concise `@nerya.version`, `title`, `description`, `logic`, `rationale
 `scope`, `input`, `output`, `risk`, `validation` and `step` comments in main.py.
 Comments describe actual behavior, not unsupported claims. Minimal tests exercise
 entry, hold, exit and duplicate paths, not only import or permissive assertions.
+Generated strategy tests run through the same static safety validator as strategy
+code: never use `open()`, `Path.read_*`, subprocesses, network calls, `eval` or
+`exec` in `tests/`. Do not re-parse `strategy.yml` from a test merely to assert
+configuration values; package/schema validation already checks the manifest. Test
+runtime behavior through fixtures, contexts or pure helpers instead so the initial
+`strategy_draft_proposal` is validation-clean and does not need a follow-up rewrite.
 `@nerya.version 1` is the annotation protocol version, NOT an edit counter. Do not
 increment it when revising a strategy. Read every existing generated file before
 overwriting it (including strategy.md and tests), or provide complete files in the
