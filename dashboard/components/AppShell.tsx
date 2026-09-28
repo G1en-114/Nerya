@@ -35,6 +35,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => { setNavigationOpen(false); }, [pathname]);
 
   const startWindowDrag = (button: number) => { if (button === 0) void startDesktopDragging().catch(() => undefined); };
+  // The public landing page owns its navigation; workspace routes remain gated.
+  if (pathname === "/") return <>{nativeDesktop ? <div className="nerya-login-titlebar-drag" aria-hidden="true" onMouseDown={(event) => startWindowDrag(event.button)} /> : null}{children}</>;
   if (pathname === "/login") return <div className={nativeDesktop ? "nerya-native-login min-h-dvh" : "min-h-dvh"}>{nativeDesktop ? <div className="nerya-login-titlebar-drag" aria-hidden="true" onMouseDown={(event) => startWindowDrag(event.button)} /> : null}{children}</div>;
   // Onboarding is a focused surface, not a dashboard with background diagnostics.
   if (pathname === "/setup") return <AuthGate>
