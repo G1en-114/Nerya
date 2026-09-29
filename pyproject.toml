@@ -35,6 +35,8 @@ dependencies = [
     # company filings / annual reports / IR decks are routinely PDF and
     # must enter the evidence chain as text, not mojibake.
     "pypdf>=4.0",
+    # Visual Evidence validates uploaded PNG/JPEG bytes and dimensions at runtime.
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -102,4 +104,3 @@ markers = [
     "integration: opt-in checks that may touch real external services",
     "profile: per-profile gate (unit_mock | strict_runtime | live_opt_in)",
 ]
-
