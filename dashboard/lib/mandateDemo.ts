@@ -1,0 +1,55 @@
+import { useCallback, useEffect, useState } from "react";
+
+export type DemoCase = {
+  id: number; name: string; status: "filled" | "rejected"; newExecutors: number;
+  planId: string | null; reason: string; policyHash: string | null;
+  actionHash: string | null; planHash: string | null;
+  authorizationTx: string | null; authorizationStatus: number | null;
+};
+export type MandateDemo = {
+  schemaVersion: 1; mode: "local-paper-recording"; runId: string; recordedAt: string | null;
+  chainId: number; contract: string; revocationTx: string | null;
+  cases: DemoCase[];
+  policies: { hash: string; owner: string; agent: string; scope: string; marketHash: string; marketLabel: string | null; maxCost: string; budget: string; validAfter: number; validUntil: number; allowLong: boolean; nonce: string }[];
+  receipts: { transactionHash: string; status: number; blockNumber: number; gasUsed: number }[];
+};
+
+export function useMandateDemo() {
+  const [data, setData] = useState<MandateDemo | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [revision, setRevision] = useState(0);
+  const refresh = useCallback(() => setRevision(v => v + 1), []);
+  useEffect(() => {
+    const controller = new AbortController();
+    setState("loading"); setData(null);
+    void (async () => {
+      try {
+        const response = await fetch("/mandates/demo.json", { cache: "no-store", signal: controller.signal });
+        if (response.status === 404) { setState("missing"); return; }
+        if (!response.ok) throw new Error("Demo unavailable");
+        const result = await response.json();
+        if (result.schemaVersion !== 1 || result.mode !== "local-paper-recording" || result.chainId !== 31337 ||
+            typeof result.runId !== "string" || !Array.isArray(result.cases) || !result.cases.length ||
+            !result.cases.every((c: DemoCase) => ["filled", "rejected"].includes(c.status) && Number.isInteger(c.newExecutors) && c.newExecutors >= 0) ||
+            !Array.isArray(result.policies) || !Array.isArray(result.receipts)) throw new Error("Invalid demo");
+        if (!controller.signal.aborted) { setData(result); setState("ready"); }
+      } catch { if (!controller.signal.aborted) setState("error"); }
+    })();
+    return () => controller.abort();
+  }, [revision]);
+  return { data, state, refresh };
+}
+
+const labels: Record<string, [string, string, string, string]> = {
+  authorized: ["授权范围内执行", "Within the signed policy", "签名和链上授权通过检查，完成模拟成交。", "The signed, anchored action completed paper execution."],
+  market_not_allowed: ["市场越界", "Market outside scope", "允许市场改变后，原 BTC 请求不再被允许。", "The BTC request stops after the user changes the permitted market."],
+  resolved_cost_exceeds_signed_ceiling: ["费用后超限", "Costs exceed the ceiling", "计入模拟手续费与滑点后，成本超过签署上限。", "Simulated fees and slippage push the cost above the signed ceiling."],
+  long_opening_not_allowed: ["禁止新开多头", "Long opening prohibited", "禁止新开多头的授权不能用于开多。", "The policy prohibits opening a new long position."],
+  plan_tampered: ["动作被篡改", "Signed plan changed", "签署后的计划被修改，与已签署哈希不一致。", "The submitted plan no longer matches the signed plan hash."],
+  action_replayed: ["重复动作被阻止", "Replay stopped", "同一动作经恢复路径重发，也不能重复成交。", "Resubmitting through the resume path cannot repeat the fill."],
+  mandate_revoked: ["用户撤销授权", "User revoked the policy", "已登记的动作在用户撤销授权后被拒绝。", "An anchored action is stopped after the owner revokes the policy."],
+};
+export function caseCopy(c: DemoCase, zh: boolean) {
+  const entry = labels[c.reason];
+  return entry ? { title: entry[zh ? 0 : 1], description: entry[zh ? 2 : 3] } : { title: c.name, description: c.reason };
+}

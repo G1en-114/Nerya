@@ -25,6 +25,8 @@
 
 ```powershell
 forge build --root contracts/mandates
+
+forge test --root contracts/mandates --offline
 python -m scripts.mandate_demo --output .tmp/mandate-demo-presentation
 ```
 

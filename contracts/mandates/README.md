@@ -39,7 +39,35 @@ plan tampering; replay through the internal approval-resume path; revocation
 of an already anchored authorization. Every rejected submission checks the
 durable executor count before and after.
 
-## What is signed
+## Dashboard walkthrough
+
+The overview at `/dashboard` includes an **Agent Safety** entry above the
+account and market panels. `/dashboard/safety` presents recorded policy terms,
+selectable outcomes, executor counts and local-chain receipts in Chinese or
+English, following the interface language. It is a read-only recording viewer,
+not a control for submitting trades or changing active permissions.
+
+Publish an existing isolated demo run:
+
+```powershell
+python -m scripts.mandate_dashboard --input .tmp/mandate-demo-presentation/evidence.json
+```
+
+Or publish automatically after a new run (use a new output directory):
+
+```powershell
+python -m scripts.mandate_demo --output .tmp/mandate-dashboard-run --publish-dashboard
+```
+
+Then click **Refresh recording**. The exporter writes an explicit public-field
+projection to `dashboard/public/mandates/demo.json`, which is ignored by Git.
+It does not copy raw reports, workspace files, RPC configuration, keys or Vault
+contents. The page offers this summary as a JSON download; the original signed
+envelopes and full evidence remain in the operator's run output directory.
+Without a published recording, the page shows setup instructions rather than
+inventing successful results. A recording is not independent proof of execution.
+
+## Signature payloads
 
 `nerya/security/mandates.py` defines the exact EIP-712 schemas. The EVM signature
 scheme is secp256k1 ECDSA, with low-s and v checks. The domain binds the protocol

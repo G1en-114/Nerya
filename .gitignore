@@ -63,3 +63,7 @@ workspace/artifacts/
 /release-artifacts/
 /venv/
 /doc/
+
+# Explicitly published local safety demo recordings (generated, not fixtures).
+/dashboard/public/mandates/demo.json
+/dashboard/public/mandates/demo.json.tmp

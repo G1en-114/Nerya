@@ -21,6 +21,7 @@ import { useOverviewResource, type OverviewResource } from "../../lib/useOvervie
 import type { Candle } from "../../lib/api";
 import type { AttentionItem } from "../../lib/operatorTypes";
 import styles from "./overview.module.css";
+import { MandateDemoCard } from "../../components/MandateDemoCard";
 
 type NewsItem = { title: string; source: string; link: string; published_at: string; tickers?: string[] };
 type NewsFeed = { ok: boolean; items: NewsItem[]; fetched_at: number; error?: string };
@@ -149,6 +150,7 @@ export default function DashboardOverview() {
         <Link href="/chat" className={styles.primary}>{text("openResearch")}<NeryaGlyph name="arrowUpRight" size={16} /></Link>
       </div>
     </header>
+    <MandateDemoCard />
     <div className={styles.toolbar}>
       <div className={styles.status}>
         <StatusDot tone={riskUnknown ? "warn" : workspace.data?.kill_switch ? "danger" : "ok"} />

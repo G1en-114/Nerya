@@ -213,5 +213,10 @@ def run_demo(output: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New directory; never an existing workspace")
+    parser.add_argument("--publish-dashboard", action="store_true", help="Publish public demo fields to the local dashboard")
     args = parser.parse_args()
-    print(json.dumps(run_demo(args.output.resolve()), ensure_ascii=False, indent=2))
+    summary = run_demo(args.output.resolve())
+    if args.publish_dashboard:
+        from scripts.mandate_dashboard import publish
+        summary["dashboard_snapshot"] = str(publish(Path(summary["evidence"])))
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
