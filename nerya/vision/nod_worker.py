@@ -13,9 +13,9 @@ import sys
 MAX_FRAMES = 24
 MIN_FRAMES = 8
 MAX_FRAME_BYTES = 1_000_000
-NOD_AMPLITUDE = 0.07
-MAX_SPAN = 9
-RECOVERY_RATIO = 0.45
+NOD_AMPLITUDE = 0.04
+MAX_SPAN = 10
+RECOVERY_RATIO = 0.35
 
 
 class NodError(ValueError):
@@ -108,57 +108,80 @@ def _nose_y(face, y1: float, y2: float) -> float | None:
     return None
 
 
-def detect_nod(ratios: list[float]) -> tuple[bool, float]:
-    """Return (nod, amplitude) from a pitch series.
+def detect_nod(ratios: list[float]) -> tuple[bool, int, float]:
+    """Return (nod, half_cycle_count, amplitude) from a pitch series.
 
-    A nod is one clear excursion away from the neutral head position the
-    operator started in, followed by a return to it: the deviation from the
-    opening position must reach NOD_AMPLITUDE, stay within MAX_SPAN frames,
-    and come back to within RECOVERY_RATIO of the amplitude by the end of
-    the burst. Drift that never returns, a head held in a new position, and
-    repeated excursions all fail this test.
+    Real people nod continuously — two or three down-up cycles without
+    settling — so the series is mean-centred and split into same-sign runs.
+    Each run whose peak reaches NOD_AMPLITUDE counts as a half cycle.
+    Accept when:
+
+    - at least two alternating half cycles exist (a full out-and-back cycle
+      around the neutral position), and
+    - the burst ends back near the neutral position (drift and "moved to a
+      new position and stayed" never do).
+
+    A held head produces one run (rejected); monotone drift produces two
+    runs but ends far from centre (rejected); micro-jitter never reaches
+    the amplitude floor (rejected).
     """
     if len(ratios) < MIN_FRAMES:
-        return False, 0.0
-    step = max(1, len(ratios) // MIN_FRAMES)
-    sampled = ratios[::step]
+        return False, 0, 0.0
+    # Windows are 8–25 frames; downsampling here aliases the nod oscillation.
+    sampled = ratios
     smoothed = [
         sum(sampled[max(0, i - 1): i + 2]) / len(sampled[max(0, i - 1): i + 2])
         for i in range(len(sampled))
     ]
-    reference = sum(smoothed[:2]) / len(smoothed[:2])
-    deviations = [value - reference for value in smoothed]
-    extreme = max(range(len(deviations)), key=lambda i: abs(deviations[i]))
-    amplitude = abs(deviations[extreme])
+    reference = sum(smoothed) / len(smoothed)
+    deviations = [v - reference for v in smoothed]
+    amplitude = max((abs(v) for v in deviations), default=0.0)
     if amplitude < NOD_AMPLITUDE:
-        return False, amplitude
-    tolerance = 0.3 * amplitude
-    start = extreme
-    while start > 0 and abs(deviations[start]) > tolerance:
-        start -= 1
-    end = extreme
-    while end < len(deviations) - 1 and abs(deviations[end]) > tolerance:
-        end += 1
-    if not 2 <= end - start <= MAX_SPAN:
-        return False, amplitude
-    # The head must be back near its neutral position when the burst ends.
-    if abs(deviations[-1]) > RECOVERY_RATIO * amplitude:
-        return False, amplitude
-    # A second excursion of similar size is not a single nod.
-    rest = [abs(value) for i, value in enumerate(deviations) if i < start or i > end]
-    if any(value >= amplitude for value in rest):
-        return False, amplitude
-    return True, amplitude
+        return False, 0, amplitude
+
+    eps = max(0.01, 0.25 * NOD_AMPLITUDE)
+    runs = []  # (sign, span, peak)
+    current_sign = 0
+    span = 0
+    peak = 0.0
+    for v in deviations:
+        sign = 0 if abs(v) < eps else (1 if v > 0 else -1)
+        if sign == 0:
+            if current_sign:
+                runs.append((current_sign, span, peak))
+            current_sign, span, peak = 0, 0, 0.0
+            continue
+        if sign == current_sign:
+            span += 1
+            peak = max(peak, abs(v))
+        else:
+            if current_sign:
+                runs.append((current_sign, span, peak))
+            current_sign, span, peak = sign, 1, abs(v)
+    if current_sign:
+        runs.append((current_sign, span, peak))
+
+    significant = [r for r in runs if r[2] >= NOD_AMPLITUDE and r[1] <= MAX_SPAN + 2]
+    half_cycles = len(significant)
+    if half_cycles < 2:
+        return False, half_cycles, amplitude
+    signs = [r[0] for r in significant]
+    alternating = all(signs[i] != signs[i + 1] for i in range(len(signs) - 1))
+    ends_near_centre = abs(deviations[-1]) <= max(
+        NOD_AMPLITUDE, 0.5 * significant[-1][2]
+    )
+    return alternating and ends_near_centre, half_cycles, amplitude
 
 
 def infer(frames) -> dict:
     ratios = _pitch_series(frames)
-    nod, amplitude = detect_nod(ratios)
+    nod, excursions, amplitude = detect_nod(ratios)
     return {
         "nod": bool(nod),
+        "excursions": int(excursions),
         "amplitude": round(float(amplitude), 4),
         "frames_used": len(ratios),
-        "detector": "nose-bbox-ratio-v1",
+        "detector": "nose-bbox-ratio-v2",
     }
 
 

@@ -39,7 +39,11 @@ def _capture(client, payload):
             actor, str(approval_id), record, payload.get("frames")
         )
     except NodIntentError as exc:
-        return {"ok": False, "error": str(exc), "_status": 409}
+        body = {"ok": False, "error": str(exc), "_status": 409}
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, dict):
+            body["detail"] = detail
+        return body
 
 
 def routes():

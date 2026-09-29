@@ -26,14 +26,18 @@ export const nodIntent = {
 };
 
 /** Burst parameters shared with the capture component and its tests. */
-export const NOD_BURST = { frames: 12, intervalMs: 170, width: 320 };
+export const NOD_BURST = { frames: 16, intervalMs: 165, width: 320 };
 
-export function nodError(error: unknown, zh: boolean): string {
+export function nodError(error: unknown, zh: boolean, detail?: { amplitude?: number }): string {
   const code = error instanceof ApiError && error.payload && typeof error.payload === "object"
     ? String((error.payload as { error?: string }).error || "")
     : error instanceof Error
     ? error.message
     : "";
+  const measured = detail?.amplitude
+    ?? (error instanceof ApiError && error.payload && typeof error.payload === "object"
+      ? Number((error.payload as { detail?: { amplitude?: number } }).detail?.amplitude) || undefined
+      : undefined);
   const messages: Record<string, [string, string]> = {
     trusted_actor_required: ["登录态缺失，请刷新页面后重试。", "No verified session. Refresh the page and retry."],
     nod_not_detected: ["没有识别到明确的点头动作，请正对摄像头再试一次，或直接点击批准按钮。", "No clear nod was detected. Face the camera and retry, or just use the approve button."],
@@ -58,9 +62,17 @@ export function nodError(error: unknown, zh: boolean): string {
   };
   const name = error instanceof Error ? error.name : "";
   const pair = messages[code] || messages[name];
-  return pair
+  let text = pair
     ? pair[zh ? 0 : 1]
     : zh
     ? "点头确认未完成，可直接点击批准按钮，不影响审批。"
     : "Nod confirmation did not complete. The approve button still works as usual.";
+  // Show the measured nod amplitude so "not detected" becomes actionable.
+  if (code === "nod_not_detected" && measured !== undefined) {
+    const floor = 0.04;
+    text += zh
+      ? `（实测动作幅度 ${measured.toFixed(2)}，建议 ≥ ${floor.toFixed(2)}——按住按钮后立刻、明显地持续点头）`
+      : ` (measured motion ${measured.toFixed(2)}, aim for ≥ ${floor.toFixed(2)} — start nodding visibly right after pressing the button)`;
+  }
+  return text;
 }

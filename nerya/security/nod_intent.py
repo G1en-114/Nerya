@@ -305,7 +305,14 @@ class NodIntentService:
         if inferred is None:
             inferred = _infer(checked)
         if inferred.get("nod") is not True:
-            raise NodIntentError("nod_not_detected")
+            error = NodIntentError("nod_not_detected")
+            # Measured telemetry helps the operator nod visibly enough next try.
+            error.detail = {
+                "amplitude": inferred.get("amplitude"),
+                "half_cycles": inferred.get("excursions"),
+                "frames_used": inferred.get("frames_used"),
+            }
+            raise error
         receipt = secrets.token_urlsafe(32)
         expires = time.time() + RECEIPT_SECONDS
         with self._locked():
