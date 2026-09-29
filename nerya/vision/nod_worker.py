@@ -175,5 +175,33 @@ def main():
     print(json.dumps(result, allow_nan=False))
 
 
+def serve():
+    """Persistent mode for a camera session: one request per stdin line.
+
+    The heavy model imports inside :func:`_pitch_series` run once per
+    process, so the first request pays the load and every later request in
+    the same camera session reuses it. EOF on stdin (session close or
+    parent death) exits, releasing the model memory.
+    """
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            with contextlib.redirect_stdout(sys.stderr):
+                result = infer(request.get("frames"))
+            result["ok"] = True
+        except NodError as exc:
+            result = {"ok": False, "error": str(exc)}
+        except Exception:  # noqa: BLE001 - never expose frames or model traces
+            result = {"ok": False, "error": "nod_model_unavailable"}
+        sys.stdout.write(json.dumps(result, allow_nan=False) + "\n")
+        sys.stdout.flush()
+
+
 if __name__ == "__main__":
-    main()
+    if "--serve" in sys.argv[1:]:
+        serve()
+    else:
+        main()

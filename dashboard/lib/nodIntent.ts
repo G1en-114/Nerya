@@ -17,6 +17,12 @@ export const nodIntent = {
       method: "POST",
       body: { approval_id: approvalId, frames },
     }),
+  /** Camera-scoped warm model worker: open with the camera, close on stop. */
+  session: (action: "open" | "close") =>
+    callApi<{ ok: boolean; closed?: boolean }>("/security/nod/session", {
+      method: "POST",
+      body: { action },
+    }).catch(() => ({ ok: false })),
 };
 
 /** Burst parameters shared with the capture component and its tests. */
