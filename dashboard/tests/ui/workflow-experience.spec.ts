@@ -2,7 +2,11 @@ import { test, expect, type Page } from "@playwright/test";
 import { parseScriptDocumentation } from "../../lib/scriptDocumentation";
 import { strategyLanding, strategyMarketTarget } from "../../lib/strategyLanding";
 import { invocationGraph, publicReplay, recordedTurnReplay, selectedInvocation } from "../../lib/workflowReplay";
-import type { WorkflowView } from "../../lib/workflowTypes";
+import type { WorkflowGraph, WorkflowNode, WorkflowView } from "../../lib/workflowTypes";
+import { compactWorkflow } from "../../lib/workflowProjection";
+import { cardFacts, cardTitle } from "../../lib/workflowPresentation";
+import { copy } from "../../lib/i18n";
+import { chooseOption } from "./choice-control";
 
 const source = `# @nerya.title Collect observations
 # @nerya.description Read candles without placing orders.
@@ -63,16 +67,16 @@ const workflow: WorkflowView = {
   ], edges: [] }, evolution: { id: "evolution", nodes: [], edges: [] },
 };
 
-async function mock(page: Page) {
+async function mock(page: Page, selectedWorkflow: WorkflowView = workflow, language = "en") {
   const errors: string[] = [], writes: string[] = [];
   let failOld = false;
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => localStorage.setItem("nerya.ui_settings.v1", JSON.stringify({ language: "en", darkMode: "dark" })));
+  await page.addInitScript((language) => localStorage.setItem("nerya.ui_settings.v1", JSON.stringify({ language, darkMode: "dark" })), language);
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url()), endpoint = url.pathname.replace(/^\/api\/proxy/, "");
     if (route.request().method() === "POST" && endpoint !== "/strategy/list_all") writes.push(endpoint);
     let result: unknown = { ok: true, items: [], count: 0, total: 0 };
-    if (endpoint === "/strategies/runtime/workflow") result = workflow;
+    if (endpoint === "/strategies/runtime/workflow") result = selectedWorkflow;
     else if (endpoint === "/strategies/runtime/workflows") result = { ok: true, workflows: [{ key: "alpha", strategy_id: "alpha", title: "Alpha fixture", mode: "paper", status: "draft", state: "active", markets: [], counts: { script: 1 } }] };
     else if (endpoint === "/strategies/runtime/tuning/history") result = { ok: true, strategy_id: "alpha", runs: ["new", "old"].map((id, index) => ({ run_id: id, strategy_id: "alpha", status: "ok", started_at: `2026-09-0${2 - index}T00:00:00Z`, reason: `Review ${id}` })), has_more: false };
     else if (endpoint === "/strategies/runtime/tuning/record") {
