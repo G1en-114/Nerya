@@ -267,3 +267,103 @@ def test_approval_payload_untouched_by_nod(config, monkeypatch):
     )
     assert json.dumps(moved["intent"], sort_keys=True) == before
     assert moved["state"] == "approved"
+
+
+class _FakeServeProc:
+    """In-memory stand-in for the persistent worker process."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests: list = []
+        self.stdin = self
+        self.stdout = self
+        self._alive = True
+
+    def write(self, line):
+        self.requests.append(json.loads(line))
+        return len(line)
+
+    def flush(self):
+        return None
+
+    def readline(self):
+        if len(self.requests) > len(self.responses):
+            return ""
+        return json.dumps(self.responses[len(self.requests) - 1]) + "\n"
+
+    def poll(self):
+        return None if self._alive else 1
+
+    def terminate(self):
+        self._alive = False
+
+    def close(self):
+        return None
+
+
+def test_camera_session_reuses_warm_worker_and_releases_on_close(config, monkeypatch):
+    spawned = []
+
+    def fake_spawn():
+        proc = _FakeServeProc([
+            {"ok": True, "nod": False, "amplitude": 0.0, "frames_used": 12},   # warmup (empty frames)
+            {"ok": True, "nod": True, "amplitude": 0.2, "frames_used": 12},    # capture 1
+            {"ok": True, "nod": True, "amplitude": 0.2, "frames_used": 12},    # capture 2 (same worker)
+        ])
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(nod, "_spawn_serve", fake_spawn)
+    monkeypatch.setattr(
+        nod, "_infer",
+        lambda frames: (_ for _ in ()).throw(AssertionError("one-shot must not run while session is warm")),
+    )
+
+    service = nod.NodIntentService(config)
+    opened = nod.open_session("operator")
+    assert opened["ok"] is True
+    for _ in range(40):
+        if spawned and len(spawned[0].requests) >= 1:
+            break
+        time.sleep(0.05)
+
+    proof1 = service.capture("operator", "trade-1", TRADE_RECORD, NOD_FRAMES)
+    proof2 = service.capture("operator", "trade-1", TRADE_RECORD, NOD_FRAMES)
+    assert proof1["receipt"] and proof2["receipt"]
+    assert len(spawned) == 1, "one worker for the whole camera session"
+    assert len(spawned[0].requests) == 3, "warmup + 2 captures through the same pipe"
+    consumed = service.consume("operator", "trade-1", TRADE_RECORD, proof2["receipt"])
+    assert consumed["identity_proven"] is False
+
+    closed = nod.close_session("operator")
+    assert closed["closed"] is True
+    assert spawned[0]._alive is False
+
+    # After close, capture falls back to the one-shot worker.
+    monkeypatch.setattr(
+        nod, "_infer",
+        lambda frames: {"nod": True, "amplitude": 0.14, "frames_used": 12},
+    )
+    proof3 = service.capture("operator", "trade-1", TRADE_RECORD, NOD_FRAMES)
+    assert proof3["receipt"]
+
+
+def test_session_route_open_close_and_guards(config, monkeypatch):
+    from nerya.api import routes_nod
+
+    calls = []
+    # The route module binds these names at import time; patch there.
+    monkeypatch.setattr(routes_nod, "open_session", lambda actor: calls.append(("open", actor)) or {"ok": True})
+    monkeypatch.setattr(routes_nod, "close_session", lambda actor: calls.append(("close", actor)) or {"ok": True, "closed": True})
+    handler = {p: h for m, p, h in routes_nod.routes() if m == "POST"}["/security/nod/session"]
+    client = SimpleNamespace(config=config)
+
+    result = handler(client, {"_auth_actor_id": "operator", "action": "open"})
+    assert result == {"ok": True}
+    result = handler(client, {"_auth_actor_id": "operator", "action": "close"})
+    assert result["closed"] is True
+    result = handler(client, {"_auth_actor_id": "operator", "action": "wat"})
+    assert result["ok"] is False and result["error"] == "unknown_action"
+    untrusted = handler(client, {"action": "open"})
+    assert untrusted["ok"] is False and untrusted["error"] == "trusted_actor_required"
+    assert [c[0] for c in calls] == ["open", "close"]

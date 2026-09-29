@@ -38,7 +38,10 @@ export function NodIntentCapture({
     mounted.current = true;
     return () => {
       mounted.current = false;
-      stream.current?.getTracks().forEach((track) => track.stop());
+      if (stream.current) {
+        stream.current.getTracks().forEach((track) => track.stop());
+        void nodIntent.session("close");
+      }
     };
   }, []);
 
@@ -46,6 +49,8 @@ export function NodIntentCapture({
     stream.current?.getTracks().forEach((track) => track.stop());
     stream.current = null;
     if (video.current) video.current.srcObject = null;
+    // Camera closed: release the warm model worker server-side.
+    void nodIntent.session("close");
     setReady(false);
     setPhase("idle");
     setProgress(0);
@@ -72,6 +77,9 @@ export function NodIntentCapture({
         video.current.srcObject = incoming;
         await video.current.play();
       }
+      // Camera is live: ask the backend to warm the nod model for this
+      // session. It is released when the camera closes (or on idle timeout).
+      void nodIntent.session("open");
       setReady(true);
       setPhase("nod");
     } catch (e) {
