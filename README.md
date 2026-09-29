@@ -173,13 +173,26 @@ Per the track rules, this section separates work built **before** the event from
 
 ### Proof of API usage
 
-Regenerate the per-flow table and list on-chain anchoring hashes:
+Two hard track requirements, both wired one-command:
+
+**1. Kiln — HTTP calls to the NPU LLM `gpt-oss-120b`.** Kiln exposes an OpenAI-compatible API (`https://api.bricksum.com/v1`). Store the `sk-bk-...` key and switch every LLM tier to Kiln in one command, then re-run the demo flows so the journals contain real Kiln calls:
 
 ```bash
+python scripts/setup_gwdc_infra.py kiln --workspace <workspace-root> --api-key sk-bk-...
+# restart `nerya serve`, run the flows, then:
 python scripts/export_kiln_usage.py --workspace <workspace-root>
 ```
 
-Paste the output below and annotate each row with the demo flow it backs. (Team 3: fill in Kiln call rows and tx hashes here before submitting.)
+**2. Blockchain — testnet contract/decision anchoring with `tx_hash`.** Generate a Sepolia signer into the encrypted vault, fund it from a faucet, and anchor persisted risk decisions (32-byte evidence-claim hash, self-addressed tx on Sepolia):
+
+```bash
+python scripts/setup_gwdc_infra.py chain-key --workspace <workspace-root>      # prints address
+python scripts/setup_gwdc_infra.py chain-check --workspace <workspace-root>    # chainId + balance probe
+python -m nerya.cli.app chain-evidence anchor --workspace <workspace-root>   --strategy-id <id> --session-id <id> --chain sepolia   --signer-ref vault://chain_audit_sepolia_team3
+python scripts/export_kiln_usage.py --workspace <workspace-root>               # tx hashes surface here
+```
+
+Paste the exporter output below and annotate each row with the demo flow it backs. (Team 3: fill in Kiln call rows and tx hashes before submitting.)
 
 ### Demo notes
 

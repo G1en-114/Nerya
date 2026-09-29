@@ -158,15 +158,26 @@ tests/             运行时回归测试
 
 **如实声明：** 点头检测只表达确认意向——不是身份核验、不是活体/防翻拍检测，从不绕过风控与审批闸门。人脸特征仅存本机，任何生物特征数据不出机器。
 
-### API 用量证明
+### API 用量证明（两条硬性要求，均已一键化）
 
-重新生成按流程的用量表与链上锚定哈希：
+**1. Kiln —— NPU LLM `gpt-oss-120b` 的 HTTP 调用。** Kiln 提供 OpenAI 兼容接口（`https://api.bricksum.com/v1`）。一条命令存入 `sk-bk-...` 密钥并把全部模型档位切到 Kiln，然后重跑演示流程，日志里即为真实 Kiln 调用：
 
 ```bash
+python scripts/setup_gwdc_infra.py kiln --workspace <workspace-root> --api-key sk-bk-...
+# 重启 `nerya serve`，跑完演示流程后：
 python scripts/export_kiln_usage.py --workspace <workspace-root>
 ```
 
-将输出粘贴到下方，并为每行标注对应的演示流程。（Team 3：提交前在此填入 Kiln 调用数据与 tx 哈希。）
+**2. 区块链 —— testnet 锚定与 `tx_hash`。** 生成 Sepolia 签名密钥入库，水龙头充值后，把持久化的风控决策（32 字节证据声明哈希）以自址交易锚定上链：
+
+```bash
+python scripts/setup_gwdc_infra.py chain-key --workspace <workspace-root>      # 输出待充值地址
+python scripts/setup_gwdc_infra.py chain-check --workspace <workspace-root>    # chainId + 余额探测
+python -m nerya.cli.app chain-evidence anchor --workspace <workspace-root>   --strategy-id <id> --session-id <id> --chain sepolia   --signer-ref vault://chain_audit_sepolia_team3
+python scripts/export_kiln_usage.py --workspace <workspace-root>               # tx 哈希在此浮出
+```
+
+将导出输出粘贴到下方，并为每行标注对应的演示流程。（Team 3：提交前填入 Kiln 调用数据与 tx 哈希。）
 
 ### 演示说明
 
