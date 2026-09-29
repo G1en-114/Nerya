@@ -29,6 +29,7 @@ export function nodError(error: unknown, zh: boolean): string {
     ? error.message
     : "";
   const messages: Record<string, [string, string]> = {
+    trusted_actor_required: ["登录态缺失，请刷新页面后重试。", "No verified session. Refresh the page and retry."],
     nod_not_detected: ["没有识别到明确的点头动作，请正对摄像头再试一次，或直接点击批准按钮。", "No clear nod was detected. Face the camera and retry, or just use the approve button."],
     invalid_frame_count: ["采样的画面帧数不足，请重新点头确认。", "Not enough camera frames were captured. Nod again."],
     face_not_tracked: ["没有持续跟踪到人脸，请正对摄像头、光线充足后重试。", "No face could be tracked. Face the camera in good lighting and retry."],
