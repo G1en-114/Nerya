@@ -8,6 +8,7 @@ import { publicReplay, rememberInvocation } from "../../lib/workflowReplay";
 import { WorkflowRunCanvas } from "./WorkflowRunCanvas";
 import { ReplayEvidence } from "./ReplayEvidence";
 import { ReviewExplanation } from "./ReviewExplanation";
+import { StrategyCreationEvidence } from "./StrategyCreationEvidence";
 import styles from "./WorkflowReplay.module.css";
 
 type Facts = Record<string, unknown>;
@@ -43,7 +44,7 @@ function useRecordedResource(path: string, refresh: number) {
   return { data: response?.path === path ? response.data : null, error, loading };
 }
 
-export function WorkflowReviewActivity({ strategyId }: { strategyId: string }) {
+export function WorkflowReviewActivity({ strategyId, proposalId }: { strategyId: string; proposalId?: string | null }) {
   const t = useTranslations("workflowExperience");
   const [selected, setSelected] = useState("");
   const [offset, setOffset] = useState(0);
@@ -100,5 +101,6 @@ export function WorkflowReviewActivity({ strategyId }: { strategyId: string }) {
       calls: replay.calls.map((call) => ({ ...call, status: status(call.status) })),
     }} prompt={prompt} reply={output} messages={replay.messages} partial={detail.data?.partial === true || !Array.isArray(audit.conversation)} /></details>}
     {matches && <details><summary>{t("recordedSteps")}</summary><ReplayEvidence value={{ result: record, steps: audit.steps, model_calls: audit.model_calls, missing: detail.data?.missing }} /></details>}
+    {proposalId ? <StrategyCreationEvidence strategyId={strategyId} proposalId={proposalId} /> : null}
   </section>;
 }

@@ -26,6 +26,36 @@ from nerya.tools.types import ToolCall
 pytestmark = pytest.mark.smoke
 
 
+def test_strategy_proposal_records_explicit_research_evidence(tmp_path):
+    request = _request_from_args({
+        "strategy_id": "evidence_trend",
+        "strategy_class": "trend",
+        "markets": ["BINANCE:BTCUSDT"],
+        "accounts": ["paper_main"],
+        "evidence_refs": ["turn:research_123"],
+        "research_confidence": 0.62,
+    })
+    result = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        request, validate=False,
+    )
+    assert result.proposal is not None
+    assert result.proposal.evidence_refs == ["turn:research_123"]
+    assert result.proposal.metadata["research_confidence"] == 0.62
+
+
+def test_strategy_research_confidence_requires_evidence(tmp_path):
+    request = StrategyGenerationRequest(
+        strategy_id="evidence_trend",
+        markets=("BINANCE:BTCUSDT",),
+        accounts=("paper_main",),
+        research_confidence=0.9,
+    )
+    with pytest.raises(Exception, match="research_confidence requires evidence_refs"):
+        StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+            request, validate=False,
+        )
+
+
 def test_multi_market_trend_scaffold_uses_trigger_market_and_replayable_protection(tmp_path):
     req = StrategyGenerationRequest(
         strategy_id="multi_trend",

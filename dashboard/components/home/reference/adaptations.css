@@ -1,0 +1,75 @@
+/* Integration adjustments; the reference page retains its own visual system. */
+.nerya-landing { min-height: 100dvh; overflow: clip; isolation: isolate; font-size: 14px; }
+.nerya-landing .brand small { font-size: .56em; font-weight: 500; color: var(--accent); letter-spacing: 0; }
+.nerya-landing .github-cta { pointer-events: auto; }
+.nerya-landing .hero-team { margin-top: 22px; }
+.nerya-landing .hero-copy { padding-bottom: 18px; }
+.nerya-landing .team-identity { display: grid; grid-template-columns: 240px minmax(0, 1fr) 230px; gap: 28px; align-items: center; width: min(1240px, calc(100% - 88px)); margin: 26px auto 95px; padding: 26px 0; border-block: 1px solid var(--line); text-align: left; }
+.nerya-landing .team-identity-name > span { color: var(--accent); font-size: 10px; letter-spacing: 1.5px; }
+.nerya-landing .team-identity-name h2 { font-size: 28px; letter-spacing: -.7px; margin-top: 7px; }
+.nerya-landing .team-identity-name p { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.nerya-landing .team-identity h3 { font-size: 12px; color: var(--muted); margin-bottom: 14px; font-weight: 500; }
+.nerya-landing .team-identity-organizations { padding-inline: 24px; border-inline: 1px solid var(--line); }
+.nerya-landing .team-identity-organizations h3 { color: var(--accent); font-size: 15px; font-weight: 600; }
+.nerya-landing .team-identity-organizations .team-identity-logos { gap: 16px; }
+.nerya-landing .team-identity-organizations b { font-size: clamp(22px, 2vw, 28px); font-weight: 650; letter-spacing: -.6px; }
+.nerya-landing .team-identity-organizations small { font-size: 12px; letter-spacing: .5px; }
+.nerya-landing .team-identity-organizations i { font-size: 22px; }
+.nerya-landing .team-identity-logos { display: flex; align-items: center; gap: 20px; }
+.nerya-landing .team-identity-logos > span { display: flex; align-items: center; gap: 8px; }
+.nerya-landing .team-identity-logos b { white-space: nowrap; }
+.nerya-landing .team-identity-communities b { font-size: 13px; font-weight: 550; }
+.nerya-landing .team-identity-logos small { display: block; color: var(--muted); font-weight: 400; margin-top: 3px; }
+.nerya-landing .team-identity-logos i { color: var(--muted); font-style: normal; }
+.nerya-landing .team-identity-logos img { object-fit: contain; }
+.nerya-landing .team-identity-logos .community-cddjap { flex-direction: column; gap: 4px; align-items: flex-start; }
+.nerya-landing .community-cddjap img { background: #09090c; border-radius: 3px; padding: 2px; width: 112px; height: 21px; }
+.nerya-landing .integration-workspace-link { grid-column: 1 / -1; text-align: center; }
+.nerya-landing [id] { scroll-margin-top: 95px; }
+.nerya-landing .motion-paused, .nerya-landing.motion-paused * { animation-play-state: paused !important; }
+.nerya-landing .native-part { pointer-events: none; }
+.nerya-landing .native-en { display: none; }
+.nerya-landing[lang=en] .native-zh { display: none; }
+.nerya-landing[lang=en] .native-en { display: block; }
+.nerya-landing .product-story { min-width: 0; }
+@media(max-width:1100px) {
+  .nerya-landing .team-identity { grid-template-columns: 1fr 1.6fr; gap: 24px; }
+  .nerya-landing .team-identity-organizations { padding-left: 24px; padding-right: 0; border-right: 0; }
+  .nerya-landing .team-identity-communities { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 20px; }
+  .nerya-landing .team-identity-communities h3 { margin-bottom: 0; }
+}
+@media(max-width:768px) {
+  .nerya-landing .hero-copy { padding-bottom: 20px; }
+  .nerya-landing .team-identity { grid-template-columns: 1fr; width: calc(100% - 40px); margin: 16px auto 32px; text-align: center; }
+  .nerya-landing .team-identity-organizations { padding: 0; border: 0; }
+  .nerya-landing .team-identity-logos { justify-content: center; }
+  .nerya-landing .team-identity-organizations b { font-size: 26px; }
+  .nerya-landing .team-identity-communities { display: block; }
+  .nerya-landing .team-identity-communities h3 { margin-bottom: 14px; }
+  .nerya-landing .hero .workspace-label { display: none; }
+  .nerya-landing .hero .workspace-toolbar { justify-content: center; }
+  .nerya-landing .workspace-caption { flex-wrap: wrap; }
+}
+@media(max-width:520px) {
+  .nerya-landing .brand { font-size: 21px; gap: 6px; }
+  .nerya-landing .brand small { font-size: .55em; }
+  .nerya-landing .team-identity { gap: 24px; }
+  .nerya-landing .team-identity-logos { gap: 20px; flex-wrap: wrap; }
+  .nerya-landing .team-identity-organizations .team-identity-logos { gap: 10px; flex-wrap: nowrap; }
+  .nerya-landing .team-identity-organizations b { font-size: 22px; }
+  .nerya-landing .team-identity-organizations img { width: 34px; height: auto; }
+  .nerya-landing .team-identity-organizations small { font-size: 10px; }
+  .nerya-landing .hero .workspace-tabs { overflow-x: auto; }
+  .nerya-landing .footer-top > div { flex-wrap: wrap; gap: 15px; }
+}
+@media(max-width:360px) {
+  .nerya-landing .team-identity-organizations b { font-size: 19px; }
+  .nerya-landing .team-identity-organizations .team-identity-logos { gap: 8px; }
+  .nerya-landing .team-identity-organizations .team-identity-logos > span { gap: 6px; }
+  .nerya-landing .team-identity-organizations img { width: 28px; }
+}
+@media(prefers-reduced-motion:reduce) {
+  .nerya-landing .hero-copy { padding-bottom: 20px; }
+  .nerya-landing .team-identity { margin-bottom: 32px; }
+  .nerya-landing .hero-atmosphere *, .nerya-landing .launch-orbits * { animation: none !important; }
+}

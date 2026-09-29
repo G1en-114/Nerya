@@ -1,0 +1,351 @@
+{
+  "version": 2,
+  "provider": "ChatGPT web via GPT Pro Think / Ego",
+  "modelSelection": "Latest",
+  "reasoningEffort": "Extra high",
+  "conversation": "https://chatgpt.com/c/6ab7559c-227c-83e8-b92c-7bf5f7f1f83f",
+  "generatedAt": "2026-09-26T05:29:44.475Z",
+  "referenceUploadVerified": true,
+  "references": [
+    {
+      "file": "assets/nerya-mascot.webp",
+      "sha256": "3917f525bd7e9c814b6d06ae37edd0862a84f399ae97aea21c2a53acf321bede"
+    },
+    {
+      "file": "assets/nerya-logo.webp",
+      "sha256": "077e937a251215b88b93af65ef29083a8dd415d88f92b4876e79b9fdb43f363e"
+    }
+  ],
+  "sourceAtlas": {
+    "file": "assets/generated/mascot-roles/atlas/nerya-role-atlas-01.png",
+    "width": 1402,
+    "height": 1122,
+    "sha256": "dfb59b84fb03035dfd207345c1f55dd191f58df4a3a437f954e9593ef30f92ee",
+    "rows": 4,
+    "columns": 5
+  },
+  "process": "Twenty distinct characters generated as one inspected atlas; exact grid crops and resize only.",
+  "license": "Project artwork; see project LICENSE",
+  "files": [
+    {
+      "role": "lead",
+      "file": "lead.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 1,
+        "column": 1,
+        "left": 0,
+        "top": 0,
+        "width": 280,
+        "height": 281
+      },
+      "sha256": "c8fb818d30965563a8867c9231dae2942fd9150033572031d27048271a64b751",
+      "bytes": 42897
+    },
+    {
+      "role": "researcher",
+      "file": "researcher.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 1,
+        "column": 2,
+        "left": 280,
+        "top": 0,
+        "width": 281,
+        "height": 281
+      },
+      "sha256": "4391bbca1382b75f2075ab16d008392ef2b9f8b384b9b92fca773016b1fa910d",
+      "bytes": 46337
+    },
+    {
+      "role": "analyst",
+      "file": "analyst.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 1,
+        "column": 3,
+        "left": 561,
+        "top": 0,
+        "width": 280,
+        "height": 281
+      },
+      "sha256": "1c76cdb61c1ba15f0a2c31ab1d1e2015da89ef1767bf2dbd57404c0ad2ea7c8d",
+      "bytes": 43592
+    },
+    {
+      "role": "reviewer",
+      "file": "reviewer.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 1,
+        "column": 4,
+        "left": 841,
+        "top": 0,
+        "width": 281,
+        "height": 281
+      },
+      "sha256": "2a348583d4dfbe92f3124c3848bbc5291227eca2d1ed17d037e0849843b03a37",
+      "bytes": 45038
+    },
+    {
+      "role": "risk",
+      "file": "risk.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 1,
+        "column": 5,
+        "left": 1122,
+        "top": 0,
+        "width": 280,
+        "height": 281
+      },
+      "sha256": "22f68885f222bb01c2e8a4cca2b9cfc52a935860cde30187beca97710c67b99c",
+      "bytes": 44272
+    },
+    {
+      "role": "coder",
+      "file": "coder.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 2,
+        "column": 1,
+        "left": 0,
+        "top": 281,
+        "width": 280,
+        "height": 280
+      },
+      "sha256": "72649d6049ffaaa0729cbe9aa27b62f17c3e7d8c6441fff45e1757a1f73c33bf",
+      "bytes": 44040
+    },
+    {
+      "role": "macro",
+      "file": "macro.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 2,
+        "column": 2,
+        "left": 280,
+        "top": 281,
+        "width": 281,
+        "height": 280
+      },
+      "sha256": "2666d70cd72b426bfd1e554374f81478144eea5b517191629ac95c9257c7ad9b",
+      "bytes": 46742
+    },
+    {
+      "role": "quant",
+      "file": "quant.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 2,
+        "column": 3,
+        "left": 561,
+        "top": 281,
+        "width": 280,
+        "height": 280
+      },
+      "sha256": "6f8823e82c10ee1f67451620d37b8bf6604bdedb393199f7fef3335bd9bdd9e5",
+      "bytes": 46248
+    },
+    {
+      "role": "execution",
+      "file": "execution.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 2,
+        "column": 4,
+        "left": 841,
+        "top": 281,
+        "width": 281,
+        "height": 280
+      },
+      "sha256": "349533a2d19644764eae968297706d5c0158d9413636c1886a32664e0a16acc8",
+      "bytes": 43723
+    },
+    {
+      "role": "data",
+      "file": "data.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 2,
+        "column": 5,
+        "left": 1122,
+        "top": 281,
+        "width": 280,
+        "height": 280
+      },
+      "sha256": "fc994201c823b4fa10aef160185b70daabe8766d4ffa4bb2149b183184d01039",
+      "bytes": 44976
+    },
+    {
+      "role": "sentiment",
+      "file": "sentiment.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 3,
+        "column": 1,
+        "left": 0,
+        "top": 561,
+        "width": 280,
+        "height": 281
+      },
+      "sha256": "1cc0102fd3ac6ab6fd95b45e5a3db69ec36fa1386093b1c1937ad8c313177dc3",
+      "bytes": 46534
+    },
+    {
+      "role": "onchain",
+      "file": "onchain.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 3,
+        "column": 2,
+        "left": 280,
+        "top": 561,
+        "width": 281,
+        "height": 281
+      },
+      "sha256": "3c67bf0f5265e514a496e1680a2b797a2105c188008984ca93e7079a8b09675c",
+      "bytes": 44767
+    },
+    {
+      "role": "portfolio",
+      "file": "portfolio.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 3,
+        "column": 3,
+        "left": 561,
+        "top": 561,
+        "width": 280,
+        "height": 281
+      },
+      "sha256": "4fa5a4bb1f4d10bc247c69712910875e39bd800121cdaa00ecff43f3645e0d46",
+      "bytes": 40851
+    },
+    {
+      "role": "backtest",
+      "file": "backtest.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 3,
+        "column": 4,
+        "left": 841,
+        "top": 561,
+        "width": 281,
+        "height": 281
+      },
+      "sha256": "154b65ebc1d057a3b5208823e6b2b053cf881f6829b2edd8a10873f0410334cf",
+      "bytes": 45198
+    },
+    {
+      "role": "security",
+      "file": "security.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 3,
+        "column": 5,
+        "left": 1122,
+        "top": 561,
+        "width": 280,
+        "height": 281
+      },
+      "sha256": "a552401688f4f09ea4ddd532b60287eac1739d785f963e25ecbff3ed8c0a2ba1",
+      "bytes": 43628
+    },
+    {
+      "role": "connector",
+      "file": "connector.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 4,
+        "column": 1,
+        "left": 0,
+        "top": 842,
+        "width": 280,
+        "height": 280
+      },
+      "sha256": "2e6f6f4d49f3bd52654beb08494869997ea5b698c99ee27ca93a0ec2ee6a51c4",
+      "bytes": 44220
+    },
+    {
+      "role": "prediction",
+      "file": "prediction.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 4,
+        "column": 2,
+        "left": 280,
+        "top": 842,
+        "width": 281,
+        "height": 280
+      },
+      "sha256": "150aa5c102c627bdb0e19aa149dafe0475abfbcc47ebce71abb3a602dee2d29d",
+      "bytes": 45457
+    },
+    {
+      "role": "futures",
+      "file": "futures.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 4,
+        "column": 3,
+        "left": 561,
+        "top": 842,
+        "width": 280,
+        "height": 280
+      },
+      "sha256": "6c76c9b3bf7f7e28f471db3c8b9797319da17c2c7797e1cddc32a7461b3392fc",
+      "bytes": 40640
+    },
+    {
+      "role": "equities",
+      "file": "equities.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 4,
+        "column": 4,
+        "left": 841,
+        "top": 842,
+        "width": 281,
+        "height": 280
+      },
+      "sha256": "97df401e0dfd8b359563d0f50975f314a584cbb1026a185185894ca170ae7dba",
+      "bytes": 42300
+    },
+    {
+      "role": "evolution",
+      "file": "evolution.png",
+      "width": 256,
+      "height": 256,
+      "sourceCell": {
+        "row": 4,
+        "column": 5,
+        "left": 1122,
+        "top": 842,
+        "width": 280,
+        "height": 280
+      },
+      "sha256": "c7bf7752be8203775c7b8bb14b62638ff9ecca63d7f1e6fb853a25b2f7fec032",
+      "bytes": 44643
+    }
+  ]
+}

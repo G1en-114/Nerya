@@ -588,6 +588,13 @@ def submit_trade_plan(
 
     paths = config.paths
     from ..wallet.strategy_execution import is_wallet_account, submit_plan as submit_wallet_plan
+    # An enrolled account cannot skip signed authorization by dropping caller
+    # metadata or selecting a wallet/protection route. Unenrolled accounts keep
+    # their existing behavior; this prototype is explicitly paper/mock only.
+    from .mandate_runtime import prepare as prepare_mandate, consume as consume_mandate
+    mandate = prepare_mandate(config, plan)
+    if isinstance(mandate, dict):
+        return mandate
     if is_wallet_account(config,plan.account_id):
         return submit_wallet_plan(config,plan)
     prediction_account=get_account_profile(paths,plan.account_id)
@@ -923,6 +930,12 @@ def submit_trade_plan(
         "plan_action": plan.action,
         **dict(plan.meta or {}),
     })
+    mandate_decision = None
+    if mandate is not None:
+        mandate_decision = consume_mandate(config, plan, candidate, mandate)
+        if mandate_decision.get("status") == "rejected":
+            return {**mandate_decision, "session_id": session_id,
+                    "risk_decision": risk.asdict(), "budget_decision": decision.asdict()}
     reservation = store.reserve(
         account_id=candidate.account_id,
         strategy_id=candidate.strategy_id,
@@ -987,6 +1000,16 @@ def submit_trade_plan(
             "order_ids": run.order_ids,
         },
     }
+    if mandate_decision is not None:
+        response["mandate_decision"] = {
+            **mandate_decision, "executor_called": True, "executor_id": run.executor_id,
+        }
+        jsonl.append(paths.journal("mandates"), {
+            "ts": now_iso(), "plan_id": plan.plan_id, "stage": "executor_returned",
+            "executor_id": run.executor_id, "execution_status": response_status,
+            "policy_hash": mandate_decision["policy_hash"],
+            "action_hash": mandate_decision["action_hash"],
+        })
     # The receipt is an observed ledger record, never inferred from requested size.
     from contextlib import closing
     from .order_tracker import OrderTracker

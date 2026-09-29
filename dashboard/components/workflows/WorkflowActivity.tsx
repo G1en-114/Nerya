@@ -18,6 +18,7 @@ import { rememberInvocation, selectedInvocation, recordedTurnReplay, type Record
 import replayStyles from "./WorkflowReplay.module.css";
 import { WorkflowHelp } from "./WorkflowNative";
 import styles from "./WorkflowActivity.module.css";
+import { StrategyCreationEvidence } from "./StrategyCreationEvidence";
 
 function Evidence({ value }: { value: unknown }) {
   const t = useWorkflowText();
@@ -170,5 +171,6 @@ export function WorkflowActivity({ strategyId, proposalId, onEdit, roleNames = {
         {item ? <RunDetails key={`${item.kind}:${item.id}`} strategyId={strategyId} item={item} live={live} onEdit={onEdit} roleNames={roleNames} /> : <div className={styles.empty}>{loading && !updated ? t("copy.components_workflows_WorkflowActivity.068") : error ? t("copy.components_workflows_WorkflowActivity.069") : t("copy.components_workflows_WorkflowActivity.070")}</div>}
       </div>
     </>}
+    {proposalId ? <StrategyCreationEvidence strategyId={strategyId} proposalId={proposalId} /> : null}
   </section>;
 }

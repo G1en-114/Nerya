@@ -1,0 +1,14 @@
+body { margin: 0; padding: 40px 20px; font: 16px/1.7 system-ui, sans-serif; color: #292632; background: #faf9fc; }
+main { max-width: 900px; margin: auto; }
+h1 { color: #7854ad; }
+a { color: #69449f; }
+section { padding: 24px; margin-top: 24px; border: 1px solid #dfdce6; background: white; border-radius: 14px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 20px; }
+dt { color: #696371; }
+dd { margin: 0; overflow-wrap: anywhere; }
+button { display: block; margin-top: 20px; background: #493363; color: white; border: 0; border-radius: 8px; padding: 12px 20px; font: inherit; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.confirm { display: block; margin-top: 20px; }
+input[type=file] { display: block; margin: 12px 0; max-width: 100%; }
+@media(max-width:520px) { dl { grid-template-columns: 1fr; } dd { margin-bottom: 12px; } section { padding: 16px; } }

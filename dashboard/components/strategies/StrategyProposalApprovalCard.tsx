@@ -348,7 +348,7 @@ export function StrategyProposalApprovalCard({
       const out = await clientApi.strategyRuntimePromote(proposalId, approveNote);
       setPromotionReceipt(out);
       if (!out.ok) {
-        throw new Error(out.error || out.reason || "strategy_promote_failed");
+        throw new Error(out.error || out.reason || stringValue(out.promotion?.reason) || "strategy_promote_failed");
       }
       const nextStrategyId = stringValue(out.strategy_id) || strategyId;
       setAppliedStrategyId(nextStrategyId || null);

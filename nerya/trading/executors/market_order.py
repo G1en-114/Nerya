@@ -229,6 +229,16 @@ class MarketOrderExecutor(Executor):
         if order.state == "canceled":
             return self._finalize(filled=False, reason="canceled")
 
+        # Signed-delegation accounts must also be checked on executor recovery
+        # or direct creation. Terminal orders above are only finalized, never
+        # submitted again. The prototype refuses live/delayed routes.
+        from ..mandate_runtime import execution_blocker as mandate_execution_blocker
+        mandate_blocker = mandate_execution_blocker(self.paths, candidate, self.run.executor_id)
+        if mandate_blocker:
+            tracker.mark_rejected(order_id, reason=mandate_blocker)
+            self.store_result({"reason": mandate_blocker})
+            return self._finalize(filled=False, reason=mandate_blocker)
+
         # ``submitted`` / ``open`` / ``partially_filled``: in paper / shadow
         # we resolve synchronously; in live mode we rely on the connector.
         if venue_mode in ("paper", "shadow"):

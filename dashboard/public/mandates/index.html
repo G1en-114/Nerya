@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Nerya Agent · 签署授权</title>
+  <link rel="stylesheet" href="wallet.css">
+  <script src="wallet.js" defer></script>
+</head>
+<body>
+  <main>
+    <a href="/">Nerya Agent</a>
+    <p>WayAgent FX · Signed Mandates</p>
+    <h1>审核并签署用户授权</h1>
+    <p>导入操作员生成的 EIP-712 Policy 请求，检查授权内容，再通过浏览器钱包确认。此页面仅签名和导出文件，不发送链上交易，也不启用交易账户。</p>
+    <label for="request">授权请求 JSON 文件</label>
+    <input id="request" type="file" accept="application/json,.json">
+    <p>确认下方的 Agent 地址、网络、验证合约、市场／账户范围哈希、额度与有效期符合你的意图。请向请求提供方核对哈希对应的原始市场、账户和策略；不要签署来源不明的请求。</p>
+    <section id="review" hidden>
+      <h2>将由钱包签署的完整内容</h2>
+      <dl id="summary"></dl>
+      <details><summary>查看 EIP-712 原始数据</summary><pre id="payload"></pre></details>
+      <label class="confirm"><input id="confirmed" type="checkbox">我已核对签名账户、Agent、范围、额度、网络、合约和有效期。</label>
+      <button id="sign" disabled>连接钱包并签署授权</button>
+    </section>
+    <p id="status" role="status" aria-live="polite"></p>
+    <a id="download" hidden download="signed-policy.json">下载签署后的授权</a>
+  </main>
+</body>
+</html>

@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "source": "assets/agent-avatars",
+  "paths": {
+    "website": "assets/agent-avatars/<role>.png",
+    "dashboard": "/branding/agents/<role>.png",
+    "demo": "./avatars/<role>.png"
+  },
+  "files": [
+    {
+      "role": "lead",
+      "file": "lead.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 42897,
+      "sha256": "c8fb818d30965563a8867c9231dae2942fd9150033572031d27048271a64b751"
+    },
+    {
+      "role": "researcher",
+      "file": "researcher.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 46337,
+      "sha256": "4391bbca1382b75f2075ab16d008392ef2b9f8b384b9b92fca773016b1fa910d"
+    },
+    {
+      "role": "analyst",
+      "file": "analyst.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 43592,
+      "sha256": "1c76cdb61c1ba15f0a2c31ab1d1e2015da89ef1767bf2dbd57404c0ad2ea7c8d"
+    },
+    {
+      "role": "reviewer",
+      "file": "reviewer.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 45038,
+      "sha256": "2a348583d4dfbe92f3124c3848bbc5291227eca2d1ed17d037e0849843b03a37"
+    },
+    {
+      "role": "risk",
+      "file": "risk.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 44272,
+      "sha256": "22f68885f222bb01c2e8a4cca2b9cfc52a935860cde30187beca97710c67b99c"
+    },
+    {
+      "role": "coder",
+      "file": "coder.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 44040,
+      "sha256": "72649d6049ffaaa0729cbe9aa27b62f17c3e7d8c6441fff45e1757a1f73c33bf"
+    },
+    {
+      "role": "macro",
+      "file": "macro.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 46742,
+      "sha256": "2666d70cd72b426bfd1e554374f81478144eea5b517191629ac95c9257c7ad9b"
+    },
+    {
+      "role": "quant",
+      "file": "quant.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 46248,
+      "sha256": "6f8823e82c10ee1f67451620d37b8bf6604bdedb393199f7fef3335bd9bdd9e5"
+    },
+    {
+      "role": "execution",
+      "file": "execution.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 43723,
+      "sha256": "349533a2d19644764eae968297706d5c0158d9413636c1886a32664e0a16acc8"
+    },
+    {
+      "role": "data",
+      "file": "data.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 44976,
+      "sha256": "fc994201c823b4fa10aef160185b70daabe8766d4ffa4bb2149b183184d01039"
+    },
+    {
+      "role": "sentiment",
+      "file": "sentiment.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 46534,
+      "sha256": "1cc0102fd3ac6ab6fd95b45e5a3db69ec36fa1386093b1c1937ad8c313177dc3"
+    },
+    {
+      "role": "onchain",
+      "file": "onchain.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 44767,
+      "sha256": "3c67bf0f5265e514a496e1680a2b797a2105c188008984ca93e7079a8b09675c"
+    },
+    {
+      "role": "portfolio",
+      "file": "portfolio.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 40851,
+      "sha256": "4fa5a4bb1f4d10bc247c69712910875e39bd800121cdaa00ecff43f3645e0d46"
+    },
+    {
+      "role": "backtest",
+      "file": "backtest.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 45198,
+      "sha256": "154b65ebc1d057a3b5208823e6b2b053cf881f6829b2edd8a10873f0410334cf"
+    },
+    {
+      "role": "security",
+      "file": "security.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 43628,
+      "sha256": "a552401688f4f09ea4ddd532b60287eac1739d785f963e25ecbff3ed8c0a2ba1"
+    },
+    {
+      "role": "connector",
+      "file": "connector.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 44220,
+      "sha256": "2e6f6f4d49f3bd52654beb08494869997ea5b698c99ee27ca93a0ec2ee6a51c4"
+    },
+    {
+      "role": "prediction",
+      "file": "prediction.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 45457,
+      "sha256": "150aa5c102c627bdb0e19aa149dafe0475abfbcc47ebce71abb3a602dee2d29d"
+    },
+    {
+      "role": "futures",
+      "file": "futures.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 40640,
+      "sha256": "6c76c9b3bf7f7e28f471db3c8b9797319da17c2c7797e1cddc32a7461b3392fc"
+    },
+    {
+      "role": "equities",
+      "file": "equities.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 42300,
+      "sha256": "97df401e0dfd8b359563d0f50975f314a584cbb1026a185185894ca170ae7dba"
+    },
+    {
+      "role": "evolution",
+      "file": "evolution.png",
+      "width": 256,
+      "height": 256,
+      "bytes": 44643,
+      "sha256": "c7bf7752be8203775c7b8bb14b62638ff9ecca63d7f1e6fb853a25b2f7fec032"
+    }
+  ]
+}

@@ -334,6 +334,8 @@ STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
                 "files, not by passing code here."
             ),
         },
+        "evidence_refs": {"type": "array", "items": {"type": "string"}, "description": "References to sources actually used before creating this strategy, such as turn:<id>, session:<id>, or a recorded file:<workspace-relative-path>. Do not invent references."},
+        "research_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Optional subjective confidence in the research thesis, not profit probability; provide only with evidence_refs."},
         "strategy_class": {
             "type": "string",
             "enum": ["scalping", "trend", "news", "agent", "agent_team"],
@@ -823,6 +825,8 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
         title=str(args.get("title") or ""),
         description=str(args.get("description") or ""),
         prompt=str(args.get("prompt") or ""),
+        evidence_refs=tuple(str(ref).strip() for ref in (args.get("evidence_refs") or ()) if str(ref).strip()),
+        research_confidence=(float(args["research_confidence"]) if args.get("research_confidence") is not None else None),
         strategy_class=strategy_class,
         execution_mode=execution_mode,
         mode=str(args.get("mode") or "paper").strip().lower(),
