@@ -128,7 +128,7 @@ export function MandatePlayground({ onResult }: { onResult: (result: MandateDemo
       {busy ? <p>{t("后端正在运行。离开页面不会取消任务，重新打开可恢复状态。", "The backend is running. Leaving this page does not cancel the job; reopening retrieves its status.")}</p> : !error && job?.state === "completed" ? <p className={styles.allow}>{t("本次运行已完成，结果已更新到下方。", "Run completed. The results below have been updated.")}</p> : !error && available && !missing.length ? <p>{t("运行环境已连接，可以开始。", "Runtime connected. Ready to run.")}</p> : null}
       {job && <code data-testid="demo-job-id">Job {job.id}</code>}
       {error && <p role="alert">{errors[error] || t("请求未完成，请检查连接后重试。", "Request incomplete. Check the connection and retry.")}</p>}
-      {!!missing.length && <><p>{t("缺少依赖", "Missing dependencies")}: {missing.join(", ")}</p><pre>python -m pip install ".[mandates]"{`\n`}forge build --root contracts/mandates</pre></>}
+      {!!missing.length && <><p>{t("缺少依赖", "Missing dependencies")}: {missing.join(", ")}</p><pre>{'python -m pip install ".[mandates]"\nforge build --root contracts/mandates'}</pre></>}
     </div>
     {completed && lastCase && <section className={styles.runResult} data-testid="live-demo-result" aria-label={t("本次实际结果", "Actual run result")}>
       <div className={styles.eyebrow}>{t("3. 本次实际结果", "3. ACTUAL RUN RESULT")}</div>
