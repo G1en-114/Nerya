@@ -6,6 +6,7 @@ import { useLocale } from "next-intl";
 import { caseCopy, useMandateDemo } from "../../../lib/mandateDemo";
 import styles from "./safety.module.css";
 import { MandatePlayground } from "../../../components/MandatePlayground";
+import { MandateScenarioEvidence } from "../../../components/MandateScenarioEvidence";
 import type { MandateDemo } from "../../../lib/mandateDemo";
 
 export default function SafetyDemo() {
@@ -69,6 +70,7 @@ export default function SafetyDemo() {
         <div><dt>{t("请求被拒绝", "Stopped requests")}</dt><dd>{data.cases.filter(c => c.status === "rejected").length}</dd></div>
         <div><dt>{t("拒绝案例新增执行器", "New executors in stopped cases")}</dt><dd>{data.cases.filter(c => c.status === "rejected").reduce((n, c) => n + c.newExecutors, 0)}</dd></div>
       </dl>
+      <MandateScenarioEvidence data={data}/>
       <section className={styles.panel}>
         <div className={styles.sectionHead}><div className={styles.eyebrow}>01 / {t("授权条款", "SIGNED POLICIES")}</div><h2>{t("先看用户允许了什么", "Start with what the user allowed")}</h2></div>
         <div className={styles.policies}>{data.policies.map(p => <article key={p.hash}>
@@ -93,7 +95,7 @@ export default function SafetyDemo() {
               <div><dt>{t("新增执行器", "New executors")}</dt><dd>{active.newExecutors}</dd></div>
               <div><dt>{t("当次授权交易", "Authorization transaction")}</dt><dd>{active.authorizationStatus === 1 ? t("成功", "Succeeded") : active.authorizationStatus === 0 ? t("已回退", "Reverted") : t("本次未发送", "Not submitted in this case")}</dd></div>
             </dl>
-            <dl className={styles.fields}>{[["Reason", active.reason], ["Plan ID", active.planId], ["Policy hash", active.policyHash], ["Action hash", active.actionHash], ["Plan hash", active.planHash], ["Authorization tx", active.authorizationTx]].map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value || t("此结果未记录", "Not recorded in this result")}</code></dd></div>)}</dl>
+            <dl className={styles.fields}>{[["Runtime reason", active.reason], ["Chain reason", active.chainReason], ["New orders", active.newOrders?.toString()], ["New fills", active.newFills?.toString()], ["Plan ID", active.planId], ["Policy hash", active.policyHash], ["Action hash", active.actionHash], ["Plan hash", active.planHash], ["Authorization tx", active.authorizationTx]].map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value || t("此结果未记录", "Not recorded in this result")}</code></dd></div>)}</dl>
             <p className={styles.muted}>{t("执行器数量来自演示脚本读取的持久化记录。链上授权成功仍可能被运行时拒绝；它不等于成交证明。", "Executor counts come from persisted records read by the demo script. A successful chain authorization may still be rejected at runtime; it is not proof of a fill.")}</p>
             <button className={styles.button} disabled={selected >= data.cases.length - 1} onClick={() => select(i => i + 1)}>{t("下一个案例 →", "Next case →")}</button>
           </article>

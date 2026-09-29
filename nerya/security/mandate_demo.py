@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import time
 
@@ -22,7 +23,7 @@ from eth_utils import keccak
 from web3 import Web3
 
 from nerya.core import jsonl, yaml_io
-from nerya.core.config import Config, DEFAULT_CONFIG
+from nerya.core.config import Config, DEFAULT_CONFIG, load_config
 from nerya.core.paths import WorkspacePaths
 from nerya.db.sqlite import connect
 from nerya.security.mandates import (
@@ -38,7 +39,38 @@ def json_safe(value):
     return json.loads(Web3.to_json(value))
 
 
-SCENARIOS = {"suite", "allowed", "market", "fees", "long", "tamper", "replay", "revoke", "custom"}
+SCENARIOS = {"suite", "allowed", "market", "fees", "long", "tamper", "replay", "revoke", "custom", "budget", "reconciliation"}
+
+
+def _ledger_observation(paths: WorkspacePaths) -> dict:
+    """Read actual durable effects, including fills rather than executor flags."""
+    with closing(connect(paths.db)) as con:
+        return {
+            "executors": con.execute("SELECT COUNT(*) FROM executor_runs").fetchone()[0],
+            "orders": con.execute("SELECT COUNT(*) FROM orders").fetchone()[0],
+            "fills": con.execute("SELECT COUNT(*) FROM fills").fetchone()[0],
+            "fill_cost_usd": con.execute("SELECT COALESCE(SUM(notional_usd + fee_usd), 0) FROM fills").fetchone()[0],
+        }
+
+
+def _halt_demo_on_drift(config: Config) -> dict:
+    """Operator demo rule, called only with the freshly created demo workspace.
+
+    Local reconciliation itself reports warnings. This explicit demo rule
+    latches the existing workspace kill switch for a position/fill mismatch.
+    It never clears a stop, even if a later reconciliation is clean.
+    """
+    from nerya.trading.reconciliation import reconcile_local
+
+    report = reconcile_local(config.paths, account_id="mandate_paper")
+    if any(issue["kind"] == "position_fill_drift" for issue in report.issues):
+        config.data.setdefault("runtime", {})["kill_switch"] = True
+        yaml_io.dump(config.paths.root / "nerya.yml", config.data)
+        jsonl.append(config.paths.journal("mandate_demo_incidents"), {
+            "kind": "demo_position_drift_halt", "report_id": report.report_id,
+            "ts": report.ts, "scope": "isolated_demo_workspace", "automatic_resume": False,
+        })
+    return report.as_dict()
 
 
 def validate_request(request: dict) -> dict:
@@ -164,31 +196,96 @@ def run_demo(output: Path, request: dict | None = None) -> dict:
                               "action_typed_data": typed_data(d, "Action", a)})
             return plan
 
-        def authorize(plan):
+        def authorization_call(plan):
             e = plan.meta["signed_mandate"]
-            return transact(contract.functions.authorize(
+            return contract.functions.authorize(
                 tuple(e["policy"][n] for n, _ in POLICY_FIELDS), e["policy_signature"],
                 tuple(e["action"][n] for n, _ in ACTION_FIELDS), e["action_signature"],
-            ))
+            )
+
+        def authorize(plan):
+            return transact(authorization_call(plan))
 
         results = []
         def execute(label, plan, receipt=None, expected="rejected", *, resume=False):
             # Count durable executor creations, not just a UI flag.
-            with closing(connect(cfg.paths.db)) as con:
-                before = con.execute("SELECT COUNT(*) FROM executor_runs").fetchone()[0]
+            before = _ledger_observation(cfg.paths)
             out = submit_trade_plan(cfg, plan, market_snapshot={"price": 100, "age_s": 0, "source": "local_demo_synthetic"}, resume=resume)
-            with closing(connect(cfg.paths.db)) as con:
-                after = con.execute("SELECT COUNT(*) FROM executor_runs").fetchone()[0]
+            after = _ledger_observation(cfg.paths)
             if expected is not None:
                 assert out["status"] == expected, "Unexpected demo outcome"
             assert out["status"] in ("filled", "rejected"), "Unexpected demo outcome"
-            if out["status"] == "rejected": assert before == after, "DENY created executor"
-            results.append({"case": label, "status": out["status"], "new_executors": after-before,
+            if out["status"] == "rejected": assert before == after, "DENY changed execution records"
+            results.append({"case": label, "status": out["status"], "new_executors": after["executors"]-before["executors"],
+                            "new_orders": after["orders"]-before["orders"], "new_fills": after["fills"]-before["fills"],
                             "authorization_tx": Web3.to_hex(receipt.transactionHash) if receipt is not None else None,
                             "authorization_tx_status": receipt.status if receipt is not None else None,
                             "result": out})
 
         revocation_tx = None
+        budget_steps = []
+        reconciliation = None
+        if scenario == "budget":
+            for step, amount in enumerate((100, 99, 98), start=1):
+                # Distinct notionals exercise the normal entry without tripping
+                # its duplicate-intent guard. Every action has a $101 ceiling.
+                plan = make(step, size=amount, policy_override={"budget": 220_000_000})
+                chain_reason = None
+                if step == 3:
+                    from web3.exceptions import ContractLogicError
+                    try:
+                        authorization_call(plan).call({"from": addresses["demo-owner"]})
+                    except ContractLogicError as exc:
+                        if "session_budget_exceeded" not in str(exc):
+                            raise
+                        chain_reason = "session_budget_exceeded"
+                    assert chain_reason, "Third authorization unexpectedly allowed"
+                receipt = authorize(plan)
+                assert receipt.status == (0 if step == 3 else 1)
+                execute(f"Budget step {step}", plan, receipt, "rejected" if step == 3 else "filled")
+                results[-1]["chain_reason"] = chain_reason
+                ph = plan.meta["signed_mandate"]["action"]["policyHash"]
+                chain_spent = contract.functions.spent(bytes.fromhex(ph[2:])).call()
+                with closing(sqlite3.connect(cfg.paths.db.with_name("mandates.sqlite"))) as con:
+                    local_spent = sum(int(r[0]) for r in con.execute("SELECT cost FROM claims WHERE policy_hash=?", (ph,)))
+                assert chain_spent == local_spent == min(step, 2) * 101_000_000
+                observation = _ledger_observation(cfg.paths)
+                assert observation["fills"] == min(step, 2)
+                budget_steps.append({"step": step, "policy_hash": ph, "notional_usd": amount,
+                    "ceiling": 101_000_000, "budget": 220_000_000, "chain_spent": chain_spent,
+                    "local_spent": local_spent, "remaining": 220_000_000-chain_spent,
+                    "chain_reason": chain_reason, "block_number": web3.eth.block_number,
+                    "fills": observation["fills"], "fill_cost_usd": observation["fill_cost_usd"]})
+        if scenario == "reconciliation":
+            from nerya.trading.reconciliation import reconcile_local
+
+            baseline = make(1)
+            receipt = authorize(baseline); assert receipt.status == 1
+            execute("ALLOW: fill before fault injection", baseline, receipt, "filled")
+            clean = reconcile_local(cfg.paths, account_id="mandate_paper")
+            assert not clean.issues, "Baseline must reconcile before injecting a fault"
+            with closing(connect(cfg.paths.db)) as con:
+                position = con.execute("SELECT position_id, size_base FROM positions WHERE account_id=? AND closed_at IS NULL", ("mandate_paper",)).fetchone()
+                assert position is not None
+                # Deliberate test fault in the isolated local projection only.
+                con.execute("UPDATE positions SET size_base=size_base+0.25 WHERE position_id=?", (position["position_id"],))
+                con.commit()
+            detected = _halt_demo_on_drift(cfg)
+            assert any(i["kind"] == "position_fill_drift" for i in detected["issues"])
+            cfg = load_config(cfg.paths.root)
+            assert cfg.kill_switch(), "Stop must survive reloading persisted configuration"
+            next_plan = make(2, size=90, cost=91_000_000)
+            receipt = authorize(next_plan); assert receipt.status == 1
+            execute("DENY: persisted stop after reconciliation drift", next_plan, receipt)
+            assert "kill_switch_enabled" in results[-1]["result"]["risk_decision"]["reasons"]
+            # A repeated request after reloading cannot clear the stop either.
+            cfg = load_config(cfg.paths.root)
+            execute("DENY: retry after reloading stopped workspace", next_plan, resume=True)
+            assert "kill_switch_enabled" in results[-1]["result"]["risk_decision"]["reasons"]
+            reconciliation = {"fault_injected": True, "injected_delta_base": 0.25,
+                "baseline_report_id": clean.report_id, "report": detected,
+                "halt_persisted": cfg.kill_switch(), "scope": "isolated_demo_workspace",
+                "automatic_resume": False, "blocked_attempts": 2}
         if scenario in ("suite", "allowed", "tamper", "replay"):
             allowed = make(1)
             receipt = authorize(allowed); assert receipt.status == 1
@@ -232,6 +329,7 @@ def run_demo(output: Path, request: dict | None = None) -> dict:
                   "signing": "isolated demo keys in SecretVault; actual ECDSA, automated test owner",
                   "settings": settings, "domain": d, "cases": results,
                   "revocation_tx": revocation_tx,
+                  "budget_steps": budget_steps, "reconciliation": reconciliation,
                   "receipts": receipts, "authorization_events": json_safe(events),
                   "proposals": proposals,
                   "audit": jsonl.read_all(cfg.paths.journal("mandates"))}
@@ -259,8 +357,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New directory; never an existing workspace")
     parser.add_argument("--publish-dashboard", action="store_true", help="Publish public demo fields to the local dashboard")
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="suite", help="Isolated scenario to run")
     args = parser.parse_args()
-    summary = run_demo(args.output.resolve())
+    summary = run_demo(args.output.resolve(), {"scenario": args.scenario})
     if args.publish_dashboard:
         from .mandate_demo_export import publish
         summary["dashboard_snapshot"] = str(publish(Path(summary["evidence"])))

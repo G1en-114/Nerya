@@ -86,6 +86,8 @@ export function MandatePlayground({ onResult }: { onResult: (result: MandateDemo
   };
   const presets = [["custom", "自定义授权", "Custom policy"], ["allowed", "正常执行", "Allowed action"], ["market", "市场越界", "Market boundary"], ["fees", "费用后超限", "Fees exceed limit"], ["long", "禁止新开多头", "No long opening"], ["tamper", "篡改动作", "Tampered plan"], ["replay", "重复提交", "Replay"], ["revoke", "撤销后再尝试", "Revoke, then attempt"], ["suite", "完整 7 案例", "All 7 cases"]];
   const descriptions: Record<string, [string, string]> = {
+    budget: ["同一份 220 USD 授权，依次请求 100 / 99 / 98 USD，每笔签署成本上限都是 101 USD。验证前两笔执行、第三笔超累计预算停止。", "One $220 policy, with $100 / $99 / $98 requests and a $101 signed ceiling each. Verify that two execute and the third stops at the cumulative limit."],
+    reconciliation: ["先正常模拟成交，再向本次隔离仓位记录注入 +0.25 BTC 差异。实际运行对账，持久化停止开关，再验证新请求和重试都被拒绝。本次不自动恢复。", "Complete a paper fill, then inject +0.25 BTC into this isolated position record. Run reconciliation, persist a stop, and verify that both the next request and a retry are refused. No automatic recovery."],
     allowed: ["授权 BTC，提交 100 USD 开多请求，动作成本上限 101 USD。检查能否完成模拟成交。", "Authorize BTC, request a $100 long opening with a $101 action ceiling, and check paper execution."],
     market: ["用户只允许 ETH，Agent 却请求买入 BTC。检查是否在创建执行器之前停止。", "The user permits only ETH; the agent requests BTC. Check whether it stops before creating an executor."],
     fees: ["请求金额 99 USD，动作成本上限也为 99 USD。合约登记后，再检查手续费和滑点是否使运行时拒绝。", "The order and signed ceiling are both $99. After chain registration, check whether fees and slippage cause runtime rejection."],
@@ -101,6 +103,9 @@ export function MandatePlayground({ onResult }: { onResult: (result: MandateDemo
     <div className={styles.sectionHead}><div className={styles.eyebrow}>TRY IT / {t("现场操作", "INTERACTIVE RUN")}</div><h2>{t("亲自设定边界，再让 Agent 尝试", "Set the boundary. Let the agent try.")}</h2>
       <p>{t("每次运行创建独立的本地链与模拟账户，后端实际验签、登记授权并检查执行。可以修改条件后再次运行，对比结果。", "Each run creates an isolated local chain and paper account. The backend verifies signatures, registers authorization and checks execution. Change the conditions and run again to compare outcomes.")}</p></div>
     <p className={styles.stepLabel}>{t("1. 选择一个场景，或自定义授权", "1. Choose a scenario or set your own policy")}</p>
+    <div className={styles.scenarioChoices} role="group" aria-label={t("连续安全演示", "Extended safety scenarios")}>
+      {([["budget", "连续预算", "Continuous budget", "一份授权 · 两次放行 · 第三次超额停止", "One policy · Two fills · Third request stopped"], ["reconciliation", "执行后对账", "Post-execution reconciliation", "模拟成交 · 注入差异 · 检测并停止后续交易", "Paper fill · Inject drift · Detect and stop subsequent trades"]] as const).map(([key, cn, en, hintCn, hintEn]) => <button type="button" key={key} disabled={busy} aria-pressed={form.scenario === key} onClick={() => setForm({ ...initial, scenario: key })}><strong>{t(cn, en)}</strong><span>{t(hintCn, hintEn)}</span></button>)}
+    </div>
     <div className={styles.presets} role="group" aria-label={t("选择运行场景", "Choose a scenario")}>{presets.map(([key, cn, en]) => <button key={key} className={styles.button} disabled={busy} aria-pressed={form.scenario === key} onClick={() => setForm({ ...initial, scenario: key })}>{t(cn, en)}</button>)}</div>
     <form onSubmit={event => { event.preventDefault(); void run(); }}>
       <fieldset disabled={busy}>
