@@ -67,3 +67,6 @@ workspace/artifacts/
 # Explicitly published local safety demo recordings (generated, not fixtures).
 /dashboard/public/mandates/demo.json
 /dashboard/public/mandates/demo.json.tmp
+
+# Never commit repo-relative home/vault state.
+/~/.nerya/
