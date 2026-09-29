@@ -119,7 +119,10 @@ export function NodIntentCapture({
       stop();
     } catch (e) {
       if (mounted.current) {
-        setError(nodError(e, zh));
+        const payload = e && typeof e === "object" && "payload" in (e as object)
+          ? (e as { payload?: { detail?: { amplitude?: number } } }).payload
+          : undefined;
+        setError(nodError(e, zh, payload?.detail));
         setPhase("nod");
         setProgress(0);
       }

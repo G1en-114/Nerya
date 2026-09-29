@@ -40,46 +40,43 @@ def config(tmp_path, monkeypatch):
     return config
 
 
-def nod_series(up=False, amplitude=0.25, length=12):
-    """Synthetic pitch series: one excursion away from, and back to, neutral."""
-    half = length // 2
-    values = []
-    for i in range(length):
-        phase = i / max(1, half - 1) if i < half else (length - 1 - i) / max(1, half - 1)
-        values.append((-amplitude if up else amplitude) * (1.0 - phase))
-    return values
+def _lerp(a, b, steps):
+    return [a + (b - a) * i / steps for i in range(1, steps + 1)]
 
 
-def test_detect_nod_accepts_single_excursion():
-    assert nod_worker.detect_nod(nod_series())[0] is True
-    assert nod_worker.detect_nod(nod_series(up=True))[0] is True
-    assert nod_worker.detect_nod(nod_series(length=8))[0] is True
+def _nod_cycle(peak, up_first=False):
+    a, b = (0.5 + peak, 0.5 - peak) if up_first else (0.5 - peak, 0.5 + peak)
+    return _lerp(0.5, a, 2) + _lerp(a, b, 2) + _lerp(b, 0.5, 2)
 
 
-def test_detect_nod_rejects_flat_and_drift():
+def test_detect_nod_accepts_single_and_continuous_nods():
+    # One clear out-and-back cycle...
+    assert nod_worker.detect_nod([0.5] + _nod_cycle(0.12) + [0.5, 0.5])[0] is True
+    assert nod_worker.detect_nod([0.5, 0.5] + _nod_cycle(0.12, up_first=True) + [0.5])[0] is True
+    # ...and continuous nodding (people nod two-three times naturally).
+    double = [0.5] + _nod_cycle(0.10) + _nod_cycle(0.10)
+    nod, cycles, amp = nod_worker.detect_nod(double)
+    assert nod is True and cycles >= 3 and amp >= 0.04
+
+
+def test_detect_nod_rejects_static_drift_and_held():
     assert nod_worker.detect_nod([0.5] * 12)[0] is False
+    # Monotone drift never returns to centre.
     assert nod_worker.detect_nod([0.4 + 0.02 * i for i in range(12)])[0] is False
-    # Down and never returns to the opening position.
+    # Nod down and stay there.
     assert nod_worker.detect_nod(
         [0.5, 0.44, 0.36, 0.30, 0.24, 0.18, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12]
     )[0] is False
-    # Moves and then holds a new position instead of returning.
+    # Move to a new position and hold it.
     assert nod_worker.detect_nod(
         [0.5, 0.42, 0.36, 0.44, 0.52, 0.58, 0.58, 0.58, 0.58, 0.58, 0.58, 0.58]
     )[0] is False
 
 
-def test_detect_nod_rejects_second_excursion_and_tiny_motion():
-    # Two dips of similar size are not one nod.
-    assert nod_worker.detect_nod(
-        [0.5, 0.42, 0.36, 0.50, 0.5, 0.42, 0.36, 0.50, 0.5, 0.5, 0.5, 0.5]
-    )[0] is False
+def test_detect_nod_rejects_micro_jitter_and_short_series():
     assert nod_worker.detect_nod(
         [0.5, 0.49, 0.48, 0.47, 0.48, 0.49, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
     )[0] is False
-
-
-def test_detect_nod_rejects_too_few_frames():
     assert nod_worker.detect_nod([0.5, 0.4, 0.5])[0] is False
     assert nod_worker.detect_nod([])[0] is False
 
