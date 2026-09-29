@@ -1,0 +1,193 @@
+{
+  "chain_id": 11155111,
+  "sender": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+  "evidence_sha256": "0x51bad86e86061b686300c445464e78052ee4e45668330845c8d7f1e8e6ad297a",
+  "metadata_sha256": "0xd19b668b9ce295db2867c1fbc907c454545265fef9e60c425be3d55cd79a55c8",
+  "bytecode_sha256": {
+    "NeryaStrategyRegistry": "0xc42af6dfa206c6f4d1048f9653db2306ad4e6f2ea5f49b877f6fc09ff6a698d9",
+    "NeryaRunRecords": "0x7edc174ca8ce883850ad258a6294fc7b474130c2e981ddfd9acb51a77ef22d69"
+  },
+  "transactions": {
+    "NeryaStrategyRegistry": {
+      "tx_hash": "0x9c0a9695761a2278670c7e1c57711532af8cc31732e7f7e94745e4f20beabeb0",
+      "status": "confirmed",
+      "nonce": 15,
+      "max_fee_wei": 216433845990274,
+      "explorer": "https://sepolia.etherscan.io/tx/0x9c0a9695761a2278670c7e1c57711532af8cc31732e7f7e94745e4f20beabeb0",
+      "receipt": {
+        "blockHash": "0xba18f8d3d683784c3c94b0e7de261aa4d8f7ab8a879ab028697c6746fcfca36c",
+        "blockNumber": 11807617,
+        "contractAddress": "0xebcd11A2Ff45ACB5fa1e52bb2513A0Aaa543BcE1",
+        "cumulativeGasUsed": 58270968,
+        "effectiveGasPrice": 991873982,
+        "from": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+        "gasUsed": 179249,
+        "logs": [],
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "status": 1,
+        "to": null,
+        "transactionHash": "0x9c0a9695761a2278670c7e1c57711532af8cc31732e7f7e94745e4f20beabeb0",
+        "transactionIndex": 219,
+        "type": 0
+      }
+    },
+    "NeryaRunRecords": {
+      "tx_hash": "0x94d6d8d305c1a574f5c0ed1f0cb17b939347c13491bd4e4bc5eebf7b28a835f2",
+      "status": "confirmed",
+      "nonce": 16,
+      "max_fee_wei": 637266568887476,
+      "explorer": "https://sepolia.etherscan.io/tx/0x94d6d8d305c1a574f5c0ed1f0cb17b939347c13491bd4e4bc5eebf7b28a835f2",
+      "replaced_tx_hashes": [
+        "0x10ac654174e4d833f3798d49f93ffb2a6ff663e1a7aed01bb8c76cc6d7d994c5"
+      ],
+      "receipt": {
+        "blockHash": "0x5437fffe29486df849e8eac8d05569f53d79d76d9a124fffaac3a2b9eaba8dac",
+        "blockNumber": 11807634,
+        "contractAddress": "0x11413B0EeAc04000D1746aC223961B5bb9Cd6F4f",
+        "cumulativeGasUsed": 2425087,
+        "effectiveGasPrice": 2165172526,
+        "from": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+        "gasUsed": 242182,
+        "logs": [],
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "status": 1,
+        "to": null,
+        "transactionHash": "0x94d6d8d305c1a574f5c0ed1f0cb17b939347c13491bd4e4bc5eebf7b28a835f2",
+        "transactionIndex": 14,
+        "type": 0
+      }
+    },
+    "register_strategy": {
+      "tx_hash": "0x11bf8cf110699e7272ee6522ff80d3655a727e23fed6aa7af7ed6782cb74a84d",
+      "status": "confirmed",
+      "nonce": 17,
+      "max_fee_wei": 184025721266370,
+      "explorer": "https://sepolia.etherscan.io/tx/0x11bf8cf110699e7272ee6522ff80d3655a727e23fed6aa7af7ed6782cb74a84d",
+      "receipt": {
+        "blockHash": "0x933444ef42d6e5f333756c45cbf0930d7b676872cc5c42edcc4134ff81361441",
+        "blockNumber": 11807635,
+        "contractAddress": null,
+        "cumulativeGasUsed": 5081945,
+        "effectiveGasPrice": 2202028470,
+        "from": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+        "gasUsed": 68786,
+        "logs": [
+          {
+            "address": "0xebcd11A2Ff45ACB5fa1e52bb2513A0Aaa543BcE1",
+            "topics": [
+              "0xe9581a0d6e2ba407bb29da1e80e524b6e62bc30d38f08c2eba9893e655226c5a",
+              "0x910ab4712cb32b984a6201f6c27cfd91051329a9e4e75ac15b4b463523658d7d",
+              "0x0000000000000000000000007598b2f89798df9c7aa399bc71b899b0d35f8430"
+            ],
+            "data": "0xd19b668b9ce295db2867c1fbc907c454545265fef9e60c425be3d55cd79a55c8",
+            "blockNumber": 11807635,
+            "transactionHash": "0x11bf8cf110699e7272ee6522ff80d3655a727e23fed6aa7af7ed6782cb74a84d",
+            "transactionIndex": 27,
+            "blockHash": "0x933444ef42d6e5f333756c45cbf0930d7b676872cc5c42edcc4134ff81361441",
+            "blockTimestamp": "0x6abbb0d4",
+            "logIndex": 94,
+            "removed": false
+          }
+        ],
+        "logsBloom": "0x000000000000000000000000800000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000400010000000000000000000000000000000000000200000000000000000000000000000200000000000000000000000000000000000c0000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000",
+        "status": 1,
+        "to": "0xebcd11A2Ff45ACB5fa1e52bb2513A0Aaa543BcE1",
+        "transactionHash": "0x11bf8cf110699e7272ee6522ff80d3655a727e23fed6aa7af7ed6782cb74a84d",
+        "transactionIndex": 27,
+        "type": 0
+      }
+    },
+    "record_run": {
+      "tx_hash": "0xdcb673aaee0d78f4dc1b4e580c0c2437fe9061ec9c447e0c93c4ff12cc7a62c4",
+      "status": "confirmed",
+      "nonce": 18,
+      "max_fee_wei": 131561691912384,
+      "explorer": "https://sepolia.etherscan.io/tx/0xdcb673aaee0d78f4dc1b4e580c0c2437fe9061ec9c447e0c93c4ff12cc7a62c4",
+      "receipt": {
+        "blockHash": "0x73fce07b426217102c42bdfec5fddab28f57752e163524f42c829e2545ad3ba9",
+        "blockNumber": 11807636,
+        "contractAddress": null,
+        "cumulativeGasUsed": 1651009,
+        "effectiveGasPrice": 2038515168,
+        "from": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+        "gasUsed": 52988,
+        "logs": [
+          {
+            "address": "0x11413B0EeAc04000D1746aC223961B5bb9Cd6F4f",
+            "topics": [
+              "0x0efdc1cbb2128a2285832de53ace47276655041cba539f7ea7f294bdf45c215f",
+              "0x910ab4712cb32b984a6201f6c27cfd91051329a9e4e75ac15b4b463523658d7d",
+              "0x0d0d699af9aa7f4515f03ba25d7d1956e4d5be96c1a8e54f1b58a510da25d08d",
+              "0x0000000000000000000000007598b2f89798df9c7aa399bc71b899b0d35f8430"
+            ],
+            "data": "0x51bad86e86061b686300c445464e78052ee4e45668330845c8d7f1e8e6ad297a",
+            "blockNumber": 11807636,
+            "transactionHash": "0xdcb673aaee0d78f4dc1b4e580c0c2437fe9061ec9c447e0c93c4ff12cc7a62c4",
+            "transactionIndex": 13,
+            "blockHash": "0x73fce07b426217102c42bdfec5fddab28f57752e163524f42c829e2545ad3ba9",
+            "blockTimestamp": "0x6abbb0e0",
+            "logIndex": 82,
+            "removed": false
+          }
+        ],
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000001000000000000000000100000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000200400000000000000800000000000000000001000000200000000000000002000000000000020000000000000000008000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002001000000000000000",
+        "status": 1,
+        "to": "0x11413B0EeAc04000D1746aC223961B5bb9Cd6F4f",
+        "transactionHash": "0xdcb673aaee0d78f4dc1b4e580c0c2437fe9061ec9c447e0c93c4ff12cc7a62c4",
+        "transactionIndex": 13,
+        "type": 0
+      }
+    }
+  },
+  "contracts": {
+    "NeryaStrategyRegistry": {
+      "address": "0xebcd11A2Ff45ACB5fa1e52bb2513A0Aaa543BcE1",
+      "runtime_code_hash": "0x37045759af135914b62f5295e11360d513882fbc92bac14796614d8cdb82ddb7",
+      "explorer": "https://sepolia.etherscan.io/address/0xebcd11A2Ff45ACB5fa1e52bb2513A0Aaa543BcE1"
+    },
+    "NeryaRunRecords": {
+      "address": "0x11413B0EeAc04000D1746aC223961B5bb9Cd6F4f",
+      "runtime_code_hash": "0x03254926c6e78394d87ac69a967c47a2ea5b05b950ffc0fbaf12f9d0ef31447d",
+      "explorer": "https://sepolia.etherscan.io/address/0x11413B0EeAc04000D1746aC223961B5bb9Cd6F4f"
+    }
+  },
+  "verified": true,
+  "strategy_id": "0x910ab4712cb32b984a6201f6c27cfd91051329a9e4e75ac15b4b463523658d7d",
+  "run_id": "0x0d0d699af9aa7f4515f03ba25d7d1956e4d5be96c1a8e54f1b58a510da25d08d",
+  "claim": "Public-chain timestamped commitment to a local paper demo summary; not a live trade or Kiln usage proof.",
+  "events": {
+    "StrategyRegistered": [
+      {
+        "args": {
+          "strategyId": "0x910ab4712cb32b984a6201f6c27cfd91051329a9e4e75ac15b4b463523658d7d",
+          "owner": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+          "metadataHash": "0xd19b668b9ce295db2867c1fbc907c454545265fef9e60c425be3d55cd79a55c8"
+        },
+        "event": "StrategyRegistered",
+        "logIndex": 94,
+        "transactionIndex": 27,
+        "transactionHash": "0x11bf8cf110699e7272ee6522ff80d3655a727e23fed6aa7af7ed6782cb74a84d",
+        "address": "0xebcd11A2Ff45ACB5fa1e52bb2513A0Aaa543BcE1",
+        "blockHash": "0x933444ef42d6e5f333756c45cbf0930d7b676872cc5c42edcc4134ff81361441",
+        "blockNumber": 11807635
+      }
+    ],
+    "RunRecorded": [
+      {
+        "args": {
+          "strategyId": "0x910ab4712cb32b984a6201f6c27cfd91051329a9e4e75ac15b4b463523658d7d",
+          "runId": "0x0d0d699af9aa7f4515f03ba25d7d1956e4d5be96c1a8e54f1b58a510da25d08d",
+          "recorder": "0x7598b2f89798DF9c7aA399bC71b899b0D35F8430",
+          "evidenceHash": "0x51bad86e86061b686300c445464e78052ee4e45668330845c8d7f1e8e6ad297a"
+        },
+        "event": "RunRecorded",
+        "logIndex": 82,
+        "transactionIndex": 13,
+        "transactionHash": "0xdcb673aaee0d78f4dc1b4e580c0c2437fe9061ec9c447e0c93c4ff12cc7a62c4",
+        "address": "0x11413B0EeAc04000D1746aC223961B5bb9Cd6F4f",
+        "blockHash": "0x73fce07b426217102c42bdfec5fddab28f57752e163524f42c829e2545ad3ba9",
+        "blockNumber": 11807636
+      }
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "nerya.gwdc.record.v1",
+  "source_sha256": "0xaeab541fedf1a3d9496c6f1bf78351584850e209ca46115a6e796fb2d2486d95",
+  "kind": "commitment_to_previously_recorded_local_paper_demo",
+  "cases": [
+    {
+      "case": "ALLOW: signed and anchored action",
+      "status": "filled",
+      "new_executors": 1
+    },
+    {
+      "case": "DENY: user changes allowed market to ETH; BTC request stops",
+      "status": "rejected",
+      "new_executors": 0
+    },
+    {
+      "case": "DENY: fees and slippage exceed signed ceiling",
+      "status": "rejected",
+      "new_executors": 0
+    },
+    {
+      "case": "DENY: long opening prohibited",
+      "status": "rejected",
+      "new_executors": 0
+    },
+    {
+      "case": "DENY: plan changed after signing",
+      "status": "rejected",
+      "new_executors": 0
+    },
+    {
+      "case": "DENY: replay through resume path",
+      "status": "rejected",
+      "new_executors": 0
+    },
+    {
+      "case": "DENY: user revoked previously anchored policy",
+      "status": "rejected",
+      "new_executors": 0
+    }
+  ],
+  "public_testnet_execution": false,
+  "claim": "Public-chain timestamped commitment to a local paper demo summary; not a live trade or Kiln usage proof."
+}
