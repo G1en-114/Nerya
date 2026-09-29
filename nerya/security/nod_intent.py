@@ -30,6 +30,14 @@ _VALUE = "nod-intent"
 _LOCK = threading.RLock()
 _INFERENCE_LIMIT = threading.BoundedSemaphore(1)
 
+# Camera-scoped warm workers: the model loads once per camera session and is
+# released when the camera closes (or after the idle deadline as a safety
+# net for a crashed page that never sent "close").
+_SESSIONS: dict[str, dict] = {}
+_SESSIONS_LOCK = threading.Lock()
+SESSION_IDLE_SECONDS = 180
+_REAPER_STARTED = threading.Event()
+
 
 class NodIntentError(ValueError):
     pass
@@ -42,7 +50,7 @@ def record_digest(record: dict) -> str:
     ).hexdigest()
 
 
-def _infer(frames) -> dict:
+def _worker_command_env():
     root = Path(__file__).resolve().parents[2]
     local_python = (
         root
@@ -61,6 +69,26 @@ def _infer(frames) -> dict:
         OPENBLAS_NUM_THREADS="1",
         OMP_NUM_THREADS="1",
     )
+    return root, executable, env
+
+
+def _spawn_serve():
+    """Spawn the persistent worker for one camera session (seam for tests)."""
+    root, executable, env = _worker_command_env()
+    return subprocess.Popen(
+        [executable, "-m", "nerya.vision.nod_worker", "--serve"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        cwd=root,
+    )
+
+
+def _infer(frames) -> dict:
+    root, executable, env = _worker_command_env()
     if not _INFERENCE_LIMIT.acquire(blocking=False):
         raise NodIntentError("nod_verification_busy")
     try:
@@ -84,6 +112,105 @@ def _infer(frames) -> dict:
         raise NodIntentError("nod_model_unavailable") from exc
     finally:
         _INFERENCE_LIMIT.release()
+
+
+def _reap_loop():
+    while True:
+        time.sleep(30)
+        with _SESSIONS_LOCK:
+            now = time.time()
+            stale = [
+                key
+                for key, entry in _SESSIONS.items()
+                if now - entry["last_used"] > SESSION_IDLE_SECONDS
+            ]
+            for key in stale:
+                _terminate(_SESSIONS.pop(key))
+
+
+def _terminate(entry) -> None:
+    try:
+        if entry["proc"].stdin:
+            entry["proc"].stdin.close()
+        entry["proc"].terminate()
+    except Exception:
+        pass
+
+
+def _start_reaper() -> None:
+    if _REAPER_STARTED.is_set():
+        return
+    _REAPER_STARTED.set()
+    threading.Thread(target=_reap_loop, daemon=True).start()
+
+
+def open_session(actor) -> dict:
+    """Start (or restart) this operator's warm nod worker.
+
+    The model loads lazily inside the worker; a background warmup request
+    triggers the load immediately so the first real nod burst is fast while
+    the user is still positioning the camera.
+    """
+    key = NodIntentService._actor_key(actor)
+    with _SESSIONS_LOCK:
+        old = _SESSIONS.get(key)
+        if old is not None:
+            _terminate(old)
+        proc = _spawn_serve()
+        _SESSIONS[key] = {
+            "proc": proc,
+            "actor": key,
+            "last_used": time.time(),
+            "lock": threading.Lock(),
+        }
+        _start_reaper()
+    threading.Thread(target=_session_request, args=(key, []), daemon=True).start()
+    return {"ok": True, "session": "camera", "idle_seconds": SESSION_IDLE_SECONDS}
+
+
+def close_session(actor) -> dict:
+    key = NodIntentService._actor_key(actor)
+    with _SESSIONS_LOCK:
+        entry = _SESSIONS.pop(key, None)
+    if entry is None:
+        return {"ok": True, "closed": False}
+    _terminate(entry)
+    return {"ok": True, "closed": True}
+
+
+def _session_infer(key, frames):
+    """Run one burst through the operator's warm worker; None if absent/dead."""
+    entry = _SESSIONS.get(key)
+    if entry is None or entry["proc"].poll() is not None:
+        return None
+    with entry["lock"]:
+        proc = entry["proc"]
+        if proc.poll() is not None or not proc.stdin or not proc.stdout:
+            return None
+        try:
+            proc.stdin.write(json.dumps({"frames": frames}) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+        except Exception:
+            return None
+        entry["last_used"] = time.time()
+    if not line:
+        return None
+    try:
+        output = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not output.get("ok"):
+        raise NodIntentError(str(output.get("error") or "nod_model_unavailable"))
+    return output
+
+
+def _session_request(key, frames):
+    """Best-effort warmup/cleanup request used by open_session."""
+    try:
+        _session_infer(key, frames)
+    except Exception:
+        pass
 
 
 class NodIntentService:
@@ -167,7 +294,16 @@ class NodIntentService:
         if str((record or {}).get("kind") or "") not in SUPPORTED_KINDS:
             raise NodIntentError("nod_kind_not_supported")
         digest = record_digest(record)
-        inferred = _infer(self._frames(frames))
+        checked = self._frames(frames)
+        # Warm camera session first (model already loaded); fall back to the
+        # one-shot worker when the operator never opened a session or it died.
+        inferred = None
+        try:
+            inferred = _session_infer(key, checked)
+        except NodIntentError:
+            raise
+        if inferred is None:
+            inferred = _infer(checked)
         if inferred.get("nod") is not True:
             raise NodIntentError("nod_not_detected")
         receipt = secrets.token_urlsafe(32)

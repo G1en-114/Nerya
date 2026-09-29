@@ -1,6 +1,27 @@
 """Camera nod-intent capture for the approval card; intent only, never authority."""
-from ..security.nod_intent import NodIntentError, NodIntentService
+from ..security.nod_intent import (
+    NodIntentError,
+    NodIntentService,
+    close_session,
+    open_session,
+)
 from . import routes_approvals
+
+
+def _session(client, payload):
+    """Camera-scoped warm model worker: open on camera start, close on stop."""
+    actor = payload.get("_auth_actor_id")
+    if not actor:
+        return {"ok": False, "error": "trusted_actor_required", "_status": 403}
+    action = str(payload.get("action") or "").strip()
+    try:
+        if action == "open":
+            return open_session(actor)
+        if action == "close":
+            return close_session(actor)
+    except NodIntentError as exc:
+        return {"ok": False, "error": str(exc), "_status": 409}
+    return {"ok": False, "error": "unknown_action", "_status": 400}
 
 
 def _capture(client, payload):
@@ -26,4 +47,7 @@ def _capture(client, payload):
 
 
 def routes():
-    return [("POST", "/security/nod/intent", _capture)]
+    return [
+        ("POST", "/security/nod/session", _session),
+        ("POST", "/security/nod/intent", _capture),
+    ]

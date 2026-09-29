@@ -94,6 +94,7 @@ _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
     "/security/face/enroll",
     "/security/face/delete",
     "/security/nod/intent",
+    "/security/nod/session",
     "/browsers/agent",
     "/agent/run_turn",
     "/agent/run_turn_internal",

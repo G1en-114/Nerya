@@ -160,8 +160,19 @@ Reference features are encrypted in a separate `face.enc` vault; original camera
 frames are not saved. Removing the reference disables login face verification.
 UniFace MiniFASNet provides passive anti-spoofing, not replay-proof authentication;
 evaluate recognition thresholds and presentation-attack resistance before use.
-Models may download on first capture. For an isolated inference environment, set
-`NERYA_FACE_PYTHON` to a Python executable with `uniface[cpu]` installed.
+For demo machines run the one-command bootstrap instead: it creates `.venv-face`,
+installs the vision stack and seeds the model cache from `models/uniface/` (committed,
+so nothing downloads at demo time even offline), then smoke-tests both workers:
+
+```bash
+python scripts/setup_vision_stack.py
+```
+
+The nod detector runs as a camera-scoped warm worker: the model loads when the
+camera opens and is released when it closes (plus a 180 s idle safety net), so
+repeated nod captures cost ~0.5 s each instead of reloading the model every time.
+For an isolated inference environment, set `NERYA_FACE_PYTHON` to a Python
+executable with `uniface[cpu]` installed.
 
 ## GWDC 2026 disclosure and evidence
 

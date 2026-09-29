@@ -252,6 +252,12 @@ _RULES: tuple[RouteRule, ...] = (
         "approve:trade|approve:tool",
         "camera nod expresses intent for one approval; authority unchanged",
     ),
+    RouteRule(
+        "POST",
+        "/security/nod/session",
+        "approve:trade|approve:tool",
+        "camera-scoped warm model worker; no authority",
+    ),
 
     # trading / portfolio / strategy
     RouteRule(
