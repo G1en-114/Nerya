@@ -50,6 +50,11 @@ candidate; pre-draft source archaeology does not.
    Check current candidates before following an ID recalled from old history.
 2. **Save one real candidate.** When the request is sufficiently specified, prefer
    `strategy_draft_proposal(files={"main.py":..., "strategy.yml":..., "strategy.md":..., "tests/test_contract.py":...})`.
+   Attach `evidence_refs` only for source records actually used in the analysis
+   (for example an existing `turn:<id>`, `session:<id>`, or recorded `file:<path>`).
+   If the research has a reasoned confidence estimate, pass `research_confidence`
+   as a number from 0 to 1 together with those refs. Never invent a ref or a
+   confidence value; omit both when no attributable research was recorded.
    The tool saves and validates that actual bundle. Keep the returned ID; a successful
    inline validation needs no duplicate read/edit/validate cycle. For an existing
    candidate or intentionally incomplete scaffold, use `read_file` then

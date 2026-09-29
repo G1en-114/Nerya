@@ -439,6 +439,8 @@ class StrategyAPI:
             service = self._promotion_service_status(sid, pkg)
         receipt = {
             "ok": bool(outcome.get("ok")),
+            **({"reason": str(outcome.get("reason") or "strategy_application_failed")}
+               if not outcome.get("ok") else {}),
             "proposal_id": proposal_id,
             "strategy_id": sid,
             "validation": validation.asdict(),

@@ -20,6 +20,7 @@ import { workflowDiff, diffValue } from "../../lib/workflowDiff";
 import ui from "./WorkflowNative.module.css";
 import { WorkflowActivity } from "./WorkflowActivity";
 import { WorkflowReviewActivity } from "./WorkflowReviewActivity";
+import { StrategyCreationEvidence } from "./StrategyCreationEvidence";
 import { useLocale, useTranslations } from "next-intl";
 import { readEditDraft, writeEditDraft } from "../../lib/editDrafts";
 import { StrategyVersionContext } from "./StrategyVersionContext";
@@ -57,15 +58,17 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
   const [conflictingDraft,setConflictingDraft] = useState<SavedDraft | null>(null);
   const [reviewLogsOpen, setReviewLogsOpen] = useState(false);
   useEffect(() => {
-    const scope = new URLSearchParams(window.location.search).get("workflow_log");
+    const params = new URLSearchParams(window.location.search);
+    const scope = params.get("workflow_log");
     if (scope === "strategy") setView("runs");
     if (scope === "evolution") { setView("evolution"); setReviewLogsOpen(true); }
+    if (!scope && params.get("workflow_tab") === "evidence") setView("evidence");
   }, [strategyId, proposalId]);
   const [display, setDisplay] = useState<"canvas" | "cards">("canvas");
   const [additionSeed, setAdditionSeed] = useState<WorkflowAddition | null>(null);
   const [addDraftDirty, setAddDraftDirty] = useState(false);
   const [data, setData] = useState<WorkflowView | null>(null);
-  const [view, setView] = useState<"strategy" | "evolution" | "runs">(defaultView);
+  const [view, setView] = useState<"strategy" | "evolution" | "runs" | "evidence">(defaultView);
   const [selected, setSelected] = useState<string | null>(null);
   const [inspecting, setInspecting] = useState(false);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
@@ -125,7 +128,7 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
   }, [dirty, t]);
   const graph = useMemo<WorkflowGraph | null>(() => {
     if (!data) return null;
-    const original = data[view === "runs" ? "strategy" : view];
+    const original = data[view === "runs" || view === "evidence" ? "strategy" : view];
     const ids = new Set(original.nodes.map((node) => node.id));
     return { ...original, id: `${strategyId}:${data.source.proposal_id || "published"}:${view}`,
       nodes: original.nodes.map((node) => {
@@ -188,11 +191,13 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
     // A fresh draft key also replaces a previous handoff on an already-open /chat page.
     router.push(strategyChatUrl(data.strategy_id, data.source.proposal_id, crypto.randomUUID()));
   }
-  async function switchView(next: "strategy" | "runs" | "evolution") {
+  async function switchView(next: "strategy" | "runs" | "evolution" | "evidence") {
     if (adding && !await closeAdd()) return;
     setInspecting(false); setView(next); setSelected(null); setSelectedEdge(null); setReviewLogsOpen(false);
     const url = new URL(window.location.href);
     url.searchParams.delete("workflow_log"); url.searchParams.delete("workflow_run");
+    if (next === "evidence") url.searchParams.set("workflow_tab", "evidence");
+    else url.searchParams.delete("workflow_tab");
     window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
   }
   async function reviewChanges() {
@@ -251,6 +256,7 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
       <button type="button" role="tab" aria-selected={view === "strategy"} onClick={() => void switchView("strategy")}>{t("copy.components_workflows_StrategyWorkflowPanel.034")}</button>
       <button type="button" role="tab" aria-selected={view === "runs"} onClick={() => void switchView("runs")}>{t("copy.components_workflows_StrategyWorkflowPanel.035")}</button>
       <button type="button" role="tab" aria-selected={view === "evolution"} onClick={() => void switchView("evolution")}>{t("copy.components_workflows_StrategyWorkflowPanel.036")}</button>
+      {data.source.proposal_id ? <button type="button" role="tab" aria-selected={view === "evidence"} onClick={() => void switchView("evidence")}>{zh ? "证据" : "Evidence"}</button> : null}
     </div><span className={ui.spacer} />
       <div className={ui.actionGroup} role="group" aria-label={wx("strategyActions")}>
       <button type="button" className={ui.quietButton} disabled={!editable} data-testid="edit-strategy" onClick={async () => {
@@ -262,8 +268,8 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
       <button type="button" className={`${ui.quietButton} ${ui.agentEditButton}`} disabled={!editable || dirty} title={dirty ? wx("saveBeforeAgent") : wx("editContextHint")} onClick={() => askAgent(undefined)} data-testid="edit-strategy-chat"><WorkflowIcon kind="agent" size={15} />{wx("editWithAgent")}</button>
       </div>
       {view === "runs" && <button type="button" className={ui.quietButton} disabled={dirty || adding || busy || loading} onClick={() => setCheckOpen(true)}>{t("copy.components_workflows_StrategyWorkflowPanel.038")}</button>}
-      {view !== "runs" && !reviewLogsOpen && <ChoiceSelect className={ui.quietButton} aria-label={t("copy.components_workflows_StrategyWorkflowPanel.039")} value={display} style={{ background: "var(--bg)", minWidth: 0 }} onValueChange={(choiceValue) => { setDisplay(choiceValue as typeof display); setSelectedEdge(null); }}><option value="canvas">{t("copy.components_workflows_StrategyWorkflowPanel.040")}</option><option value="cards">{t("copy.components_workflows_StrategyWorkflowPanel.041")}</option></ChoiceSelect>}
-      {view !== "runs" && !reviewLogsOpen && <button className={ui.iconButton} type="button" disabled={!editable} aria-label={t("copy.components_workflows_StrategyWorkflowPanel.042")} title={t("copy.components_workflows_StrategyWorkflowPanel.043")} onClick={() => { if (adding) { void closeAdd(); return; } setAdditionSeed(null); setAdding(true); setSelected(null); setSelectedEdge(null); }}><NeryaGlyph name="plus" size={18} /></button>}
+      {view !== "runs" && view !== "evidence" && !reviewLogsOpen && <ChoiceSelect className={ui.quietButton} aria-label={t("copy.components_workflows_StrategyWorkflowPanel.039")} value={display} style={{ background: "var(--bg)", minWidth: 0 }} onValueChange={(choiceValue) => { setDisplay(choiceValue as typeof display); setSelectedEdge(null); }}><option value="canvas">{t("copy.components_workflows_StrategyWorkflowPanel.040")}</option><option value="cards">{t("copy.components_workflows_StrategyWorkflowPanel.041")}</option></ChoiceSelect>}
+      {view !== "runs" && view !== "evidence" && !reviewLogsOpen && <button className={ui.iconButton} type="button" disabled={!editable} aria-label={t("copy.components_workflows_StrategyWorkflowPanel.042")} title={t("copy.components_workflows_StrategyWorkflowPanel.043")} onClick={() => { if (adding) { void closeAdd(); return; } setAdditionSeed(null); setAdding(true); setSelected(null); setSelectedEdge(null); }}><NeryaGlyph name="plus" size={18} /></button>}
       {dirty ? <><button className={ui.quietButton} disabled={busy} type="button" onClick={async () => { if (await confirmDiscard(t("copy.components_workflows_StrategyWorkflowPanel.044"))) { writeEditDraft(draftKey(data),null); invalidateReadCache(); await load(); } }}>{t("copy.components_workflows_StrategyWorkflowPanel.045")}</button><button className={ui.reviewButton} type="button" disabled={!editable || adding} onClick={() => void reviewChanges()}>{busy ? t("copy.components_workflows_StrategyWorkflowPanel.046") : t("copy.components_workflows_StrategyWorkflowPanel.047")} · {changedCards || 1}</button></> : <Link className={ui.quietButton} href={data.source.proposal_id ? `/self-evolution?tab=proposals&proposal_id=${encodeURIComponent(data.source.proposal_id)}` : `/strategies/${encodeURIComponent(strategyId)}`}>{t("copy.components_workflows_StrategyWorkflowPanel.048")} <NeryaGlyph name="arrowUpRight" size={16} /></Link>}
     </div>
     {error && <div role="alert" className={styles.errorBanner}>{error}<button onClick={async () => { if (!dirty || await confirmDiscard(t("copy.components_workflows_StrategyWorkflowPanel.049"))) { writeEditDraft(draftKey(data),null); invalidateReadCache(); await load(); } }}>{t("copy.components_workflows_StrategyWorkflowPanel.050")}</button></div>}
@@ -276,7 +282,7 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
       else { const url = new URL(window.location.href); url.searchParams.delete("workflow_log"); url.searchParams.delete("workflow_run"); window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash); }
     }}>{wx(reviewLogsOpen ? "reviewWorkflow" : "reviewLogs")}</button><span className={ui.muted}>{t("copy.components_workflows_StrategyWorkflowPanel.053")}</span><WorkflowHelp label={t("copy.components_workflows_StrategyWorkflowPanel.054")}><p>{t("copy.components_workflows_StrategyWorkflowPanel.055")}</p></WorkflowHelp><Link href="/self-evolution?tab=timeline">{t("copy.components_workflows_StrategyWorkflowPanel.056")} <NeryaGlyph name="arrowUpRight" size={16} /></Link></div>}
     {additions.length > 0 && <div className={styles.pendingAdditions}>{additions.map((item, index) => <span key={`${item.kind}:${item.name}:${index}`}><NeryaGlyph name="plus" size={14} /> {item.name}<button disabled={busy} type="button" aria-label={`${t("copy.components_workflows_StrategyWorkflowPanel.057")}: ${item.name}`} onClick={() => setAdditions((items) => items.filter((_, i) => i !== index))}><NeryaGlyph name="x" size={14} /></button></span>)}</div>}
-    {view === "evolution" && reviewLogsOpen ? <WorkflowReviewActivity key={strategyId} strategyId={strategyId} /> : view === "runs" ? <WorkflowActivity roleNames={Object.fromEntries(data.strategy.nodes.filter((n) => n.id.startsWith("agent:role/")).map((n) => [String(asObject(n.config).name), cardTitle(n, t)]))} key={`${strategyId}:${data.source.proposal_id || "active"}`} strategyId={strategyId} proposalId={data.source.proposal_id} onEdit={(kind) => { const target = data.strategy.nodes.find((n) => n.kind === kind && (kind !== "agent" || n.id === "agent:runtime")) || data.strategy.nodes.find((n) => n.kind === kind); setView("strategy"); setSelected(target?.id || null); setInspecting(!!target); }} /> : <div className={ui.body}>
+    {view === "evidence" && data.source.proposal_id ? <StrategyCreationEvidence strategyId={strategyId} proposalId={data.source.proposal_id} /> : view === "evolution" && reviewLogsOpen ? <WorkflowReviewActivity key={strategyId} strategyId={strategyId} proposalId={data.source.proposal_id} /> : view === "runs" ? <WorkflowActivity roleNames={Object.fromEntries(data.strategy.nodes.filter((n) => n.id.startsWith("agent:role/")).map((n) => [String(asObject(n.config).name), cardTitle(n, t)]))} key={`${strategyId}:${data.source.proposal_id || "active"}`} strategyId={strategyId} proposalId={data.source.proposal_id} onEdit={(kind) => { const target = data.strategy.nodes.find((n) => n.kind === kind && (kind !== "agent" || n.id === "agent:runtime")) || data.strategy.nodes.find((n) => n.kind === kind); setView("strategy"); setSelected(target?.id || null); setInspecting(!!target); }} /> : <div className={ui.body}>
       {display === "cards" ? <WorkflowCardGallery key={graph.id} graph={shownGraph || graph} selectedId={selected} onSelect={(item) => void chooseNode(item)} /> : <WorkflowCanvas graph={shownGraph || graph} selectedId={display === "canvas" && selected ? projection?.aliases.get(selected) || selected : selected} onSelect={(item) => void chooseNode(item)} onMove={editable ? (id, position) => annotate(id, { position }) : undefined}
         onEdgeSelect={(item) => { if (adding) return; setSelectedEdge(item.id); setInspecting(true); setSelected(null); }} />}
       {!!projection?.supporting.length && <div className={sourceUi.supports} aria-label={t("copy.components_workflows_StrategyWorkflowPanel.058")}>{projection.supporting.map((item) => <button type="button" key={item.id} data-support-member={item.id} onClick={() => void chooseNode(item.members[0])}><WorkflowIcon kind={item.members[0].kind} size={15} />{item.title}{item.members[0].kind === "risk" ? ` · ${cardFacts(item.members[0], t)}` : item.members[0].kind === "account" ? ` · ${item.members.length}` : ""}</button>)}</div>}
@@ -288,6 +294,7 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
       {edge && <section className={ui.inspector}><header className={ui.inspectorHeader}><h3>{t("copy.components_workflows_StrategyWorkflowPanel.067")}</h3><button className={ui.iconButton} type="button" aria-label={t("copy.components_workflows_StrategyWorkflowPanel.068")} onClick={() => setInspecting(false)}><NeryaGlyph name="x" size={18} /></button></header><div className={ui.inspectorBody}><p className={ui.muted}>{t("copy.components_workflows_StrategyWorkflowPanel.069")}</p><label className={styles.field}>{t("copy.components_workflows_StrategyWorkflowPanel.070")}<input maxLength={160} disabled={!editable} value={edge.label} onChange={(event) => setMetadata((current) => ({ ...current, edges: current.edges.map((item) => item.id === edge.id ? { ...item, label: event.target.value } : item) }))} /></label><button className={ui.quietButton} disabled={!editable} onClick={() => { setMetadata((current) => ({ ...current, edges: current.edges.filter((item) => item.id !== edge.id) })); setSelectedEdge(null); setInspecting(false); }}>{t("copy.components_workflows_StrategyWorkflowPanel.071")}</button></div></section>}
       </WorkflowEditorDialog>
     </div>}
+    {data.source.proposal_id && view !== "runs" && view !== "evidence" && !reviewLogsOpen ? <StrategyCreationEvidence strategyId={strategyId} proposalId={data.source.proposal_id} /> : null}
     {checkOpen && <WorkflowVerification workflow={data} onClose={() => setCheckOpen(false)} onEdit={(where) => {
       const target = [...data.strategy.nodes, ...data.evolution.nodes].find((n) => n.binding.file && (where === n.binding.file || where.startsWith(n.binding.file + ":"))) || data.strategy.nodes.find((n) => n.kind === "strategy");
       setCheckOpen(false); setView("strategy"); setSelected(target?.id || null); setInspecting(!!target);

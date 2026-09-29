@@ -143,6 +143,8 @@ class StrategyGenerationRequest:
     title: str = ""
     description: str = ""
     prompt: str = ""
+    evidence_refs: tuple[str, ...] = ()
+    research_confidence: Optional[float] = None
     strategy_class: str = "scalping"  # scalping | trend | news | agent | agent_team
     execution_mode: str = ""  # script | agent | agent_team; defaults from class
     mode: str = "paper"
@@ -278,6 +280,7 @@ class StrategyCodeGenerator:
                 test_plan=_test_plan(request, validation),
                 rollback=_rollback(request),
                 target=f"strategies/{request.strategy_id}",
+                evidence_refs=list(request.evidence_refs),
                 extra_files=extra_files,
                 initial_state=initial_state,
                 metadata=_proposal_metadata(request, files),
@@ -319,6 +322,11 @@ class StrategyCodeGenerator:
             raise NeryaError("strategy must declare at least one market")
         if not req.accounts:
             raise NeryaError("strategy must declare at least one account")
+        if req.research_confidence is not None:
+            if not 0 <= req.research_confidence <= 1:
+                raise NeryaError("research_confidence must be between 0 and 1")
+            if not req.evidence_refs:
+                raise NeryaError("research_confidence requires evidence_refs")
         if req.schedule_cron and req.schedule_every_seconds:
             raise NeryaError(
                 "set schedule_cron OR schedule_every_seconds, not both"
@@ -1441,12 +1449,15 @@ def _proposal_metadata(
     files: dict[str, str],
 ) -> dict[str, Any]:
     tags = _semantic_tags(req, files)
-    return {
+    metadata = {
         "strategy_id": req.strategy_id,
         "strategy_class": req.strategy_class,
         "execution_mode": _execution_mode(req),
         "semantic_tags": tags,
     }
+    if req.research_confidence is not None:
+        metadata["research_confidence"] = req.research_confidence
+    return metadata
 
 
 def _semantic_tags(req: StrategyGenerationRequest, files: dict[str, str]) -> list[str]:

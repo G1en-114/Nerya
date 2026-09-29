@@ -142,6 +142,55 @@ test("missing historical review does not silently show the newest invocation", a
   expect(fixture.writes).toEqual([]);
 });
 
+test("creation evidence shows linked sources and recorded confidence", async ({ page }) => {
+  await mock(page);
+  await page.route("**/api/**", async (route) => {
+    const endpoint = new URL(route.request().url()).pathname.replace(/^\/api\/proxy/, "");
+    if (endpoint === "/strategies/runtime/workflow") {
+      await route.fulfill({ status: 200, json: { ...workflow, source: { ...workflow.source, proposal_id: "prp_evidence", state: "draft" } } });
+    } else if (endpoint === "/evolution/proposals/prp_evidence") {
+      await route.fulfill({ status: 200, json: { id: "prp_evidence", path: "C:/workspace/evolution/proposals/prp_evidence", metadata: { strategy_id: "alpha", research_confidence: 0.62 }, evidence_refs: ["turn:source_1"] } });
+    } else if (endpoint === "/evolution/evidence/resolve") {
+      await route.fulfill({ status: 200, json: { ok: true, count: 2, items: [{ ref: "turn:source_1", type: "turn", resolved: true, title: "Research turn", record: { tool_result: "Recorded market observation" }, artifacts: [{ title: "Tool result", preview: "Observed candles" }] }, { ref: "file:C:/workspace/evolution/proposals/prp_evidence/rationale.md", type: "file", resolved: true, title: "rationale.md", artifacts: [{ title: "rationale.md", preview: "Redacted research thesis" }] }] } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/strategies?strategy_id=alpha&proposal_id=prp_evidence");
+  await page.getByRole("tab", { name: "Evidence" }).click();
+  await expect(page).toHaveURL(/workflow_tab=evidence/);
+  const evidence = page.getByTestId("strategy-creation-evidence");
+  await expect(evidence).toBeVisible();
+  await expect(evidence).toContainText("62%");
+  await expect(evidence).toContainText("turn:source_1");
+  await evidence.getByText("Inspect source preview").click();
+  await expect(evidence).toContainText("Observed candles");
+  await evidence.getByText("Inspect redacted source record").click();
+  await expect(evidence).toContainText("Recorded market observation");
+  await evidence.getByText("Creation rationale").click();
+  await expect(evidence).toContainText("Redacted research thesis");
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "Evidence" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("creation evidence does not invent sources or confidence for old proposals", async ({ page }) => {
+  await mock(page);
+  await page.route("**/api/**", async (route) => {
+    const endpoint = new URL(route.request().url()).pathname.replace(/^\/api\/proxy/, "");
+    if (endpoint === "/strategies/runtime/workflow") {
+      await route.fulfill({ status: 200, json: { ...workflow, source: { ...workflow.source, proposal_id: "prp_old", state: "draft" } } });
+    } else if (endpoint === "/evolution/proposals/prp_old") {
+      await route.fulfill({ status: 200, json: { id: "prp_old", metadata: { strategy_id: "alpha" }, evidence_refs: [] } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/strategies?strategy_id=alpha&proposal_id=prp_old&workflow_log=evolution");
+  const evidence = page.getByTestId("strategy-creation-evidence");
+  await expect(evidence).toContainText("Not recorded");
+  await expect(evidence).toContainText("No evidence references were linked");
+});
+
 test("a vanished review clears the prior conclusion on refresh", async ({ page }) => {
   const fixture = await mock(page);
   await page.goto("/strategies?strategy_id=alpha&workflow_log=evolution&workflow_run=old");

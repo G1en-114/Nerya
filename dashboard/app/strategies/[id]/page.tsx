@@ -82,6 +82,7 @@ import { StrategyRunsCard } from "../../../components/strategies/StrategyRunsCar
 import { StrategyScheduleCard } from "../../../components/strategies/StrategyScheduleCard";
 import { StrategyStatusBar } from "../../../components/strategies/StrategyStatusBar";
 import { StrategyTuningCard } from "../../../components/strategies/StrategyTuningCard";
+import { PublishedStrategyCreationEvidence } from "../../../components/workflows/StrategyCreationEvidence";
 
 interface PackageFile {
   rel_path: string;
@@ -349,6 +350,7 @@ export default function StrategyDetailPage({
                 />
 
                 <StrategyDefinitionCard detail={detail} />
+                <PublishedStrategyCreationEvidence strategyId={strategyId} />
 
                 {workspace && !workspace.ok ? (
                   // The runtime workspace envelope failed — surface it

@@ -182,6 +182,7 @@ def test_failed_application_does_not_sync_or_start_service(api, monkeypatch):
     monkeypatch.setattr(api, "service_start", lambda *_: pytest.fail("must not start"))
     result = api.promote("proposal")
     assert not result["ok"] and result["application"]["status"] == "failed"
+    assert result["reason"] == "gate_blocked"
     assert result["schedule_sync"]["status"] == "not_attempted"
 
 
