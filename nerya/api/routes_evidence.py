@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from ..evidence import ingest as ev_ingest
 from ..evidence.store import open_store
+from ..evidence.visual import VisualStore
 from ..runtime import feature_flags as ff
 from ._envelope import action, blocked, debug_ref, ok, source_ref
 
@@ -88,7 +89,8 @@ def _search_handler(client, query):
     )
     return ok(
         f"{len(results)} match(es) for q={text!r}",
-        data={"results": results, "count": len(results), "query": text},
+        data={"results": [VisualStore(client.config).decorate_evidence(r) for r in results],
+              "count": len(results), "query": text},
     )
 
 
@@ -106,7 +108,7 @@ def _get_handler(client, query):
         return {"ok": False, "error": "not_found", "id": eid, "_status": 404}
     return ok(
         f"evidence {eid}",
-        data={"evidence": rec},
+        data={"evidence": VisualStore(client.config).decorate_evidence(rec)},
         source_refs=[source_ref("evidence", eid)],
     )
 
@@ -123,7 +125,9 @@ def _topic_handler(client, query):
     rows = store.search(topic=topic, limit=200)
     return ok(
         f"{len(rows)} doc(s) for topic={topic}",
-        data={"topic": topic, "results": rows, "count": len(rows)},
+        data={"topic": topic,
+              "results": [VisualStore(client.config).decorate_evidence(r) for r in rows],
+              "count": len(rows)},
     )
 
 
