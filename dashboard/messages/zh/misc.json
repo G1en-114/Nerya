@@ -42,7 +42,8 @@
     "gasCost": "预计 Gas 费用",
     "receiver": "接收地址",
     "actor": "已认证操作者",
-    "risk": "Risk Gate"
+    "risk": "Risk Gate",
+    "nodIntentToggle": "点头确认意向（可选演示）"
   },
   "endpointMapEditor": {
     "emptyPrefix": "暂时还没有接口，至少先加一个（例如",

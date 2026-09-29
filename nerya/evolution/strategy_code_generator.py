@@ -28,7 +28,8 @@ practice we want every generated package to:
 
 This generator centralises those defaults. The agent can override
 any field via :class:`StrategyGenerationRequest`; the generator
-fills in conservative defaults for anything missing.
+fills in explicit percentage-sizing defaults for anything missing. Existing
+packages and caller-supplied sizing/risk limits are not migrated.
 
 Output shape
 ------------
@@ -387,6 +388,10 @@ class StrategyCodeGenerator:
         execution_mode = _execution_mode(req)
         sched = _build_schedule(req)
         policy = _default_policy(_template_class(req))
+        # Team scaffold ranks the basket but holds only its winner.
+        policy["max_open_positions"] = (
+            1 if execution_mode == "agent_team" else min(3, max(1, len(req.markets)))
+        )
         policy.update(req.policy_overrides or {})
         llm_policy = _default_llm_policy(_template_class(req))
         llm_policy.update(req.llm_policy_overrides or {})
@@ -625,11 +630,11 @@ def _normalize_inline_manifest(content: str) -> str:
             tuning["schedule"] = {
                 "type": "cron",
                 "cron": "0 */6 * * *",
-                "enabled": True,
+                "enabled": False,
             }
         elif isinstance(tuning.get("schedule"), dict):
             tuning["schedule"] = normalize_schedule(
-                tuning.get("schedule"),
+                {"enabled": False, **tuning["schedule"]},
                 default_cron="0 */6 * * *",
             )
 
@@ -686,6 +691,25 @@ def _merge_manifest_defaults(content: str, defaults: dict[str, Any]) -> str:
             merged = dict(defaults[key])
             merged.update(raw[key])
             raw[key] = merged
+
+    # New-package defaults only, after explicit manifest/policy overrides.
+    # Keep legacy fixed-dollar requests, but never invent a 50/100 USD stake.
+    policy = raw.get("policy")
+    params = raw.setdefault("params", {})
+    if isinstance(policy, dict) and isinstance(params, dict):
+        slots = policy.get("max_open_positions", 1)
+        slots = slots if type(slots) is int and slots > 0 else 1
+        fixed = policy.get("default_order_usd")
+        sizing = (
+            {"method": "fixed_usd", "fixed_usd": fixed}
+            if type(fixed) in (int, float) and fixed > 0
+            else {"method": "pct_nav", "pct_nav": 0.90 / slots}
+        )
+        params.setdefault("sizing", sizing)
+        backtest = raw.setdefault("backtest", {})
+        if isinstance(backtest, dict):
+            backtest.setdefault("max_open_trades", slots)
+            backtest.setdefault("stake_amount", {"mode": "unlimited"})
 
     return yaml_io.dumps(raw)
 
@@ -1525,7 +1549,11 @@ def _default_playbook(req: StrategyGenerationRequest) -> str:
         f"This is an auto-generated {req.strategy_class} strategy targeting "
         f"`{', '.join(req.markets)}`.\n\n"
         "## Policy\n\n"
-        "* Strategy may only place orders via `ctx.trading.submit_intent`.\n"
+        "* Strategy may only place orders via the risk-gated `ctx.trading` SDK.\n"
+        "* Entry size comes from `params.sizing`: by default 90% of current NAV\n"
+        "  divided across configured position slots, with 10% headroom.\n"
+        "  Explicit fixed sizing and all account limits take precedence.\n"
+        "* Higher allocation increases loss exposure too; this template is not alpha evidence.\n"
         "* All LLM calls are tier-policed by the runner.\n"
         "* Subagents return recommendations only; the runner submits trades.\n\n"
         "## Operator Notes\n\n"
@@ -1696,13 +1724,15 @@ def _agent_team_roles_for_request(req: StrategyGenerationRequest) -> list[str]:
 
 def _default_policy(strategy_class: str) -> dict[str, Any]:
     base = {
-        "max_single_order_usd": 100.0,
-        "max_daily_notional_usd": 1000.0,
+        # No extra dollar caps on new percentage-sized packages. Account
+        # controls and explicit policy_overrides remain authoritative.
+        "max_single_order_usd": 0.0,
+        "max_daily_notional_usd": 0.0,
         "max_open_positions": 1,
         "min_confidence": 0.55,
         "allow_direct_order": True,
         "require_subagent_before_order": False,
-        "default_order_usd": 50.0,
+        "default_order_usd": 0.0,
         "max_run_seconds": 60,
         "max_sdk_calls_per_run": 64,
         "max_subagent_calls_per_run": 4,
@@ -1738,7 +1768,7 @@ def _default_llm_policy(strategy_class: str) -> dict[str, Any]:
 def _tuning_block(req: StrategyGenerationRequest) -> dict[str, Any]:
     return {
         "enabled": True,
-        "schedule": {"type": "cron", "cron": req.tuning_cron, "enabled": True},
+        "schedule": {"type": "cron", "cron": req.tuning_cron, "enabled": False},
         "lookback": {"runs": 200, "min_closed_trades": 0, "max_age_hours": 168},
         "subagent": {
             "name": "strategy_tuner",
@@ -1901,7 +1931,7 @@ def _scalping_template(req: StrategyGenerationRequest) -> str:
         "    return ctx.trading.open_position(\n"
         "        market=market,\n"
         '        side="long",\n'
-        '        sizing={"method": "fixed_usd", "fixed_usd": ctx.policy.default_order_usd},\n'
+        '        sizing=ctx.config.params["sizing"],\n'
         '        protection={\n'
         '            "stop_loss": {"type": "pct", "value": _STOP_LOSS_PCT},\n'
         '            "take_profit": {"type": "pct", "value": _TAKE_PROFIT_PCT},\n'
@@ -1943,14 +1973,21 @@ def _trend_template(req: StrategyGenerationRequest) -> str:
             '    confidence = float(output.get("confidence", 0.0) or 0.0)\n'
             '    if confidence < ctx.policy.min_confidence:\n'
             '        return ctx.result.hold(reason="subagent confidence below policy")\n'
-            "    return ctx.trading.submit_intent(\n"
+            "    position = ctx.portfolio.position(market)\n"
+            "    if rec == 'sell':\n"
+            "        if position is None or position.size <= 0:\n"
+            "            return ctx.result.hold(reason='no long position to close')\n"
+            "        return ctx.trading.close_position(market=market, side='long',\n"
+            "            confidence=confidence, reasoning_ref=output.get('thesis', ''))\n"
+            "    if position is not None and position.size != 0:\n"
+            "        return ctx.result.hold(reason='position slot already occupied')\n"
+            "    return ctx.trading.open_position(\n"
             "        market=market,\n"
-            "        side=rec,\n"
-            "        size=ctx.policy.default_order_usd,\n"
-            '        size_unit="usd",\n'
-            '        order_type="market",\n'
+            "        side='long',\n"
+            '        sizing=ctx.config.params["sizing"],\n'
+            '        protection=ctx.config.params.get("protection"),\n'
             "        confidence=confidence,\n"
-            '        reasoning=output.get("thesis", ""),\n'
+            '        reasoning_ref=output.get("thesis", ""),\n'
             "    )\n"
         )
     else:
@@ -2007,7 +2044,7 @@ def _trend_template(req: StrategyGenerationRequest) -> str:
             "    return ctx.trading.open_position(\n"
             "        market=market,\n"
             "        side=cross_side,\n"
-            '        sizing={"method": "fixed_usd", "fixed_usd": ctx.policy.default_order_usd},\n'
+            '        sizing=ctx.config.params["sizing"],\n'
             '        protection={\n'
             '            "stop_loss": {"type": "pct", "value": 0.02},\n'
             '            "take_profit": {"type": "pct", "value": 0.05},\n'
@@ -2103,14 +2140,23 @@ def _news_template(req: StrategyGenerationRequest) -> str:
         '        ctx.state.set("last_seen", ctx.clock.now_iso())\n'
         '        return ctx.result.ok(reason="subagent declined")\n'
         '    ctx.state.set("last_seen", ctx.clock.now_iso())\n'
-        "    return ctx.trading.submit_intent(\n"
-        "        market=ctx.config.markets[0],\n"
-        "        side=rec,\n"
-        "        size=ctx.policy.default_order_usd,\n"
-        '        size_unit="usd",\n'
-        '        order_type="market",\n'
+        "    market = ctx.config.markets[0]\n"
+        "    position = ctx.portfolio.position(market)\n"
+        "    if rec == 'sell':\n"
+        "        if position is None or position.size <= 0:\n"
+        "            return ctx.result.hold(reason='no long position to close')\n"
+        "        return ctx.trading.close_position(market=market, side='long',\n"
+        "            confidence=float(out.get('confidence', 0.0) or 0.0),\n"
+        "            reasoning_ref=out.get('thesis', ''))\n"
+        "    if position is not None and position.size != 0:\n"
+        "        return ctx.result.hold(reason='position slot already occupied')\n"
+        "    return ctx.trading.open_position(\n"
+        "        market=market,\n"
+        "        side='long',\n"
+        '        sizing=ctx.config.params["sizing"],\n'
+        '        protection=ctx.config.params.get("protection"),\n'
         '        confidence=float(out.get("confidence", 0.0) or 0.0),\n'
-        '        reasoning=out.get("thesis", ""),\n'
+        '        reasoning_ref=out.get("thesis", ""),\n'
         "    )\n"
         "\n"
         "\n"
@@ -2178,7 +2224,7 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         "        return ctx.trading.open_position(\n"
         "            market=market,\n"
         "            side='long',\n"
-        "            sizing={'method': 'fixed_usd', 'fixed_usd': ctx.policy.default_order_usd},\n"
+        "            sizing=ctx.config.params['sizing'],\n"
         "            protection={'stop_loss': {'type': 'pct', 'value': 0.01}, 'take_profit': {'type': 'pct', 'value': 0.02}},\n"
         "            confidence=confidence,\n"
         "            reasoning_ref=f\"backtest_script_signal {signal.get('name')}\",\n"
@@ -2245,10 +2291,16 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         "        'leak capital during gaps. For closes use `plan_action=\"close_position\"`',\n"
         "        'and omit `protection` — the close releases the existing bracket.',\n"
         "        'Example bracket entry payload:',\n"
-        "        '  {\"side\": \"buy\", \"size\": 100, \"size_unit\": \"usd\",',\n"
+        "        '  For pct_nav sizing, use size_pct_nav from the saved sizing JSON below;',\n"
+        "        '  for explicitly fixed_usd sizing use size + size_unit=usd instead.',\n"
+        "        '  Do not substitute a fixed 100 USD example or send both size fields.',\n"
+        "        '  {\"side\": \"buy\",',\n"
         "        '   \"order_type\": \"market\", \"protection\": {',\n"
         "        '     \"stop_loss\": {\"type\": \"pct\", \"value\": 0.01},',\n"
         "        '     \"take_profit\": {\"type\": \"pct\", \"value\": 0.02}}}',\n"
+        "        '',\n"
+        "        'Saved sizing JSON (same requested allocation for risk_check and submission):',\n"
+        "        json.dumps(ctx.config.params['sizing'], ensure_ascii=False),\n"
         "        '',\n"
         "        'Script signal JSON:',\n"
         "        json.dumps(signal, ensure_ascii=False, indent=2, default=str),\n"
@@ -2414,7 +2466,7 @@ def _agent_team_template(req: StrategyGenerationRequest) -> str:
         "    return ctx.trading.open_position(\n"
         "        market=best['market'],\n"
         "        side='long',\n"
-        "        sizing={'method': 'fixed_usd', 'fixed_usd': ctx.policy.default_order_usd},\n"
+        "        sizing=ctx.config.params['sizing'],\n"
         "        protection={\n"
         "            'stop_loss': {'type': 'pct', 'value': 0.02},\n"
         "            'take_profit': {'type': 'pct', 'value': 0.05},\n"
@@ -2455,6 +2507,8 @@ def _agent_team_template(req: StrategyGenerationRequest) -> str:
         "        '- Evaluate technical trend/momentum/volume, fundamentals, macro/news context, and risk for the full basket.',\n"
         "        '- Rank the candidates and choose the best risk-adjusted buy/sell/reduce setup, or hold the basket.',\n"
         "        '- Before any buy/sell/reduce, call risk_check and then trade_intent_submit if allowed.',\n"
+        "        '- Use saved pct_nav as size_pct_nav for entries; explicit fixed_usd uses size + size_unit=usd.',\n"
+        "        '- Keep the same requested allocation in risk_check; never substitute a fixed 100 USD stake.',\n"
         "        '- Hold when confidence is below policy.min_confidence or evidence conflicts.',\n"
         "        '- IMPORTANT: every fresh entry trade_intent_submit MUST include a `protection`',\n"
         "        '  block with `stop_loss` and `take_profit` so the bracket arms atomically.',\n"
@@ -2469,7 +2523,7 @@ def _agent_team_template(req: StrategyGenerationRequest) -> str:
         "        'Policy:',\n"
         "        json.dumps({\n"
         "            'min_confidence': ctx.policy.min_confidence,\n"
-        "            'default_order_usd': ctx.policy.default_order_usd,\n"
+        "            'sizing': ctx.config.params['sizing'],\n"
         "            'max_single_order_usd': ctx.policy.max_single_order_usd,\n"
         "            'max_daily_notional_usd': ctx.policy.max_daily_notional_usd,\n"
         "            'mode': ctx.config.mode,\n"
@@ -2646,20 +2700,27 @@ def _tuning_subagent_prompt(req: StrategyGenerationRequest) -> str:
         f"Strategy: `{req.strategy_id}` ({req.strategy_class}).\n"
         f"Objectives: {objectives}.\n\n"
         "## Role\n\n"
-        "You are this strategy's tuning subagent. Review recent runs, propose\n"
-        "code/config/prompt changes that improve the objective, and return a\n"
-        "structured proposal. **Do not** mutate live files; the runner converts\n"
-        "your output into a `PatchProposal`.\n\n"
-        "The payload includes `performance.market_context` with recent K-line\n"
-        "tails and computed indicators, plus `performance.news_context` with\n"
-        "recent matched news when available. Cite those fields when they affect\n"
-        "your recommendation; explicitly say when data is unavailable or degraded.\n\n"
+        "You are this strategy's review Agent and Proposer. The built-in script\n"
+        "has already collected the frozen evidence in performance. Load\n"
+        "Skill(skill=\"strategy_author\", file=\"references/review.md\").\n"
+        "Follow this strategy's saved review plan and tuning_prompt. On each run,\n"
+        "include a review_plan with checks adapted to the current version and evidence.\n"
+        "Analyze that evidence and return one focused set of proposed_changes.\n"
+        "Do not add a team or multiple competing candidates by default.\n"
+        "With insufficient evidence, explain the gap and return proposed_changes: [].\n"
+        "The payload includes performance.market_context with recent K-line tails\n"
+        "and computed indicators, plus performance.news_context with recent matched\n"
+        "news when available. Cite those fields when they affect your recommendation;\n"
+        "explicitly say when data is unavailable or degraded.\n"
+        "Never mutate live files, place orders or apply changes. The runner\n"
+        "converts eligible output into a pending-review PatchProposal.\n\n"
         "## Operator brief\n\n"
         f"{custom}\n\n"
         "## Output schema\n\n"
         "```json\n"
         "{\n"
         '  "summary": "...",\n'
+        '  "review_plan": {"strategy_id": "<supplied strategy_id>", "package_hash": "<frozen hash>", "run_id": "<supplied run_id>", "checks": ["<evidence-driven check>"], "deferred_checks": []},\n'
         '  "evidence": [{ "source": "strategy_runs", "finding": "..." }],\n'
         '  "proposed_changes": [\n'
         '    {"file": "main.py", "kind": "full_file", "after_content": "<complete source with @nerya comments>", "summary": "<plain-language change>", "before_summary": "<previous behavior>", "after_summary": "<proposed behavior>", "scope": ["<affected rule or branch>"], "rationale": "<reason tied to evidence>"}\n'

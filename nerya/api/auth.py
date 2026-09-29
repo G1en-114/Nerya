@@ -148,8 +148,22 @@ def _password_hash_value(config: Config) -> str:
     return str(config.get("runtime.auth.admin_password_hash") or "").strip()
 
 
+# Demo-only bootstrap credential. It is accepted only while no operator
+# password has been set, so the first login on a fresh install works without
+# editing config files. Setting any password (or enrolling a face, which
+# requires one) immediately disables it. It is committed on purpose: this is
+# a hackathon demo, and a guessable bootstrap value is the honest trade-off
+# for a zero-setup first run.
+DEMO_INITIAL_PASSWORD = "1145141919810"
+
+
 def has_admin_password(config: Config) -> bool:
     return bool(_password_hash_value(config))
+
+
+def demo_password_active(config: Config) -> bool:
+    """True while the demo bootstrap password is still the way in."""
+    return not _password_hash_value(config)
 
 
 def _hash_password(password: str, *, salt: str | None = None) -> str:
@@ -168,7 +182,10 @@ def _hash_password(password: str, *, salt: str | None = None) -> str:
 
 def verify_admin_password(config: Config, password: str) -> bool:
     encoded = _password_hash_value(config)
-    if not encoded or not isinstance(password, str):
+    if not encoded:
+        # No operator password yet: the demo bootstrap value is the only way in.
+        return hmac.compare_digest(password or "", DEMO_INITIAL_PASSWORD)
+    if not isinstance(password, str):
         return False
     try:
         alg, iterations_raw, salt, digest = encoded.split("$", 3)
@@ -318,6 +335,7 @@ def admin_auth_status(config: Config) -> dict[str, Any]:
         "ok": True,
         "mode": _resolve_mode(config),
         "password_configured": has_admin_password(config),
+        "demo_password_active": demo_password_active(config),
         "jwt_configured": bool(_jwt_secret(config)),
         "jwt_ttl_seconds": _jwt_ttl_seconds(config),
         "static_token_configured": bool(_config_tokens(config)),

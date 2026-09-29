@@ -3763,7 +3763,7 @@ export function NativeBlocksTrack({
   live?: boolean;
   label?: string;
   pendingApprovals?: Map<string, ApprovalCard>;
-  onApprovalAction?: (callbackData: string) => void;
+  onApprovalAction?: (callbackData: string, extras?: { nodIntentReceipt?: string }) => void;
   resolvingApprovalIds?: Set<string>;
   // When true, don't render the proposal card at the top of the track —
   // the duplicates inside collapsed tool results are still suppressed, but the
@@ -4083,7 +4083,7 @@ export function TurnBlocks({
   hoistTeamTraces?: boolean;
   turn: TurnPayload;
   pendingApprovals?: Map<string, ApprovalCard>;
-  onApprovalAction?: (callbackData: string) => void;
+  onApprovalAction?: (callbackData: string, extras?: { nodIntentReceipt?: string }) => void;
   approvalEvents?: LiveEvent[];
   activityEvents?: LiveEvent[];
   replayEvents?: LiveEvent[];

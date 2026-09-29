@@ -50,7 +50,8 @@
     "/messages": "消息",
     "/scripts": "脚本",
     "/gateway": "网关",
-    "/factors": "因子库"
+    "/factors": "因子库",
+    "/visual-evidence": "视觉证据工作台"
   },
   "topnav": {
     "brandName": "Nerya",

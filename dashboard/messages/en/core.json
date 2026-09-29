@@ -50,7 +50,8 @@
     "/messages": "Messages",
     "/scripts": "Scripts",
     "/gateway": "Gateway",
-    "/factors": "Factor library"
+    "/factors": "Factor library",
+    "/visual-evidence": "Visual evidence"
   },
   "topnav": {
     "brandName": "Nerya",

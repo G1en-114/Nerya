@@ -42,7 +42,8 @@
     "gasCost": "Estimated gas cost",
     "receiver": "Receiver",
     "actor": "Authenticated actor",
-    "risk": "Risk Gate"
+    "risk": "Risk Gate",
+    "nodIntentToggle": "Nod to confirm intent (optional demo)"
   },
   "endpointMapEditor": {
     "emptyPrefix": "No endpoints yet. Add at least one (e.g.",

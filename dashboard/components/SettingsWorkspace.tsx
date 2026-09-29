@@ -2718,6 +2718,11 @@ function SettingsWorkspaceContent({
             }
           >
             <div className="space-y-3">
+              {authStatus?.demo_password_active ? (
+                <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-5 text-warn">
+                  {tAuth("demoPasswordWarning")}
+                </div>
+              ) : null}
               {authStatus?.password_configured ? (
                 <Field label={tAuth("currentPassword")} hint={tAuth("requiredForRotation")}>
                   <input
