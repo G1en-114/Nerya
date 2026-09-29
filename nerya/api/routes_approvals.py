@@ -298,6 +298,28 @@ def _callback(client, payload):
 
     moved_state = {"state": None, "record": None}
 
+    # Optional camera nod-intent receipt. Consuming it proves only that this
+    # operator previously nodded for this exact pending request; it grants no
+    # scope and every risk/ownership/expiry check below still applies. An
+    # invalid or stale receipt fails this approve attempt closed; retrying
+    # without a receipt keeps the normal path working.
+    nod_meta = None
+    nod_receipt = payload.get("nod_intent_receipt")
+    if action == "approve" and nod_receipt:
+        from ..security.nod_intent import NodIntentError, NodIntentService
+
+        try:
+            nod_meta = NodIntentService(client.config).consume(
+                actor_id, aid, rec or {}, str(nod_receipt)
+            )
+        except NodIntentError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "approval_id": aid,
+                "action": action,
+            }
+
     def _approve(target_id: str) -> None:
         moved = _move_record(client, target_id, state="approved",
                              note=f"approved via callback by {actor_id or 'unknown'}",
@@ -344,6 +366,7 @@ def _callback(client, payload):
                 "action": action,
                 "actor_id": actor_id,
                 "state": resolution.state,
+                "nod_intent": nod_meta is not None,
                 "ts": now_iso(),
             })
         except Exception:  # pragma: no cover - audit best effort
@@ -372,6 +395,7 @@ def _callback(client, payload):
             "batch": str((rec or {}).get("kind") or "") == "tool_permission_batch",
             "item_count": len(items),
             "note": resolution.note,
+            **({"nod_intent": nod_meta} if nod_meta is not None else {}),
             **({"resume": resume_result} if resume_result is not None else {}),
     }
 

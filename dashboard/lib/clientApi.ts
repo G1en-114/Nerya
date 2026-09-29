@@ -1606,6 +1606,8 @@ export type AuthStatus = {
   ok: boolean;
   mode: string;
   password_configured: boolean;
+  /** True while the committed demo bootstrap password is still the way in. */
+  demo_password_active?: boolean;
   jwt_configured: boolean;
   jwt_ttl_seconds: number;
   static_token_configured: boolean;
@@ -4115,7 +4117,11 @@ export const clientApi = {
       count: number;
       approvals: ApprovalCard[];
     }>("/approvals/pending"),
-  approvalCallback: (body: { callback_data: string; actor_id?: string }) =>
+  approvalCallback: (body: {
+    callback_data: string;
+    actor_id?: string;
+    nod_intent_receipt?: string;
+  }) =>
     post<{
       ok: boolean;
       approval_id?: string;
@@ -4127,6 +4133,7 @@ export const clientApi = {
       item_count?: number;
       error?: string;
       note?: string;
+      nod_intent?: { confirmed_at: number; amplitude?: number; identity_proven: false };
       resume?: {ok?: boolean; error?: string; command?: {command_id?: string; state?: string}} | null;
     }>("/approvals/callback", body),
 };

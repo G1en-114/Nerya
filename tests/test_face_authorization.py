@@ -202,13 +202,22 @@ def test_management_scopes_and_login_public(setup):
         handler(SimpleNamespace(config=config), {"actor_id": "admin:password"})["error"]
         == "trusted_actor_required"
     )
-    assert (
-        handler(
+    # A fresh install has no operator password yet, but the demo bootstrap
+    # password is already a way in, so enrollment is permitted for an
+    # authenticated actor. The actor check above is the real gate.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        routes_face_authorization.FaceAuthorization, "enroll",
+        lambda self, actor, image: {"ok": True, "enrolled": True},
+    )
+    try:
+        result = handler(
             SimpleNamespace(config=config),
             {"_auth_actor_id": "local:loopback", "image": "image"},
-        )["error"]
-        == "admin_password_not_configured"
-    )
+        )
+        assert result["ok"] is True and result["enrolled"] is True
+    finally:
+        monkeypatch.undo()
 
 
 def test_corrupt_vault_fails_closed(setup):

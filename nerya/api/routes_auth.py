@@ -21,7 +21,9 @@ def routes():
 
     def login(client, payload: dict[str, Any]):
         password = str((payload or {}).get("password") or "")
-        if not auth_mod.has_admin_password(client.config):
+        if not auth_mod.has_admin_password(client.config) and not auth_mod.verify_admin_password(
+            client.config, password
+        ):
             return {
                 "ok": False,
                 "error": "admin_password_not_configured",
@@ -45,6 +47,10 @@ def routes():
                 return {"ok": False, "error": "current_password_required"}
             if not auth_mod.verify_admin_password(client.config, current_password):
                 return {"ok": False, "error": "invalid_current_password"}
+        elif not auth_mod.verify_admin_password(client.config, current_password):
+            # Still on the demo bootstrap password: require it so a stale
+            # session cannot silently replace the credential.
+            return {"ok": False, "error": "invalid_current_password"}
         try:
             auth_mod.set_admin_password(client.config, new_password)
         except ValueError as exc:

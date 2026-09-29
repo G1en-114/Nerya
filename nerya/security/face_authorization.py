@@ -58,7 +58,16 @@ def _infer(image: str) -> dict:
     executable = os.environ.get("NERYA_FACE_PYTHON") or (
         str(local_python) if local_python.is_file() else sys.executable
     )
-    env = dict(os.environ, PYTHONPATH=str(root), OPENCV_IO_MAX_IMAGE_PIXELS="4000000")
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(root),
+        OPENCV_IO_MAX_IMAGE_PIXELS="4000000",
+        # Single-threaded BLAS keeps the ONNX sessions from over-committing
+        # memory on a box that is already tight; otherwise model loading can
+        # die with "OpenBLAS: Memory allocation still failed".
+        OPENBLAS_NUM_THREADS="1",
+        OMP_NUM_THREADS="1",
+    )
     if not _INFERENCE_LIMIT.acquire(blocking=False):
         raise FaceAuthorizationError("face_verification_busy")
     try:

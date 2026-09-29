@@ -1,7 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import type { ApprovalCard } from "../../lib/clientApi";
+import type { NodIntentProof } from "../../lib/nodIntent";
+import { NodIntentCapture } from "../face/NodIntentCapture";
 import {
   alert as alertDialog,
   confirm as confirmDialog,
@@ -303,11 +306,16 @@ export function ApprovalRequestCard({
 }: {
   event: Record<string, unknown>;
   card?: ApprovalCard;
-  onAction?: (callbackData: string) => void | Promise<void>;
+  onAction?: (
+    callbackData: string,
+    extras?: { nodIntentReceipt?: string },
+  ) => void | Promise<void>;
   busy?: boolean;
 }) {
   const t = useTranslations("approvals");
   const tCommon = useTranslations("common");
+  const [nodOpen, setNodOpen] = useState(false);
+  const [nodProof, setNodProof] = useState<NodIntentProof | null>(null);
   const approvalId = approvalIdFromEvent(event);
   if (!approvalId) return null;
   const prompt =
@@ -416,17 +424,24 @@ export function ApprovalRequestCard({
       });
       return;
     }
-    if (lower.startsWith("approve:") && isFinancialApproval && financialDetails) {
-      const confirmed = await confirmDialog({
-        title: financialApprovalTitle,
-        message: financialDetails,
-        okLabel: financialConfirmLabel,
-        cancelLabel: tCommon("cancel"),
-        tone: financialTone,
-      });
-      if (!confirmed) return;
+    let extras: { nodIntentReceipt?: string } | undefined;
+    if (lower.startsWith("approve:") && isFinancialApproval) {
+      // A held nod receipt rides along as interaction evidence; it is
+      // single-use and validated against the frozen request server-side.
+      extras = nodProof?.receipt ? { nodIntentReceipt: nodProof.receipt } : undefined;
+      setNodProof(null);
+      if (financialDetails) {
+        const confirmed = await confirmDialog({
+          title: financialApprovalTitle,
+          message: financialDetails,
+          okLabel: financialConfirmLabel,
+          cancelLabel: tCommon("cancel"),
+          tone: financialTone,
+        });
+        if (!confirmed) return;
+      }
     }
-    await onAction?.(callbackData);
+    await onAction?.(callbackData, extras);
   }
   return (
     <div className={`rounded-lg border px-3 py-2.5 space-y-2 ${statusTone}`}>
@@ -489,6 +504,29 @@ export function ApprovalRequestCard({
           {text}
         </pre>
       )}
+      {!resolved && isFinancialApproval ? (
+        <div className="space-y-1.5">
+          <button
+            type="button"
+            className="text-[11px] text-ink-300 underline underline-offset-4 hover:text-ink-100"
+            aria-expanded={nodOpen}
+            onClick={() => setNodOpen((prev) => !prev)}
+          >
+            {nodOpen
+              ? tCommon("close")
+              : t("nodIntentToggle")}
+          </button>
+          {nodOpen ? (
+            <NodIntentCapture
+              approvalId={approvalId}
+              busy={busy}
+              confirmed={Boolean(nodProof)}
+              onIntent={(proof) => setNodProof(proof)}
+              onReset={() => setNodProof(null)}
+            />
+          ) : null}
+        </div>
+      ) : null}
       {!resolved ? (
         <div className="flex flex-wrap items-center gap-2">
           {buttons.map((button) => {
