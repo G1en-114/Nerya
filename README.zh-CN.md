@@ -148,6 +148,42 @@ tests/             运行时回归测试
 .github/workflows/ 校验、桌面原生构建与版本发布
 ```
 
+## GWDC 2026 披露与证据
+
+按赛道规则，本节区分**赛前完成**与**赛中完成**的工作。
+
+**赛前已有：** 策略生成/回测流水线、证据库及其存储契约（`nerya/evidence/store.py`、`nerya/evidence/visual.py` 数据契约）、审批/风控闸门（`ApprovalGate`、`RiskGate`）、网关与账户面板、加密人脸录入登录、视觉证据存储与页面脚手架。
+
+**赛中完成：** 视觉证据工作台表面接线（路由/客户端/页面传输、侧边栏入口）——[PR #6](https://github.com/NeryaAI/Nerya/pull/6)、[PR #11](https://github.com/NeryaAI/Nerya/pull/11)；审批卡点头意向检测（连拍 → 绑定审批内容摘要的单次回执；由 `/approvals/callback` 消费；`RiskGate` 未动）——PR #6；演示初始密码（`1145141919810`，设置操作员密码后立即失效）——PR #6；本机访问判定修正与模型加载修复——PR #6；硬拒绝演示证据（`tests/test_hard_rejection_demo.py`）：触犯硬性上限的请求在任何审批卡出现前即被拒绝，已捕获的点头回执无法重新绑定到该请求，恢复时二次风控复核仍然拒绝——执行器对此类请求不可达；Kiln 用量证据导出器（`scripts/export_kiln_usage.py`）。
+
+**如实声明：** 点头检测只表达确认意向——不是身份核验、不是活体/防翻拍检测，从不绕过风控与审批闸门。人脸特征仅存本机，任何生物特征数据不出机器。
+
+### API 用量证明（两条硬性要求，均已一键化）
+
+**1. Kiln —— NPU LLM `gpt-oss-120b` 的 HTTP 调用。** Kiln 提供 OpenAI 兼容接口（`https://api.bricksum.com/v1`）。一条命令存入 `sk-bk-...` 密钥并把全部模型档位切到 Kiln，然后重跑演示流程，日志里即为真实 Kiln 调用：
+
+```bash
+python scripts/setup_gwdc_infra.py kiln --workspace <workspace-root> --api-key sk-bk-...
+# 重启 `nerya serve`，跑完演示流程后：
+python scripts/export_kiln_usage.py --workspace <workspace-root>
+```
+
+**2. 区块链 —— testnet 锚定与 `tx_hash`。** 生成 Sepolia 签名密钥入库，水龙头充值后，把持久化的风控决策（32 字节证据声明哈希）以自址交易锚定上链：
+
+```bash
+python scripts/setup_gwdc_infra.py chain-key --workspace <workspace-root>      # 输出待充值地址
+python scripts/setup_gwdc_infra.py chain-check --workspace <workspace-root>    # chainId + 余额探测
+python -m nerya.cli.app chain-evidence anchor --workspace <workspace-root>   --strategy-id <id> --session-id <id> --chain sepolia   --signer-ref vault://chain_audit_sepolia_team3
+python scripts/export_kiln_usage.py --workspace <workspace-root>               # tx 哈希在此浮出
+```
+
+将导出输出粘贴到下方，并为每行标注对应的演示流程。（Team 3：提交前填入 Kiln 调用数据与 tx 哈希。）
+
+### 演示说明
+
+- 全新安装使用初始密码 `1145141919810` 登录；在 设置 → 登录与访问 设置自己的密码后立即失效。为演示零配置有意提交——正式使用前务必修改。
+- 视觉证据演示样例在 `docs/demo-samples/`（正常 / 单位歧义 / 模糊截断）。
+
 ## 安全与许可
 
 实盘执行需要相应配置与授权，请勿绕过交易风险和审批检查。Vault 加密保护落盘凭据，不能阻止已被攻破的运行进程读取数据。备份工作区及加密密钥，不要将账户密钥、`.env` 文件或真实交易状态提交到 Git。

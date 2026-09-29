@@ -161,6 +161,44 @@ evaluate recognition thresholds and presentation-attack resistance before use.
 Models may download on first capture. For an isolated inference environment, set
 `NERYA_FACE_PYTHON` to a Python executable with `uniface[cpu]` installed.
 
+## GWDC 2026 disclosure and evidence
+
+Per the track rules, this section separates work built **before** the event from work built **during** it.
+
+**Pre-existing (built before the event):** strategy authoring/backtest pipeline, evidence vault and its store contracts (`nerya/evidence/store.py`, `nerya/evidence/visual.py` data contract), approval/risk gates (`ApprovalGate`, `RiskGate`), gateway and account surfaces, the encrypted face-enrollment login stack, and the visual-evidence store/page scaffold.
+
+**During the event:** the visual-evidence workbench surface wiring (route/client/page transport, sidebar entry) — [PR #6](https://github.com/NeryaAI/Nerya/pull/6), [PR #11](https://github.com/NeryaAI/Nerya/pull/11); nod-intent detection for approval cards (camera burst → single-use receipt bound to the exact approval content digest; consumed by `/approvals/callback`; `RiskGate` untouched) — PR #6; demo bootstrap password (`1145141919810`, active only until an operator sets their own password) — PR #6; local-access correction and model-loading fixes — PR #6; hard-rejection demo evidence (`tests/test_hard_rejection_demo.py`): a cap-violating request is rejected before any approval card exists, a captured nod receipt cannot be re-attached to it, and the resume-time re-check still refuses — the executor is unreachable for such a request; Kiln usage evidence exporter (`scripts/export_kiln_usage.py`).
+
+**Honest capability statement:** the nod detector expresses confirmation intent only — it is not identity verification, not liveness/anti-spoofing, and never bypasses risk or approval gates. Face features stay local; no biometric data leaves the machine.
+
+### Proof of API usage
+
+Two hard track requirements, both wired one-command:
+
+**1. Kiln — HTTP calls to the NPU LLM `gpt-oss-120b`.** Kiln exposes an OpenAI-compatible API (`https://api.bricksum.com/v1`). Store the `sk-bk-...` key and switch every LLM tier to Kiln in one command, then re-run the demo flows so the journals contain real Kiln calls:
+
+```bash
+python scripts/setup_gwdc_infra.py kiln --workspace <workspace-root> --api-key sk-bk-...
+# restart `nerya serve`, run the flows, then:
+python scripts/export_kiln_usage.py --workspace <workspace-root>
+```
+
+**2. Blockchain — testnet contract/decision anchoring with `tx_hash`.** Generate a Sepolia signer into the encrypted vault, fund it from a faucet, and anchor persisted risk decisions (32-byte evidence-claim hash, self-addressed tx on Sepolia):
+
+```bash
+python scripts/setup_gwdc_infra.py chain-key --workspace <workspace-root>      # prints address
+python scripts/setup_gwdc_infra.py chain-check --workspace <workspace-root>    # chainId + balance probe
+python -m nerya.cli.app chain-evidence anchor --workspace <workspace-root>   --strategy-id <id> --session-id <id> --chain sepolia   --signer-ref vault://chain_audit_sepolia_team3
+python scripts/export_kiln_usage.py --workspace <workspace-root>               # tx hashes surface here
+```
+
+Paste the exporter output below and annotate each row with the demo flow it backs. (Team 3: fill in Kiln call rows and tx hashes before submitting.)
+
+### Demo notes
+
+- A fresh install signs in with the bootstrap password `1145141919810`; setting an operator password in Settings → Login & access disables it immediately. It is committed on purpose for a zero-setup demo — change it before any real use.
+- Visual-evidence demo samples live in `docs/demo-samples/` (normal / unit-ambiguous / blurred-cropped).
+
 ## Security and licensing
 
 Live execution requires the corresponding configuration and authorization; do not bypass the trading risk and approval gates. Vault encryption protects stored credentials, not a compromised running process. Keep backups of your workspace and its encryption key, and never commit account secrets, `.env` files or live trading state.
