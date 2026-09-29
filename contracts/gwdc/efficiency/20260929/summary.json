@@ -1,0 +1,65 @@
+{
+  "flows": [
+    {
+      "flow_id": "explain_allowed",
+      "attempts": 3,
+      "completed": 1,
+      "unknown_usage_attempts": 0,
+      "known_input_tokens": 861,
+      "known_output_tokens": 1898,
+      "known_total_tokens": 2759,
+      "completed_attempt_tokens": 1161,
+      "energy_scenarios_j": {
+        "low": 198.41000000000003,
+        "base": 992.05,
+        "high": 1984.1
+      }
+    },
+    {
+      "flow_id": "explain_market_rejection",
+      "attempts": 3,
+      "completed": 1,
+      "unknown_usage_attempts": 0,
+      "known_input_tokens": 825,
+      "known_output_tokens": 1900,
+      "known_total_tokens": 2725,
+      "completed_attempt_tokens": 1151,
+      "energy_scenarios_j": {
+        "low": 198.25,
+        "base": 991.25,
+        "high": 1982.5
+      }
+    },
+    {
+      "flow_id": "explain_fee_rejection",
+      "attempts": 3,
+      "completed": 1,
+      "unknown_usage_attempts": 0,
+      "known_input_tokens": 834,
+      "known_output_tokens": 1798,
+      "known_total_tokens": 2632,
+      "completed_attempt_tokens": 1052,
+      "energy_scenarios_j": {
+        "low": 188.14000000000001,
+        "base": 940.7,
+        "high": 1881.4
+      }
+    }
+  ],
+  "energy_measured": false,
+  "energy_coefficients_j_per_token": {
+    "low": [
+      0.01,
+      0.1
+    ],
+    "base": [
+      0.05,
+      0.5
+    ],
+    "high": [
+      0.1,
+      1.0
+    ]
+  },
+  "all_flows_completed_with_reported_usage": true
+}

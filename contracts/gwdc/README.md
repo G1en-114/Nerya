@@ -69,8 +69,8 @@ still go through the required Kiln service and be linked to the demonstrated flo
 | At least one workflow transaction with matching hash/log | A paper demo produces evidence; the operator CLI anchors its summary and exports a matching `RunRecorded` receipt |
 | Explain blockchain use | Writes strategy provenance and a run digest; independently reads them back |
 | Changed user conditions | The local demo records seven cases, including changed market and fee-ceiling rejection; these are local paper results, not public-chain trading |
-| Actual Kiln calls with an allowed model in the selected workflow | `deepseek-v4.1-flash` is allowed per the newer notice reported by the operator; **actual workflow call evidence is not supplied by this deployment** |
-| Tokens by flow and measured/assumed energy | **Still requires actual Kiln workflow logs and an explicit energy methodology** |
+| Actual Kiln calls with an allowed model in the selected workflow | [Actual `deepseek-v4.1-flash` calls](efficiency/20260929/README.md) now explain three recorded outcomes in the evidence-inspection workflow; they did not generate the earlier trades |
+| Tokens by flow and measured/assumed energy | [Completed report](efficiency/20260929/README.md): API-reported input/output usage by flow, including truncated attempts, plus explicit illustrative energy coefficients and scope |
 | Human approval, monitoring and stopping (Challenge B) | **Not supplied by these registries**; the local demo uses test signers, not a demonstrated human wallet approval |
 
 Deploying contracts alone is insufficient to claim completion of GWDC. This is
@@ -78,3 +78,12 @@ the blockchain evidence component. The demo followed by the anchoring command
 is a reproducible operator workflow; it is not automatic anchoring from the
 agent runtime, nor a Kiln-powered end-to-end acceptance run. The existing
 signed-mandate demo and risk/approval gates remain separate from these contracts.
+
+The subsequent [Kiln evidence-inspection report](efficiency/20260929/README.md)
+adds actual model-generated explanations and per-flow efficiency evidence. Its
+token records are not covered by the earlier Sepolia commitment. Recompute the
+report without API calls:
+
+```powershell
+python -m scripts.gwdc_efficiency report --output contracts/gwdc/efficiency/20260929
+```

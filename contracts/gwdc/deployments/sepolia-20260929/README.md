@@ -55,3 +55,9 @@ Expected result: `verified: true`, `transactions: 4`. This checks the current pu
 ## Submission boundary
 
 This bundle supplies two contract deployments and a workflow-record commitment with a matching transaction hash and log. It does not by itself establish full GWDC acceptance. The operator reports a newer organizer notice allowing `deepseek-v4.1-flash`; model selection is therefore not treated as a blocker. Actual Kiln workflow calls using an allowed model, per-flow token/energy evidence, and any claimed human-approval controls must still be supplied. See [the acceptance table](../../README.md#competition-scope).
+
+Update: [the subsequent Kiln evidence-inspection report](../../efficiency/20260929/README.md)
+now supplies actual calls and per-flow token/energy-assumption evidence. Those
+calls explain these previously recorded outcomes; the earlier chain commitment
+does not cover the new model responses or usage logs. Human-approval evidence
+and a full competition acceptance walkthrough remain separate.
