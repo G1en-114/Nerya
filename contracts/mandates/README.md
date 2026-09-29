@@ -39,7 +39,66 @@ plan tampering; replay through the internal approval-resume path; revocation
 of an already anchored authorization. Every rejected submission checks the
 durable executor count before and after.
 
-## What is signed
+## Dashboard walkthrough
+
+The overview at `/dashboard` includes an **Agent Safety** entry above the
+account and market panels. `/dashboard/safety` presents recorded policy terms,
+selectable outcomes, executor counts and local-chain receipts in Chinese or
+English, following the interface language.
+
+The **Run safety check** controls now execute a fresh isolated local-chain and
+paper-account run through `POST /safety/demo/run` on the Python API. Choose a
+preset or edit the permitted/requested market, integer USD amounts (1–1000),
+policy limits and permission to open longs. The backend validates the inputs,
+creates fresh test keys and an isolated workspace, performs actual EVM calls
+and uses the existing paper execution gates. Test-owner signing is automated;
+these controls do not grant access to an existing account or human wallet.
+The revoke preset anchors an action, submits an owner revocation, then attempts
+execution. Replay/tamper presets include a successful baseline action first.
+
+Both run and status routes require `admin:ops` (or the existing local/owner
+wildcard). Only one job runs at a time per server, and request IDs prevent
+duplicate jobs after a lost response. The browser polls status and can recover
+the latest job after a page reload. Job metadata is held in memory (up to 20
+jobs); raw output stays under `.tmp/mandate-interactive/`. Restarting the API
+clears the in-memory job catalog. New jobs are never inferred from browser
+storage, and the API accepts no RPCs, paths, shell commands or account IDs.
+
+The API imports its runner and exporter from `nerya.security.mandate_demo`
+and `nerya.security.mandate_demo_export`. The repository `scripts/` files
+are CLI compatibility wrappers only: an installed `nerya serve` entry point
+does not necessarily include the repository root on its Python import path.
+Readiness checks now import the actual runner, rather than only checking
+whether Web3 and Anvil exist. The latest outcome appears directly below the
+run button; historical recordings are shown only when explicitly selected.
+
+Restart the Python backend once after installing these new routes. Keep the
+same workspace and ports as your existing service. The page reports missing
+dependencies or an unavailable API instead of fabricating results. Completed
+interactive results and separately published historical recordings have
+distinct selectors. Neither mode changes active trading permissions.
+
+Publish an existing isolated demo run:
+
+```powershell
+python -m scripts.mandate_dashboard --input .tmp/mandate-demo-presentation/evidence.json
+```
+
+Or publish automatically after a new run (use a new output directory):
+
+```powershell
+python -m scripts.mandate_demo --output .tmp/mandate-dashboard-run --publish-dashboard
+```
+
+Then click **Refresh recording**. The exporter writes an explicit public-field
+projection to `dashboard/public/mandates/demo.json`, which is ignored by Git.
+It does not copy raw reports, workspace files, RPC configuration, keys or Vault
+contents. The page offers this summary as a JSON download; the original signed
+envelopes and full evidence remain in the operator's run output directory.
+Without a published recording, the page shows setup instructions rather than
+inventing successful results. A recording is not independent proof of execution.
+
+## Signature payloads
 
 `nerya/security/mandates.py` defines the exact EIP-712 schemas. The EVM signature
 scheme is secp256k1 ECDSA, with low-s and v checks. The domain binds the protocol

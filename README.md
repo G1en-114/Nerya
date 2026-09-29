@@ -22,6 +22,8 @@ Your local Agent strategy workspace — research, build, backtest and review in 
 
 Describe your trading idea and its constraints. Nerya brings researchers, strategy authors and reviewers into the same workspace. Follow the tools as they run, inspect the evidence, open the strategy and backtest details, and decide what happens next.
 
+**GWDC declared function:** Nerya is an agent-finance evidence tool that registers a paper strategy and anchors its recorded outcomes on a testnet for independent inspection. See the [blockchain submission and acceptance scope](contracts/gwdc/README.md).
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="branding/screenshots/1.0.0-beta/strategy-en-dark.gif" />
   <img src="branding/screenshots/1.0.0-beta/strategy-en-light.gif" alt="Nerya strategy conversation and workflow, English" width="100%" />

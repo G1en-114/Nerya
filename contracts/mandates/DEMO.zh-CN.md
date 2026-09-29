@@ -25,6 +25,8 @@
 
 ```powershell
 forge build --root contracts/mandates
+
+forge test --root contracts/mandates --offline
 python -m scripts.mandate_demo --output .tmp/mandate-demo-presentation
 ```
 
@@ -35,6 +37,53 @@ python -m scripts.mandate_demo --output .tmp/mandate-demo-presentation
 钱包签署入口：<http://127.0.0.1:3001/mandates/index.html>。钱包请求和 Agent 签名命令参见 [实现说明](README.md)。
 
 ## 3. 跟评委讲的 90 秒版本
+
+### 新增网页场景：连续预算与执行后对账
+
+入口：Dashboard → Agent Safety → 打开安全控制台，或直接打开
+<http://127.0.0.1:3001/dashboard/safety>。“现场操作”顶部有两个独立场景按钮，
+选择后点击“运行安全检查”。每次运行自动完成该场景的全部步骤，结果区展开实际证据。
+原“完整 7 案例”仍只运行原七案例，两个新场景单独运行。
+
+代码更新后，已启动的 Python 后端需要重新启动才能加载新场景；前端开发服务器通常会自动刷新。
+
+**连续预算**：同一 Policy 总预算 220 USD、单笔上限 110 USD。依次请求名义金额
+100 / 99 / 98 USD，每笔签署 ceiling 都是 101 USD。不同名义金额避免触发既有重复意图检查，
+不关闭 RiskGate 的去重保护。前两笔各占用 101，累计 202、剩余 18；第三笔合约拒绝，
+`session_budget_exceeded` 来自实际合约调用。本次授权交易回退，运行时因
+`action_not_anchored` 再次拒绝。页面分别展示两层原因，不把链上原因伪装成运行时预算拒绝。
+
+授权占用按 ceiling 计，实际模拟成交成本来自 fills 表，两者分别展示。余额是单份授权余额，
+不是钱包现金。每一步同时读取链上 spent、本地 claims、订单和成交数量。
+
+**执行后对账**：先正常模拟成交并确认基线对账无差异，然后只在新建隔离工作区的
+position 记录中注入 +0.25 BTC，调用 `reconcile_local` 检出 `position_fill_drift`。
+原始检测等级是 warning。演示专用的确定性规则遇到此类差异后，将整个隔离工作区的
+`runtime.kill_switch` 持久化为 true，不改变通用对账模块的分级策略。
+
+重新加载配置后，已获得链上授权的下一笔请求被原有 RiskGate 拒绝；再次加载并重试也被拒绝。
+报告记录两次尝试均无新增执行器、订单或成交。现有执行边界也检查停止开关。
+这是明确注入的测试故障，不代表检测到真实市场异常，也不声称覆盖所有 Agent 错误行为。
+
+本次场景结束时保持停止，不提供自动恢复或模拟人工批准。已经成交的交易不会撤回。
+重新点击运行会建立另一个隔离环境，不是解除旧环境的停止，也不是恢复旧授权。
+账户级停止、保留减仓通道及人工处理后恢复的完整产品流程仍属后续工作。
+
+可对评委说：
+
+> “同一份签名授权会累计占用额度，拆成多笔也不能越过总预算。执行之后，我们用已有对账模块
+> 检查成交与仓位是否一致。本次演示明确注入一条仓位差异，触发隔离工作区的停止规则，
+> 并验证下一笔已授权请求及其重试都没有新增成交。”
+
+也可单独生成报告（每次使用新的目录）：
+
+```powershell
+python -m scripts.mandate_demo --scenario budget --output .tmp/budget-presentation
+python -m scripts.mandate_demo --scenario reconciliation --output .tmp/reconciliation-presentation
+```
+
+网页“下载本次展示数据 JSON”包含脱敏预算步骤、对账差异、报告编号与停止结果；原始
+evidence.json 位于对应运行输出目录，保留签名与更完整的记录。
 
 ### 开场：接住评委的问题
 

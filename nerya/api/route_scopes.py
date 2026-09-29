@@ -107,6 +107,7 @@ class RouteRule:
 # default to ``admin:ops`` if no rule matches them.
 
 _RULES: tuple[RouteRule, ...] = (
+    RouteRule(None, "/safety/demo/", "admin:ops", "operator-only isolated local-chain/paper demo"),
     RouteRule("GET", "/strategies/runtime/tuning/history", "read:sessions", "recorded strategy review invocations"),
     RouteRule("GET", "/strategies/runtime/tuning/record", "read:sessions", "recorded review inputs, outputs and conversation"),
     RouteRule("POST", "/strategies/runtime/service/start", "admin:ops", "start a reviewed long-lived strategy; may submit orders within its policy"),
