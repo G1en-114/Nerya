@@ -8,6 +8,7 @@ import styles from "./safety.module.css";
 import { MandatePlayground } from "../../../components/MandatePlayground";
 import { MandateScenarioEvidence } from "../../../components/MandateScenarioEvidence";
 import type { MandateDemo } from "../../../lib/mandateDemo";
+import { NodIntentDemoCard } from "../../../components/NodIntentDemoCard";
 
 export default function SafetyDemo() {
   const locale = useLocale();
@@ -44,6 +45,7 @@ export default function SafetyDemo() {
       </div>
     </header>
     <MandatePlayground onResult={onResult} />
+    <NodIntentDemoCard />
     <div id="safety-results" className={styles.actions} role="group" aria-label={t("结果来源", "Result source")}>
       <button className={styles.button} disabled={!current} aria-pressed={!showHistory && !!current} onClick={() => { setShowHistory(false); select(0); }}>{t("本次运行结果", "Current run results")}</button>
       <button className={styles.button} aria-pressed={showHistory} onClick={() => { setShowHistory(true); select(0); }}>{t("历史演示记录", "Historical recording")}</button>
