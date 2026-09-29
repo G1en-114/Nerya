@@ -41,6 +41,9 @@ export function useMandateDemo() {
 }
 
 const labels: Record<string, [string, string, string, string]> = {
+  invalid_budget: ["授权额度配置无效", "Invalid policy budget", "累计预算不能小于单笔上限，后端拒绝这份授权。", "The policy budget is below its per-action ceiling; the backend rejects the policy."],
+  action_cost_exceeded: ["动作超过单笔上限", "Action exceeds limit", "Agent 签署的动作成本超过用户授权的单笔额度。", "The signed action ceiling exceeds the user's per-action limit."],
+  session_budget_exceeded: ["累计预算不足", "Policy budget exceeded", "本次动作会使同一 Policy 的累计用量超限。", "This action would exceed the cumulative budget of the same policy."],
   authorized: ["授权范围内执行", "Within the signed policy", "签名和链上授权通过检查，完成模拟成交。", "The signed, anchored action completed paper execution."],
   market_not_allowed: ["市场越界", "Market outside scope", "允许市场改变后，原 BTC 请求不再被允许。", "The BTC request stops after the user changes the permitted market."],
   resolved_cost_exceeds_signed_ceiling: ["费用后超限", "Costs exceed the ceiling", "计入模拟手续费与滑点后，成本超过签署上限。", "Simulated fees and slippage push the cost above the signed ceiling."],

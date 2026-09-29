@@ -1,4 +1,20 @@
 .root { display: flex; flex-direction: column; gap: 24px; color: var(--text-base); min-width: 0; }
+.playground { border-color: rgb(var(--brand-readable) / .4) !important; }
+.stepLabel { margin: 14px 0 10px; font-weight: 500; }
+.runResult { border: 1px solid rgb(var(--brand-readable) / .25); border-radius: 10px; padding: 20px; margin: 20px 0; background: rgb(var(--brand-readable) / .04); }
+.runResult h3 { font-size: 21px; font-weight: 600; margin: 10px 0; }
+.runResult .button { margin-top: 12px; }
+.presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.presets [aria-pressed=true], .actions [aria-pressed=true] { background: rgb(var(--brand-readable) / .13); border-color: rgb(var(--brand-readable) / .5); }
+.formGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.formGrid label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-muted); }
+.formGrid input, .formGrid select { min-height: 42px; width: 100%; min-width: 0; border: 1px solid var(--line-hi); background: var(--bg); color: var(--text-base); border-radius: 7px; padding: 8px 10px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 18px 0; }
+.presetHint { margin: 0 0 20px; }
+.liveStatus { margin: 16px 0; font-size: 12px; }
+.liveStatus code { font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
+.primary:disabled { opacity: .5; cursor: default; }
+@media (max-width: 700px) { .formGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .entry { display: flex; gap: 20px; align-items: center; padding: 24px; border: 1px solid rgb(var(--brand-readable) / .3); background: linear-gradient(110deg, rgb(var(--brand-readable) / .08), var(--card) 72%); border-radius: 14px; }
 .entryIcon { display: grid; place-items: center; flex-shrink: 0; width: 54px; height: 62px; color: rgb(var(--brand-readable)); }
 .entryBody { flex: 1; min-width: 0; }

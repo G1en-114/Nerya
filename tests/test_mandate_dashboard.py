@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from scripts.mandate_dashboard import publish, snapshot
+from nerya.security.mandate_demo_export import publish, snapshot
 
 pytestmark = pytest.mark.smoke
 

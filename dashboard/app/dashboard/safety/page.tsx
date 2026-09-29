@@ -1,17 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useLocale } from "next-intl";
 import { caseCopy, useMandateDemo } from "../../../lib/mandateDemo";
 import styles from "./safety.module.css";
+import { MandatePlayground } from "../../../components/MandatePlayground";
+import type { MandateDemo } from "../../../lib/mandateDemo";
 
 export default function SafetyDemo() {
   const locale = useLocale();
   const zh = locale.startsWith("zh");
   const t = (cn: string, en: string) => zh ? cn : en;
-  const { data, state, refresh } = useMandateDemo();
+  const { data: recording, state, refresh } = useMandateDemo();
+  const [current, setCurrent] = useState<MandateDemo | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const data = showHistory ? recording : current;
   const [selected, select] = useState(0);
+  const onResult = useCallback((result: MandateDemo) => { setCurrent(result); setShowHistory(false); select(0); }, []);
   const active = data?.cases[Math.min(selected, data.cases.length - 1)];
   const detail = active ? caseCopy(active, zh) : null;
   const money = (value: string) => new Intl.NumberFormat(locale, { style: "currency", currency: "USD", maximumFractionDigits: 6 }).format(Number(value) / 1_000_000);
@@ -29,24 +35,32 @@ export default function SafetyDemo() {
       <h1>Agent Safety<span>{t("让授权有边界，让执行有证据。", "Bounded authority. Inspectable execution.")}</span></h1>
       <p>{t("用户签署范围，Agent 签署动作，后端在执行前独立检查。停止越界动作，也是正确结果。", "The user signs a policy. The agent signs an action. Independent checks guard execution. Stopping is a correct outcome.")}</p>
       <div className={styles.actions}>
-        <span className={styles.badge}>{t("本地 Anvil · Paper / Mock · 历史记录", "Local Anvil · Paper / Mock · Recorded run")}</span>
+        <span className={styles.badge}>{t("本地 Anvil · Paper / Mock · 可交互演示", "Local Anvil · Paper / Mock · Interactive demo")}</span>
         <button className={styles.button} onClick={refresh} disabled={state === "loading"}>{t("刷新记录", "Refresh recording")}</button>
         <a href="/mandates/index.html" className={styles.button} target="_blank" rel="noreferrer">{t("钱包签署工具 ↗", "Wallet signing tool ↗")}</a>
       </div>
     </header>
+    <MandatePlayground onResult={onResult} />
+    <div id="safety-results" className={styles.actions} role="group" aria-label={t("结果来源", "Result source")}>
+      <button className={styles.button} disabled={!current} aria-pressed={!showHistory && !!current} onClick={() => { setShowHistory(false); select(0); }}>{t("本次运行结果", "Current run results")}</button>
+      <button className={styles.button} aria-pressed={showHistory} onClick={() => { setShowHistory(true); select(0); }}>{t("历史演示记录", "Historical recording")}</button>
+    </div>
     <div className={styles.flow} aria-label={t("授权与执行流程", "Authorization and execution flow")}>
       {[t("用户 Policy 签名", "Signed user policy"), t("Agent Action 签名", "Signed agent action"), t("链上授权登记", "On-chain authorization"), t("运行时门禁", "Runtime gates"), t("结果与证据", "Outcome & evidence")].map((label, i) => <div key={label}><span>0{i + 1}</span>{label}</div>)}
     </div>
-    {state === "loading" && <p role="status" className={styles.notice}>{t("正在读取演示记录…", "Loading demo recording…")}</p>}
-    {(state === "missing" || state === "error") && <section className={styles.panel} role="status">
+    {!data && !showHistory && <p className={styles.notice}>{t("运行后，实际结果会显示在操作区下方；历史演示记录需单独点击查看。", "Run a check to see its actual outcome below the controls. Historical recordings are available separately.")}</p>}
+    {showHistory && !data && state === "loading" && <p role="status" className={styles.notice}>{t("正在读取演示记录…", "Loading demo recording…")}</p>}
+    {showHistory && !data && (state === "missing" || state === "error") && <section className={styles.panel} role="status">
       <h2>{state === "missing" ? t("还没有发布演示记录", "No published recording yet") : t("记录暂时无法读取", "Recording unavailable")}</h2>
-      <p>{t("在项目根目录运行以下命令，完成后点击“刷新记录”。使用一个新的输出目录。", "Run the command below from the repository root, using a new output directory, then refresh this page.")}</p>
+      <p>{t("可以直接使用上方操作区运行安全检查。若要另外发布历史记录，可展开下面的导入说明。", "Use the controls above to run a safety check. To publish a separate historical recording, expand the import instructions below.")}</p>
+      <details><summary>{t("历史记录导入说明", "Historical recording import")}</summary>
       <pre>python -m scripts.mandate_demo --output .tmp/mandate-dashboard-run --publish-dashboard</pre>
       <p>{t("已有 evidence.json 也可发布：", "To publish an existing evidence.json:")}</p>
       <pre>python -m scripts.mandate_dashboard --input .tmp/mandate-demo-presentation/evidence.json</pre>
+      </details>
     </section>}
     {data && active && detail && <>
-      <div className={styles.runMeta}><span>{t("记录时间", "Recorded")}: {date(data.recordedAt)}</span><code>Run {data.runId}</code></div>
+      <div className={styles.runMeta}><span>{!showHistory && current ? t("本次运行", "Current run") : t("历史记录", "Historical recording")} · {date(data.recordedAt)}</span><code>Run {data.runId}</code></div>
       <dl className={styles.stats}>
         <div><dt>{t("案例总数", "Recorded cases")}</dt><dd>{data.cases.length}</dd></div>
         <div><dt>{t("模拟成交", "Paper fills")}</dt><dd>{data.cases.filter(c => c.status === "filled").length}</dd></div>

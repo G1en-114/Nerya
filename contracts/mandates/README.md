@@ -44,8 +44,39 @@ durable executor count before and after.
 The overview at `/dashboard` includes an **Agent Safety** entry above the
 account and market panels. `/dashboard/safety` presents recorded policy terms,
 selectable outcomes, executor counts and local-chain receipts in Chinese or
-English, following the interface language. It is a read-only recording viewer,
-not a control for submitting trades or changing active permissions.
+English, following the interface language.
+
+The **Run safety check** controls now execute a fresh isolated local-chain and
+paper-account run through `POST /safety/demo/run` on the Python API. Choose a
+preset or edit the permitted/requested market, integer USD amounts (1–1000),
+policy limits and permission to open longs. The backend validates the inputs,
+creates fresh test keys and an isolated workspace, performs actual EVM calls
+and uses the existing paper execution gates. Test-owner signing is automated;
+these controls do not grant access to an existing account or human wallet.
+The revoke preset anchors an action, submits an owner revocation, then attempts
+execution. Replay/tamper presets include a successful baseline action first.
+
+Both run and status routes require `admin:ops` (or the existing local/owner
+wildcard). Only one job runs at a time per server, and request IDs prevent
+duplicate jobs after a lost response. The browser polls status and can recover
+the latest job after a page reload. Job metadata is held in memory (up to 20
+jobs); raw output stays under `.tmp/mandate-interactive/`. Restarting the API
+clears the in-memory job catalog. New jobs are never inferred from browser
+storage, and the API accepts no RPCs, paths, shell commands or account IDs.
+
+The API imports its runner and exporter from `nerya.security.mandate_demo`
+and `nerya.security.mandate_demo_export`. The repository `scripts/` files
+are CLI compatibility wrappers only: an installed `nerya serve` entry point
+does not necessarily include the repository root on its Python import path.
+Readiness checks now import the actual runner, rather than only checking
+whether Web3 and Anvil exist. The latest outcome appears directly below the
+run button; historical recordings are shown only when explicitly selected.
+
+Restart the Python backend once after installing these new routes. Keep the
+same workspace and ports as your existing service. The page reports missing
+dependencies or an unavailable API instead of fabricating results. Completed
+interactive results and separately published historical recordings have
+distinct selectors. Neither mode changes active trading permissions.
 
 Publish an existing isolated demo run:
 
