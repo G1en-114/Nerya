@@ -33,7 +33,9 @@ export default function SafetyDemo() {
     <header className={styles.hero}>
       <div className={styles.eyebrow}>WAYAGENT FX / NERYA AGENT</div>
       <h1>Agent Safety<span>{t("让授权有边界，让执行有证据。", "Bounded authority. Inspectable execution.")}</span></h1>
+      <div className={styles.designReference}>{t("设计参考：Google AP2 · Intent Signing", "Inspired by Google AP2 · Intent Signing")}</div>
       <p>{t("用户签署范围，Agent 签署动作，后端在执行前独立检查。停止越界动作，也是正确结果。", "The user signs a policy. The agent signs an action. Independent checks guard execution. Stopping is a correct outcome.")}</p>
+      <div className={styles.referenceNote}>{t("我们借鉴 Google AP2（Agent Payments Protocol）的意图签署模式，以 EIP-712 将用户 Policy 与 Agent Action 绑定，再由运行时检查执行边界。当前为 Nerya 自定义授权实现，尚未验证 AP2 协议兼容性。", "We draw on the intent-signing pattern of Google AP2 (Agent Payments Protocol), binding a user policy to an agent action with EIP-712 and enforcing boundaries at runtime. This is Nerya's own authorization implementation; AP2 protocol compatibility has not been verified.")}</div>
       <div className={styles.actions}>
         <span className={styles.badge}>{t("本地 Anvil · Paper / Mock · 可交互演示", "Local Anvil · Paper / Mock · Interactive demo")}</span>
         <button className={styles.button} onClick={refresh} disabled={state === "loading"}>{t("刷新记录", "Refresh recording")}</button>

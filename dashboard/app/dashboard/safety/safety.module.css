@@ -25,6 +25,8 @@
 .tags { margin-top: 12px; font-size: 11px; color: var(--text-muted); }
 .tags span + span { border-left: 1px solid var(--line-hi); padding-left: 10px; }
 .eyebrow { color: rgb(var(--brand-readable)); font-size: 10px; font-weight: 600; letter-spacing: .14em; line-height: 1.8; }
+.designReference { display: inline-block; margin: 5px 0 10px; padding: 5px 9px; border: 1px solid rgb(var(--brand-readable) / .25); border-radius: 5px; background: rgb(var(--brand-readable) / .08); color: rgb(var(--brand-readable)); font-size: 12px; font-weight: 500; line-height: 1.6; }
+.referenceNote { max-width: 850px; color: var(--text-muted); font-size: 12px; line-height: 1.8; margin: -8px 0 20px; }
 .back { color: var(--text-muted); font-size: 12px; align-self: flex-start; }
 .back:hover { color: var(--text-base); }
 .hero { padding: 16px 0 0; }

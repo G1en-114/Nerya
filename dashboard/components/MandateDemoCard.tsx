@@ -13,7 +13,8 @@ export function MandateDemoCard() {
     <div className={styles.entryBody}>
       <div className={styles.eyebrow}>SECURITY · CONSTRAINTS · EVIDENCE</div>
       <h2>Agent Safety <span>{zh ? "授权与安全边界" : "Signed authorization & boundaries"}</span></h2>
-      <p>{zh ? "设定市场与额度，点击运行，亲自验证哪些动作会被拦下。" : "Set the market and limits, run a check, and see which actions are stopped."}</p>
+      <div className={styles.designReference}>{zh ? "设计参考：Google AP2 · Intent Signing" : "Inspired by Google AP2 · Intent Signing"}</div>
+      <p>{zh ? "参考 Google AP2 的意图签署模式：签署意图 → 检查授权边界 → 执行并留证。谁授权、哪里停止、如何证明，一次演示看清楚。" : "Inspired by Google AP2's intent-signing pattern: sign intent → check authorization boundaries → execute and retain evidence. See who authorized it, where it stops, and why."}</p>
       <div className={styles.tags}><span>{zh ? "本地链 · 模拟交易 · 历史记录" : "Local chain · Paper trading · Recorded run"}</span>
         {data ? <span>{data.cases.length} {zh ? "个案例" : "cases"} · {data.cases.filter(c => c.status === "rejected").length} {zh ? "个拒绝" : "stopped"}</span> : <span>{state === "loading" ? (zh ? "正在读取记录…" : "Loading recording…") : (zh ? "暂无可用演示记录" : "No recording available")}</span>}
       </div>
